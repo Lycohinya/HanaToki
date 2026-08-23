@@ -189,6 +189,33 @@ class PropController(private val plugin: Plugin) {
             }
         }
 
+        override fun poseQuaternion(
+            propId: String,
+            tx: Float,
+            ty: Float,
+            tz: Float,
+            qx: Float,
+            qy: Float,
+            qz: Float,
+            qw: Float,
+            scale: Float,
+            interpolationTicks: Int,
+        ): CompletableFuture<Void> {
+            val entity = props[key(sessionId, propId)] ?: return CompletableFuture.completedFuture(null)
+            return WorldOp.dispatch(plugin, entity) { e ->
+                val d = e as? Display ?: return@dispatch
+                if (!d.isValid) return@dispatch
+                d.interpolationDelay = 0
+                d.interpolationDuration = interpolationTicks.coerceAtLeast(0)
+                d.transformation = Transformation(
+                    Vector3f(tx, ty, tz),
+                    org.joml.Quaternionf(qx, qy, qz, qw),
+                    Vector3f(scale, scale, scale),
+                    org.joml.Quaternionf(),
+                )
+            }
+        }
+
         override fun moveTo(propId: String, location: Location): CompletableFuture<Void> {
             val entity = props[key(sessionId, propId)] ?: return CompletableFuture.completedFuture(null)
             // 位移一律走實體自己的 EntityScheduler(ARCH §5.1④);Folia 上 `teleport` 是無條件

@@ -105,6 +105,29 @@ interface PropHandle {
         interpolationTicks: Int,
     ): CompletableFuture<Void>
 
+    /**
+     * 同 [pose],但旋轉直接吃**四元數的四個分量**。
+     *
+     * 存在理由:骨架是**階層**的(手臂掛在軀幹上、刀掛在手上),父節點的旋轉要累加到子節點。
+     * 累加只有用四元數才不會有萬向鎖與順序歧義,而把累加完的結果拆回 pitch/yaw/roll 再讓引擎
+     * 組回去是多此一舉、還會掉精度。
+     *
+     * 簽章仍然是 primitive-only(八個 Float + Int),過 `tools/check-cross-plugin-kotlin.py`。
+     * 內容層自己用 joml 算(它本來就在 Bukkit 的 classpath 上),這裡只負責送出去。
+     */
+    fun poseQuaternion(
+        propId: String,
+        tx: Float,
+        ty: Float,
+        tz: Float,
+        qx: Float,
+        qy: Float,
+        qz: Float,
+        qw: Float,
+        scale: Float,
+        interpolationTicks: Int,
+    ): CompletableFuture<Void>
+
     /** 把擺設移到新位置(跟隨會動的 actor 用)。找不到就是 no-op。 */
     fun moveTo(propId: String, location: Location): CompletableFuture<Void>
 
