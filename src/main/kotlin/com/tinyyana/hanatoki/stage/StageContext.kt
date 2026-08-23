@@ -1,6 +1,7 @@
 package com.tinyyana.hanatoki.stage
 
 import com.tinyyana.hanatoki.actor.ActorHandle
+import com.tinyyana.hanatoki.prop.PropHandle
 import org.bukkit.Location
 import org.bukkit.Particle
 import org.bukkit.Sound
@@ -104,6 +105,28 @@ interface StageContext {
     fun damageMembersWithin(location: Location, radius: Double, amount: Double)
 
     /**
+     * 同上,但指定傷害類型([org.bukkit.damage.DamageType] 的 namespaced key,例如
+     * `"minecraft:magic"`)。
+     *
+     * ## 為什麼需要這個
+     *
+     * 「一招打幾點」對不同裝備的玩家意義天差地遠:同一個 raw damage,裸裝玩家扣滿,
+     * 保護 IV 獄髓全套的玩家幾乎不掉血。只用一種傷害管道的話,數值調到能威脅頂裝玩家時,
+     * 中裝玩家會被秒殺;調到中裝玩家能玩時,頂裝玩家站著不動也打不死——2026-08-23 真人
+     * 驗收回報「幾乎沒有生存壓力」就是後者。內容層可以把一招拆成「吃護甲的一份 + 不吃
+     * 護甲的一份」來壓縮這個落差。
+     *
+     * ⚠ **哪些傷害類型實際上會繞過護甲/附魔,Paper 的 JavaDoc 完全沒有寫**(2026-08-24 查證
+     * `jd.papermc.io/paper/26.2/org/bukkit/damage/DamageType.html`,只有 `getDamageScaling`/
+     * `getDamageEffect`/`getExhaustion` 三個屬性,沒有減傷語意)。而且正式服跑的是 Lecithin
+     * (Folia 分支),不保證跟 Paper 一致。**內容層要用哪個類型、數值定多少,一律以 L4 實測
+     * 為準**,不要照抄任何公式推導。
+     *
+     * key 解析失敗時退回沒有類型的 [damageMembersWithin](記警告),不讓一個打錯的字串把招式吃掉。
+     */
+    fun damageMembersWithin(location: Location, radius: Double, amount: Double, damageTypeKey: String)
+
+    /**
      * ARCH §2「Trigger:進入區域」的原語:回傳 [location] 半徑 [radius] 內的在場成員。
      *
      * 與 [damageMembersWithin] 同一條安全性理由——距離判定在每位玩家自己的 EntityScheduler
@@ -111,6 +134,25 @@ interface StageContext {
      * 哪條執行緒**,要碰 [state]/[transition]/[resolve] 之前一律先 [submit]。
      */
     fun membersWithin(location: Location, radius: Double): CompletableFuture<List<UUID>>
+
+    /**
+     * 從 [location] 指向**最近的在場成員**的水平方向,長度正規化成 1(回傳 `[dx, dz, distance]`)。
+     * 場上沒有人時回傳空陣列。
+     *
+     * ## 為什麼需要這個
+     *
+     * 招式判定不從 anchor region 讀玩家座標是硬規則(跨 region 讀,ARCH §5.1 修正過好幾次的
+     * 同一類錯誤)。但「攻擊完全不朝向玩家」在真人手上讀起來不是「這招好背」,而是「這招壞掉了」
+     * ——2026-08-24 回饋:「鎖敵好像有點怪,BOSS 居合居然不會朝著我」。
+     *
+     * 折衷:方向由**玩家自己的 EntityScheduler** 算出來(讀的是他自己 region 的座標),
+     * 內容層拿到方向之後可以自己**吸附到有限個固定方位**——這樣既真的朝著玩家,線路又仍然是
+     * 可以背起來的那幾條,兩邊都不放棄。
+     *
+     * 與 [membersWithin] 同一條非同步警語:future 完成時不保證在哪條執行緒,要碰
+     * [state]/[transition]/[resolve] 之前一律先 [submit]。
+     */
+    fun nearestMemberDirection(location: Location): CompletableFuture<DoubleArray>
 
     /** ARCH §5.1②:切換 stage(內部會呼叫舊 stage 的 onExit、新 stage 的 onEnter)。 */
     fun transition(stageId: String)
@@ -135,6 +177,33 @@ interface StageContext {
 
     /** actor/ 模組:取得這個 instance 的演出用 NPC 操作面(ARCH §2「Actor」)。 */
     fun actors(): ActorHandle
+
+    /** prop/ 模組:場地擺設(自訂造型的顯示實體,見 [PropHandle] 的 KDoc 為何不用方塊)。 */
+    fun props(): PropHandle
+
+    /**
+     * 畫面最上方那條 boss bar。整場都看得到,適合放「這一局還剩多久」與「Boss 剩多少血」
+     * ——這兩件事用動作列會被招式預告一直蓋掉,用聊天欄會洗版(2026-08-24 真人回饋:
+     * 「限時 300 秒,玩家沒看到計時的地方」)。
+     *
+     * @param text MiniMessage 原文(**不是** message key——bar 上要放的通常是即時算出來的
+     *   剩餘時間,不是固定字串)
+     * @param progress 0.0–1.0
+     * @param colorName `net.kyori.adventure.bossbar.BossBar.Color` 的常數名,例如 `"RED"`
+     */
+    fun bossBar(text: String, progress: Double, colorName: String)
+
+    /**
+     * 同上,但指定 bar 的樣式。[overlayName] 是
+     * `net.kyori.adventure.bossbar.BossBar.Overlay` 的常數名——`"PROGRESS"`(實心,預設)或
+     * `"NOTCHED_6/10/12/20"`(分段)。蒼櫻現況的 Boss 條是分成十段的,遷移要對得上。
+     */
+    fun bossBar(text: String, progress: Double, colorName: String, overlayName: String)
+
+    fun hideBossBar()
+
+    /** 這一局的 session 時限還剩幾秒(0 = 已到期或查不到)。 */
+    fun sessionRemainingSeconds(): Long
 
     fun log(message: String)
 

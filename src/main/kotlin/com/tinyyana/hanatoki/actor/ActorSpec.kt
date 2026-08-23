@@ -17,6 +17,39 @@ import org.bukkit.inventory.ItemStack
  */
 class ActorSpec {
     /**
+     * 載體實體型別([org.bukkit.entity.EntityType] 的常數名)。預設 `"MANNEQUIN"` = 原本唯一的
+     * 選項,既有內容零影響。
+     *
+     * ## 為什麼放寬(2026-08-24,第二個真實案例逼出來的)
+     *
+     * 刀塚的少女是站樁演出型 Boss,`Mannequin` 剛好。蒼櫻的樹靈不是:它是一隻**有 AI、會追著
+     * 玩家跑、被牽引在競技場裡**的原版 `Ravager`,那正是那一關的手感來源。與其為第二種 Boss
+     * 另開一套控制器,不如把 actor 的載體變成一個欄位——生成/消失/換裝/名牌/血量/受傷/死亡
+     * 這些操作對兩者是同一件事(ARCH §12「先有案例再抽象」:現在有兩個案例了)。
+     *
+     * 只有 `Mannequin` 才有的欄位([immovable]、[skinTexture]、描述行)對其他型別自動略過。
+     */
+    var entityType: String = "MANNEQUIN"
+
+    /**
+     * 是否啟用實體自己的 AI。預設 false = 演出用站樁 actor(既有行為)。
+     * 有 AI 的 Boss(蒼櫻樹靈)設 true——牠的移動與索敵就是原版怪物邏輯,不是自製尋路。
+     */
+    var ai: Boolean = false
+
+    /** 是否與玩家碰撞。預設 false(演出 actor 不擋路)。 */
+    var collidable: Boolean = false
+
+    /** 發光輪廓(隔著地形也看得到 Boss 在哪)。預設 false。 */
+    var glowing: Boolean = false
+
+    /**
+     * 是否在玩家走遠時被自動清除。null(預設)= 不動實體自己的預設值。
+     * 常駐副本的 Boss 要設 false:競技場很大,玩家繞到外圈時 Boss 不該憑空消失。
+     */
+    var removeWhenFarAway: Boolean? = null
+
+    /**
      * 玩家皮膚的 `textures` property 值(base64)。null = 用 `Mannequin.defaultProfile()`。
      * [skinSignature] 是 Mojang 簽章,離線取得的皮膚通常沒有——**能不能不帶簽章正常顯示**
      * 屬於未實測事實,由內容層 config 提供、L4 實測後回寫文件,引擎這端不做任何假設。

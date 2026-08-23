@@ -8,6 +8,8 @@ session:
   no-slot: "<red>{dungeon} 目前客滿或不存在,稍後再試</red>"
   teleport-failed: "<red>傳送失敗,已從這一局移除</red>"
   reconnected: "<green>已重連回 {dungeon}</green>"
+  # 上線時人還在副本世界、但那一局早就結束了(離線太久/伺服器重啟)。不是錯誤,不用紅字嚇人。
+  recovered: "<gray>上一趟花期異常已經結束,先把你送回原本的地方</gray>"
 puzzle:
   entry: "<gray>一間小祠。三座花燈,一面壁畫——順序藏在畫裡。</gray>"
   mural-hint: "<yellow>壁畫暗示:先中,再左,最後右。</yellow>"

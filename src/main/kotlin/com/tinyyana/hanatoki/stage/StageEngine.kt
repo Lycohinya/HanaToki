@@ -7,6 +7,7 @@ import com.tinyyana.hanatoki.encounter.EncounterController
 import com.tinyyana.hanatoki.folia.InstanceDispatch
 import com.tinyyana.hanatoki.folia.PlayerOp
 import com.tinyyana.hanatoki.folia.WorldOp
+import com.tinyyana.hanatoki.prop.PropHandle
 import io.papermc.paper.threadedregions.scheduler.ScheduledTask
 import net.kyori.adventure.text.Component
 import org.bukkit.Location
@@ -63,6 +64,8 @@ class StageEngine(private val core: HanaTokiCore) {
         cancelScheduled(sessionId)
         encounters.despawnAllForSession(sessionId)
         core.actorController.despawnAllForSession(sessionId)
+        core.propController.despawnAllForSession(sessionId)
+        core.bossBars.clear(sessionId)
     }
 
     fun stateOf(sessionId: UUID): InstanceState? = states[sessionId]
@@ -211,6 +214,34 @@ private class StageContextImpl(
         }
     }
 
+    override fun damageMembersWithin(location: Location, radius: Double, amount: Double, damageTypeKey: String) {
+        val type = resolveDamageType(damageTypeKey)
+        if (type == null) {
+            core.plugin.logger.warning("[HanaToki] 未知的 DamageType「$damageTypeKey」,這一招退回預設傷害管道")
+            damageMembersWithin(location, radius, amount)
+            return
+        }
+        val source = org.bukkit.damage.DamageSource.builder(type).withDamageLocation(location).build()
+        val radiusSq = radius * radius
+        activeMembers().forEach { playerId ->
+            PlayerOp.dispatch(core.plugin, playerId) { player ->
+                val here = player.location
+                if (here.world != location.world) return@dispatch
+                if (here.distanceSquared(location) > radiusSq) return@dispatch
+                player.damage(amount, source)
+            }
+        }
+    }
+
+    private fun resolveDamageType(key: String): org.bukkit.damage.DamageType? {
+        val namespaced = org.bukkit.NamespacedKey.fromString(key) ?: return null
+        return runCatching {
+            io.papermc.paper.registry.RegistryAccess.registryAccess()
+                .getRegistry(io.papermc.paper.registry.RegistryKey.DAMAGE_TYPE)
+                .get(namespaced)
+        }.getOrNull()
+    }
+
     override fun damageMembersWithin(location: Location, radius: Double, amount: Double) {
         val radiusSq = radius * radius
         // 距離判定在**玩家自己的** EntityScheduler task 內做:讀的是他自己 region 的座標,
@@ -235,6 +266,24 @@ private class StageContextImpl(
             }
         }
         return CompletableFuture.allOf(*probes.toTypedArray()).thenApply { hits.toList() }
+    }
+
+    override fun nearestMemberDirection(location: Location): CompletableFuture<DoubleArray> {
+        // 每位成員各自在自己的 region 算出「我離這個座標多遠、在哪個方向」,再由這裡挑最近的。
+        val found = java.util.concurrent.ConcurrentLinkedQueue<DoubleArray>()
+        val probes = activeMembers().map { playerId ->
+            PlayerOp.dispatch(core.plugin, playerId) { player ->
+                val here = player.location
+                if (here.world != location.world) return@dispatch
+                val dx = here.x - location.x
+                val dz = here.z - location.z
+                val dist = Math.hypot(dx, dz)
+                if (dist < 1.0E-4) return@dispatch
+                found += doubleArrayOf(dx / dist, dz / dist, dist)
+            }
+        }
+        return CompletableFuture.allOf(*probes.toTypedArray())
+            .thenApply { found.minByOrNull { it[2] } ?: DoubleArray(0) }
     }
 
     override fun transition(stageId: String) {
@@ -281,6 +330,25 @@ private class StageContextImpl(
     }
 
     override fun actors(): ActorHandle = core.actorController.handleFor(sessionId)
+
+    override fun props(): PropHandle = core.propController.handleFor(sessionId)
+
+    override fun bossBar(text: String, progress: Double, colorName: String) {
+        core.bossBars.update(sessionId, activeMembers(), text, progress, colorName)
+    }
+
+    override fun bossBar(text: String, progress: Double, colorName: String, overlayName: String) {
+        core.bossBars.update(sessionId, activeMembers(), text, progress, colorName, overlayName)
+    }
+
+    override fun hideBossBar() {
+        core.bossBars.clear(sessionId)
+    }
+
+    override fun sessionRemainingSeconds(): Long {
+        val session = core.sessionManager.sessionById(sessionId) ?: return 0
+        return session.remainingMs(System.currentTimeMillis()) / 1000
+    }
 
     override fun log(message: String) {
         core.plugin.logger.info("[HanaToki] [$dungeonId/$slotId] $message")

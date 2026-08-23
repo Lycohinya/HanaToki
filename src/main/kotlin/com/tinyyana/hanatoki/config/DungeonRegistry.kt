@@ -1,8 +1,8 @@
 package com.tinyyana.hanatoki.config
 
 import com.tinyyana.hanatoki.instance.SlotPool
+import com.tinyyana.hanatoki.world.DungeonWorldProvisioner
 import org.bukkit.Location
-import org.bukkit.World
 import org.bukkit.configuration.ConfigurationSection
 import org.bukkit.configuration.file.YamlConfiguration
 import org.bukkit.plugin.Plugin
@@ -16,8 +16,26 @@ import java.util.logging.Logger
  * 座標登記進 [SlotPool]——v1 用「沿 X 軸每隔 spacing 格排一個 slot」的最簡單佈局
  * (ARCH §6 方案 A「相距 ≥1024 格的場地天然各自成 region」)。
  */
-class DungeonRegistry(private val plugin: Plugin, private val logger: Logger) {
+class DungeonRegistry(
+    private val plugin: Plugin,
+    private val logger: Logger,
+    private val worlds: DungeonWorldProvisioner,
+) {
     val definitions = linkedMapOf<String, DungeonDefinition>()
+
+    /**
+     * 「**不能把玩家留在裡面**」的副本世界名。玩家送回主世界、重生點導向、登入撿回都查它
+     * (見 `ReturnPointRegistry` / `HanaTokiCore.sendHome` / `HanaTokiListener`)。
+     *
+     * ⚠ 只收 [ExecutionMode.SESSION] 形態、由引擎自己建立的場地世界。
+     * **常駐副本([ExecutionMode.PERSISTENT])的世界刻意不在這裡面**:那是一個有地形、有出生點、
+     * 玩家可以正常登出登入的世界,語意跟這份名單剛好相反。把它放進來的話,玩家在蒼櫻裡死一次、
+     * 或在裡面登出再登入,就會被「安全網」送出副本——那不是現況行為(MIGRATION_PLAN §5.0 決策 E)。
+     */
+    val dungeonWorldNames = linkedSetOf<String>()
+
+    /** 常駐副本的 worldName -> dungeonId。成員資格跟著「人在不在那個世界」走時查這張表。 */
+    val persistentDungeonIdByWorld = linkedMapOf<String, String>()
 
     /** slotId -> (interactionId -> 絕對座標)。StageContext/Listener 查這裡把事件轉譯成 interactionId。 */
     val interactionLocations = linkedMapOf<String, MutableMap<String, Location>>()
@@ -25,12 +43,14 @@ class DungeonRegistry(private val plugin: Plugin, private val logger: Logger) {
     /** slotId -> (encounterId -> 絕對座標)。encounter/ 模組 spawn 時查這裡。 */
     val encounterLocations = linkedMapOf<String, MutableMap<String, Location>>()
 
-    fun loadAll(file: File, slotPool: SlotPool<Location>, resolveWorld: (String) -> World?) {
+    fun loadAll(file: File, slotPool: SlotPool<Location>) {
         definitions.clear()
         interactionLocations.clear()
         encounterLocations.clear()
+        dungeonWorldNames.clear()
+        persistentDungeonIdByWorld.clear()
         slotPool.unregisterAll()
-        loadFile(file, slotPool, resolveWorld)
+        loadFile(file, slotPool)
     }
 
     /**
@@ -44,11 +64,11 @@ class DungeonRegistry(private val plugin: Plugin, private val logger: Logger) {
      *
      * 同 id 重複載入 = 後者覆蓋前者(reload 語意,同 [SlotPool.register])。
      */
-    fun loadAdditional(file: File, slotPool: SlotPool<Location>, resolveWorld: (String) -> World?) {
-        loadFile(file, slotPool, resolveWorld)
+    fun loadAdditional(file: File, slotPool: SlotPool<Location>) {
+        loadFile(file, slotPool)
     }
 
-    private fun loadFile(file: File, slotPool: SlotPool<Location>, resolveWorld: (String) -> World?) {
+    private fun loadFile(file: File, slotPool: SlotPool<Location>) {
         if (!file.exists()) {
             logger.warning("[HanaToki] 副本定義檔不存在,略過:${file.path}")
             return
@@ -74,20 +94,32 @@ class DungeonRegistry(private val plugin: Plugin, private val logger: Logger) {
             }
             definitions[id] = def
 
-            val world = resolveWorld(def.worldName)
+            // 專屬副本世界不存在就在這裡建起來(ARCH §6 的世界層,見 DungeonWorldProvisioner)。
+            // ⚠ 這條路徑要求呼叫端已在 global region tick thread 上——loadAll/loadAdditional 的
+            //   兩個入口都由 HanaTokiCore 包在 `DungeonWorldProvisioner.runOnGlobalRegion` 裡。
+            val world = worlds.ensureWorld(def.worldName, def.worldCreate, def.worldAutoSave, def.worldGeneratorId)
             if (world == null) {
-                logger.warning("[HanaToki] 副本 $id 指定的世界 ${def.worldName} 不存在,slot 未登記")
+                logger.warning("[HanaToki] 副本 $id 指定的世界 ${def.worldName} 不存在也無法建立,slot 未登記")
                 continue
+            }
+            when (def.mode) {
+                ExecutionMode.SESSION -> if (def.worldCreate) dungeonWorldNames += world.name
+                ExecutionMode.PERSISTENT -> persistentDungeonIdByWorld[world.name] = id
             }
             for (i in 0 until def.slotCount) {
                 val slotId = "$id#$i"
                 val anchor = Location(
                     world,
                     (def.anchorOffsetX + i * def.slotSpacingBlocks).toDouble(),
-                    64.0,
+                    def.anchorY.toDouble(),
                     def.anchorOffsetZ.toDouble(),
                 )
                 slotPool.register(id, slotId, anchor)
+                // 世界邊界只對 void 世界撐開:那是「別讓人一路往外走把空 chunk 全生出來」的
+                // 安全網,對有真實地形的常駐世界套下去等於把玩家關進一個看得見的牆。
+                if (def.worldCreate && def.worldGeneratorId == null) {
+                    worlds.expandBorderFor(world, anchor, def.worldBorderMargin)
+                }
 
                 val interMap = linkedMapOf<String, Location>()
                 for (inter in def.interactions.values) {

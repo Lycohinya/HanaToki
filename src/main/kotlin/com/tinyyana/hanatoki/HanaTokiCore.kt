@@ -1,23 +1,30 @@
 package com.tinyyana.hanatoki
 
 import com.tinyyana.hanatoki.actor.ActorController
+import com.tinyyana.hanatoki.api.DungeonAccess
 import com.tinyyana.hanatoki.api.DungeonInfo
 import com.tinyyana.hanatoki.api.MusicCue
 import com.tinyyana.hanatoki.api.PresenceBridge
 import com.tinyyana.hanatoki.check.CheckResolver
+import com.tinyyana.hanatoki.config.DungeonDefinition
 import com.tinyyana.hanatoki.config.DungeonRegistry
+import com.tinyyana.hanatoki.config.ExecutionMode
 import com.tinyyana.hanatoki.folia.InstanceDispatch
 import com.tinyyana.hanatoki.folia.PlayerOp
 import com.tinyyana.hanatoki.folia.WorldOp
+import com.tinyyana.hanatoki.hud.SessionBossBars
 import com.tinyyana.hanatoki.instance.EndReason
 import com.tinyyana.hanatoki.instance.EnterResult
 import com.tinyyana.hanatoki.instance.SessionManager
 import com.tinyyana.hanatoki.instance.SlotPool
+import com.tinyyana.hanatoki.prop.PropController
 import com.tinyyana.hanatoki.reward.CompletionResult
 import com.tinyyana.hanatoki.reward.RewardDispatcher
 import com.tinyyana.hanatoki.stage.InstanceState
 import com.tinyyana.hanatoki.stage.StageEngine
 import com.tinyyana.hanatoki.text.Texts
+import com.tinyyana.hanatoki.world.DungeonWorldProvisioner
+import com.tinyyana.hanatoki.world.ReturnPointRegistry
 import com.tinyyana.hanatoki.world.WorldDiffRecorder
 import org.bukkit.Location
 import org.bukkit.entity.Player
@@ -30,13 +37,17 @@ import java.util.concurrent.ConcurrentHashMap
  * 把 instance/world/folia/config/stage/check/reward 幾個模組串起來的執行期核心,HanaTokiPlugin
  * 只做 Bukkit lifecycle 接線,狀態機邏輯都在這裡(方便 Phase 2+ 擴充,不塞進 plugin 主類別)。
  */
-class HanaTokiCore(val plugin: Plugin) : PresenceBridge {
+class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
     val slotPool = SlotPool<Location>()
     val sessionManager = SessionManager<Location>(slotPool)
-    val registry = DungeonRegistry(plugin, plugin.logger)
+    val worldProvisioner = DungeonWorldProvisioner(plugin)
+    val registry = DungeonRegistry(plugin, plugin.logger, worldProvisioner)
+    val returnPoints = ReturnPointRegistry { name -> isDungeonWorld(name) }
     val texts = Texts()
     val rewardDispatcher = RewardDispatcher(plugin)
     val actorController = ActorController(plugin)
+    val propController = PropController(plugin)
+    val bossBars = SessionBossBars(plugin)
     val stageEngine = StageEngine(this)
 
     // 每個 slot 一份 diff recorder(Phase 1 場地重置的最小單位是 slot,不是整個 instance)。
@@ -79,17 +90,72 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge {
         val def = registry.definitions[dungeonId]
             ?: return EnterResult.NoSlot
         val now = System.currentTimeMillis()
+        val persistent = def.mode == ExecutionMode.PERSISTENT
         val result = sessionManager.enter(
             dungeonId,
             players.map { it.uniqueId },
             now,
-            def.sessionTimeLimitSeconds * 1000,
+            // 常駐 instance 沒有時限:`Session.isExpired` 對 persistent 恆 false,這個值只剩
+            // `sessionRemainingSeconds()` 的顯示用途,給一個不會溢位的極大值。
+            if (persistent) Long.MAX_VALUE else def.sessionTimeLimitSeconds * 1000,
             def.reconnectGraceSeconds * 1000,
+            persistent,
         )
+        // ⚠ 只有 Entered(真的開了新 instance)才啟動 stage 狀態機。Joined = 加入一個正在跑的
+        //   常駐 instance,重跑 startFor 會把它重置回起始 stage(Boss 打到一半有人進場就消失)。
         if (result is EnterResult.Entered) {
             stageEngine.startFor(result.session.sessionId, dungeonId, result.session.slotId, result.anchor, now)
         }
         return result
+    }
+
+    /**
+     * 進場落點:slot anchor + 定義裡的 spawn 偏移與朝向(見 [DungeonDefinition.spawnOffsetX])。
+     * 預設偏移是 0 = anchor 本身,既有副本行為不變。
+     */
+    fun entryLocationFor(def: DungeonDefinition, anchor: Location): Location =
+        anchor.clone().add(def.spawnOffsetX, def.spawnOffsetY, def.spawnOffsetZ)
+            .also { it.yaw = def.spawnYaw }
+
+    // ---- 常駐副本:成員資格跟著「人在不在那個世界」走(MIGRATION_PLAN §5.0 決策 D)----
+
+    /** 這個世界是不是某座常駐副本的世界;是的話回傳它的 dungeonId。 */
+    fun persistentDungeonIdForWorld(worldName: String): String? = registry.persistentDungeonIdByWorld[worldName]
+
+    /**
+     * 玩家出現在某個常駐副本世界裡 → 把他加進那個 instance 的成員集合(必要時建立 instance)。
+     *
+     * 蒼櫻現況「沒有隊伍系統,誰站在場地裡就算誰」的直譯:進場、跨世界走進來、在裡面登入、
+     * 在裡面死掉重生,全部走同一條路。回傳 true = 現在是(或本來就是)那座副本的成員。
+     */
+    fun joinPersistentByWorld(playerId: UUID, worldName: String): Boolean {
+        val dungeonId = persistentDungeonIdForWorld(worldName) ?: return false
+        val current = sessionManager.sessionOf(playerId)
+        if (current != null) return current.dungeonId == dungeonId
+        val def = registry.definitions[dungeonId] ?: return false
+        val now = System.currentTimeMillis()
+        val result = sessionManager.enter(
+            dungeonId,
+            listOf(playerId),
+            now,
+            Long.MAX_VALUE,
+            def.reconnectGraceSeconds * 1000,
+            true,
+        )
+        if (result is EnterResult.Entered) {
+            stageEngine.startFor(result.session.sessionId, dungeonId, result.session.slotId, result.anchor, now)
+        }
+        return result !is EnterResult.NoSlot
+    }
+
+    /**
+     * 玩家離開了常駐副本世界 → 從成員集合移除。instance 本身不會因此結束
+     * ([com.tinyyana.hanatoki.instance.Session.isAllDropped] 對 persistent 恆 false)。
+     */
+    fun leavePersistent(playerId: UUID) {
+        val session = sessionManager.sessionOf(playerId) ?: return
+        if (!session.persistent) return
+        sessionManager.kick(playerId)
     }
 
     /** GlobalRegionScheduler.runAtFixedRate 驅動的 tick 訊號(ARCH §5.2 規則 5)。*/
@@ -98,15 +164,52 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge {
         val ended = sessionManager.tick(now)
         for (e in ended) {
             stageEngine.endFor(e.sessionId)
-            handleSessionEnded(e.slotId, e.dungeonId, e.reason)
+            handleSessionEnded(e.slotId, e.dungeonId, e.reason, e.memberIds)
         }
         stageEngine.tick(now)
     }
 
     fun kick(playerId: UUID) {
-        val ended = sessionManager.kick(playerId) ?: return
+        val ended = sessionManager.kick(playerId)
+        // 這個人一定要送出去,不論整局有沒有跟著結束——多人局裡其他人還在打,離開的那位
+        // 如果留在副本世界,他會站在一個沒有 session 綁定的場地裡看別人打(而且整局結束的
+        // diff 回滾會在他腳下發生)。
+        sendHome(playerId)
+        if (ended == null) return
         stageEngine.endFor(ended.sessionId)
-        handleSessionEnded(ended.slotId, ended.dungeonId, ended.reason)
+        handleSessionEnded(ended.slotId, ended.dungeonId, ended.reason, ended.memberIds)
+    }
+
+    /** 這個世界是不是 HanaToki 自己的副本世界(定義裡 `world-create: true` 的那些)。 */
+    fun isDungeonWorld(worldName: String): Boolean = worldName in registry.dungeonWorldNames
+
+    /**
+     * 把玩家送回進場前的位置(沒有登記就走重生點/主世界)。人不在線、或人根本不在副本世界裡
+     * 就是 no-op——後者很重要:指向生存主世界的副本(`world-create: false`)結束時不該把人瞬移走。
+     *
+     * 回傳的 future 在**傳送真的完成**之後才 complete,不是「派工完成」——場地回滾要等它
+     * (見 [handleSessionEnded])。
+     */
+    fun sendHome(playerId: UUID): CompletableFuture<Void> {
+        val done = CompletableFuture<Void>()
+        PlayerOp.dispatch(plugin, playerId) { player ->
+            if (!isDungeonWorld(player.world.name)) {
+                returnPoints.forget(playerId)
+                done.complete(null)
+                return@dispatch
+            }
+            val destination = returnPoints.destinationFor(player)
+            if (destination == null) {
+                plugin.logger.warning("[HanaToki] 找不到 ${player.name} 的返回點,也沒有任何非副本世界可送")
+                done.complete(null)
+                return@dispatch
+            }
+            player.teleportAsync(destination).whenComplete { _, _ -> done.complete(null) }
+        }.whenComplete { _, _ ->
+            // 玩家離線時 dispatch 立刻完成而 action 根本沒跑,上面的 done 不會有人 complete。
+            if (plugin.server.getPlayer(playerId) == null) done.complete(null)
+        }
+        return done
     }
 
     /** `/hanatoki admin reset <slotId>`:強制結束該 slot 上的 session(不論人是否還在)。*/
@@ -116,9 +219,10 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge {
             slotPool.free(slotId)
             return
         }
-        session.memberIds().forEach { sessionManager.kick(it) }
+        val members = session.memberIds()
+        members.forEach { sessionManager.kick(it) }
         stageEngine.endFor(session.sessionId)
-        handleSessionEnded(slotId, session.dungeonId, EndReason.ADMIN_RESET)
+        handleSessionEnded(slotId, session.dungeonId, EndReason.ADMIN_RESET, members)
     }
 
     /**
@@ -130,8 +234,34 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge {
      */
     fun resolveSession(sessionId: UUID, resultKey: String, state: InstanceState) {
         val session = sessionManager.sessionById(sessionId) ?: return
-        val durationMs = System.currentTimeMillis() - session.startedAtMs
+        val now = System.currentTimeMillis()
+        // 這一段 stage 只結算一次(見 InstanceState.claimResolution)。對 session 型副本這是
+        // 第一道保險(第二道仍然是下面 endSession 的原子認領);對常駐副本這是**唯一**一道
+        // ——它不結束 session,拿不到那個認領。
+        if (!state.claimResolution()) return
         val members = session.activeMembers()
+        if (session.persistent) {
+            // MIGRATION_PLAN §5.0 決策 C:常駐 instance 的 Resolution 只結算「這一輪」。
+            // 不結束 session、不送人回家、不回滾場地、不歸還 slot——接下來要做什麼(轉回待機、
+            // 開始重生冷卻)由 behavior 自己 `transition`,引擎不替它決定。
+            // duration 用 **stage 已經過的時間**而不是 instance 壽命:常駐 instance 從開服活到
+            // 關服,`now - startedAtMs` 是沒有意義的數字。
+            val durationMs = state.stageElapsedMs(now)
+            for (playerId in members) {
+                rewardDispatcher.dispatch(
+                    CompletionResult(
+                        completionId = UUID.randomUUID(),
+                        playerId = playerId,
+                        dungeonId = session.dungeonId,
+                        resultKey = resultKey,
+                        durationMs = durationMs,
+                        stats = state.stats.toMap(),
+                    ),
+                )
+            }
+            return
+        }
+        val durationMs = now - session.startedAtMs
         // ⚠ 順序:**先原子認領這個 session**(endSession 內部是 `sessions.remove` 的回傳值),
         // 認領成功才發獎。反過來寫的話,同一局被兩條路徑同時結算(behavior 的 resolve 撞上
         // 逾時 tick,或 behavior 自己不小心呼叫兩次 resolve)會產生**兩組不同的 completionId**,
@@ -151,10 +281,20 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge {
             )
         }
         stageEngine.endFor(sessionId)
-        handleSessionEnded(ended.slotId, ended.dungeonId, ended.reason)
+        handleSessionEnded(ended.slotId, ended.dungeonId, ended.reason, ended.memberIds)
     }
 
-    private fun handleSessionEnded(slotId: String, dungeonId: String, reason: EndReason) {
+    private fun handleSessionEnded(slotId: String, dungeonId: String, reason: EndReason, memberIds: List<UUID>) {
+        // ⚠ 送人 → **等傳送真的落地** → 才回滾。
+        //   專屬副本世界的回滾終點是虛空(void 生成),人還站在場地上就會直接往下掉。
+        //   `sendHome` 的 future 綁的是 `teleportAsync` 的完成,不是「派工完成」,所以這個
+        //   barrier 是真的等到人離開了才放行(離線玩家與不在副本世界的人立即完成,不會卡住)。
+        val sends = memberIds.map { sendHome(it) }
+        CompletableFuture.allOf(*sends.toTypedArray())
+            .whenComplete { _, _ -> rollbackAndRelease(slotId, dungeonId) }
+    }
+
+    private fun rollbackAndRelease(slotId: String, dungeonId: String) {
         val world = registry.definitions[dungeonId]?.let { plugin.server.getWorld(it.worldName) }
         val anchor = slotPool.anchorOf(slotId)
         // recorder 只在真的發生過 mutation 時才會被建立(diffRecorderFor 是 lazy)——沒有 recorder
@@ -187,7 +327,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge {
         val ended = sessionManager.endAll(EndReason.ABANDONED)
         for (e in ended) {
             stageEngine.endFor(e.sessionId)
-            handleSessionEnded(e.slotId, e.dungeonId, e.reason)
+            handleSessionEnded(e.slotId, e.dungeonId, e.reason, e.memberIds)
         }
     }
 
@@ -215,16 +355,62 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge {
      * Class(2026-08-23 L3 實測,不是理論顧慮)。世界解析與 slotPool 都由這裡自己拿。
      */
     fun loadContentDefinitions(file: java.io.File) {
-        registry.loadAdditional(file, slotPool) { name -> plugin.server.getWorld(name) }
+        // 載入會順帶建立副本專屬世界,而 `createWorld` 在 Folia/Lecithin 上只能在 global region
+        // tick thread 呼叫——內容插件的 onEnable 不一定在那條執行緒上(PlugMan 熱插拔就不是)。
+        DungeonWorldProvisioner.runOnGlobalRegion(plugin) {
+            registry.loadAdditional(file, slotPool)
+        }
     }
 
     /** 這個實體是不是副本生出來的(encounter 小怪或 actor)。死亡掉落物清除、debug 用。 */
     fun isDungeonOwnedEntity(entityId: UUID): Boolean =
-        stageEngine.encounters.isTracked(entityId) || actorController.actorIdOf(entityId) != null
+        stageEngine.encounters.isTracked(entityId) ||
+            actorController.actorIdOf(entityId) != null ||
+            propController.isTracked(entityId)
 
     // ---- PresenceBridge(ARCH §4,HanaToki 是 provider)----
     override fun isInside(playerId: UUID): Boolean = sessionManager.sessionOf(playerId) != null
     override fun dungeonIdOf(playerId: UUID): String? = sessionManager.sessionOf(playerId)?.dungeonId
+
+    // ---- DungeonAccess(外部 UI 的進出入口,見 api/DungeonAccess)----
+
+    override fun hasDungeon(dungeonId: String): Boolean = registry.definitions.containsKey(dungeonId)
+
+    override fun enterDungeon(playerId: UUID, dungeonId: String): Boolean {
+        val player = plugin.server.getPlayer(playerId) ?: return false
+        val def = registry.definitions[dungeonId] ?: return false
+        // 進場前記下他站在哪(離開時要送回來)。已經在副本世界裡的位置不會被記,見 ReturnPointRegistry。
+        returnPoints.remember(player)
+        return when (val result = enter(dungeonId, listOf(player))) {
+            is EnterResult.NoSlot -> false
+            is EnterResult.Entered -> {
+                player.teleportAsync(entryLocationFor(def, result.anchor)); true
+            }
+            is EnterResult.Joined -> {
+                player.teleportAsync(entryLocationFor(def, result.anchor)); true
+            }
+        }
+    }
+
+    override fun leaveDungeon(playerId: UUID): Boolean {
+        val session = sessionManager.sessionOf(playerId) ?: return false
+        if (!session.persistent) {
+            // Session 型副本:離開 = 退出這一局,`kick` 內部已經包含送人回家。
+            kick(playerId)
+            return true
+        }
+        // 常駐副本:它的世界刻意不在 `dungeonWorldNames` 裡(決策 E),所以 `sendHome` 對它是
+        // no-op——傳送要在這裡自己做,而且要先拿返回點再退出成員集合(順序反了不影響結果,
+        // 但這樣讀起來就是「先決定要去哪、再走人」)。
+        val destination = returnPoints.destinationFor(plugin.server.getPlayer(playerId) ?: return false)
+        sessionManager.kick(playerId)
+        if (destination == null) {
+            plugin.logger.warning("[HanaToki] 找不到 $playerId 的返回點,也沒有任何非副本世界可送")
+            return false
+        }
+        PlayerOp.dispatch(plugin, playerId) { it.teleportAsync(destination) }
+        return true
+    }
 
     /**
      * Phase 1 沒有 stage/interaction 系統會真的觸發方塊 mutation——world/diff 回滾機制本身

@@ -115,5 +115,50 @@ class DungeonDefinitionParserTest {
         assertEquals(1, def.soloCap)
         assertEquals(4, def.partyCap)
         assertEquals(180L, def.reconnectGraceSeconds)
+        // 新欄位的預設值必須是「既有行為」——session 形態、void 生成器、anchor 在 y=64、
+        // 進場落點就是 anchor 本身。任何一個預設值變了都會靜靜地改掉刀塚的行為。
+        assertEquals(ExecutionMode.SESSION, def.mode)
+        assertEquals(null, def.worldGeneratorId)
+        assertEquals(64, def.anchorY)
+        assertEquals(0.0, def.spawnOffsetX)
+        assertEquals(0.0, def.spawnOffsetY)
+        assertEquals(0.0, def.spawnOffsetZ)
+        assertEquals(0f, def.spawnYaw)
+    }
+
+    @Test
+    fun `常駐形態欄位解析正確`() {
+        val def = DungeonDefinitionParser.parse(
+            "pale-cherry",
+            mapOf(
+                "world" to "lyco_pale_cherry",
+                "mode" to "persistent",
+                "world-generator" to "lycohinya:pale-cherry",
+                "anchor-y" to 73,
+                "spawn-offset-x" to 0.5,
+                "spawn-offset-z" to 21.5,
+                "spawn-yaw" to 180,
+            ),
+        )
+        assertEquals(ExecutionMode.PERSISTENT, def.mode)
+        assertEquals("lycohinya:pale-cherry", def.worldGeneratorId)
+        assertEquals(73, def.anchorY)
+        assertEquals(0.5, def.spawnOffsetX)
+        assertEquals(21.5, def.spawnOffsetZ)
+        assertEquals(180f, def.spawnYaw)
+    }
+
+    @Test
+    fun `不認得的 mode 丟出 DefinitionError`() {
+        assertFailsWith<DungeonDefinitionParser.DefinitionError> {
+            DungeonDefinitionParser.parse("bad", mapOf("world" to "world", "mode" to "shared"))
+        }
+    }
+
+    @Test
+    fun `常駐形態的 slot-count 必須是 1`() {
+        assertFailsWith<DungeonDefinitionParser.DefinitionError> {
+            DungeonDefinitionParser.parse("bad", mapOf("world" to "world", "mode" to "persistent", "slot-count" to 2))
+        }
     }
 }

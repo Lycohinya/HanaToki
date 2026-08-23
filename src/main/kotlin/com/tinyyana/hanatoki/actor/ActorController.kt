@@ -9,7 +9,10 @@ import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.attribute.Attribute
 import org.bukkit.entity.Entity
+import org.bukkit.entity.EntityType
+import org.bukkit.entity.LivingEntity
 import org.bukkit.entity.Mannequin
+import org.bukkit.entity.Pose
 import org.bukkit.inventory.EquipmentSlot
 import org.bukkit.inventory.ItemStack
 import org.bukkit.plugin.Plugin
@@ -65,8 +68,17 @@ class ActorController(private val plugin: Plugin) {
             actors.remove(k)?.let { old -> WorldOp.dispatch(plugin, old) { it.remove() } }
             return WorldOp.dispatchAt(plugin, location) { loc ->
                 val world = loc.world ?: return@dispatchAt
-                val mannequin = world.spawn(loc, Mannequin::class.java) { m -> applySpec(m, spec) }
-                actors[k] = mannequin
+                val type = runCatching { EntityType.valueOf(spec.entityType) }.getOrElse {
+                    plugin.logger.warning("[HanaToki] actor $actorId 的 entity-type=${spec.entityType} 不是已知的 EntityType,略過生成")
+                    return@dispatchAt
+                }
+                @Suppress("UNCHECKED_CAST")
+                val entityClass = (type.entityClass ?: run {
+                    plugin.logger.warning("[HanaToki] actor $actorId 的 entity-type=${spec.entityType} 不能被生成,略過")
+                    return@dispatchAt
+                }) as Class<Entity>
+                val entity = world.spawn(loc, entityClass) { e: Entity -> applySpec(e, spec) }
+                actors[k] = entity
             }
         }
 
@@ -85,12 +97,23 @@ class ActorController(private val plugin: Plugin) {
             return entity.isValid
         }
 
-        override fun healthFractionOf(actorId: String): Double {
-            val entity = actors[key(sessionId, actorId)] as? Mannequin ?: return -1.0
-            if (!entity.isValid) return -1.0
-            val max = entity.getAttribute(Attribute.MAX_HEALTH)?.value ?: return -1.0
+        override fun healthFractionOf(actorId: String): Double =
+            fractionOf(actors[key(sessionId, actorId)])
+
+        override fun healthFractionAsync(actorId: String): CompletableFuture<Double> {
+            val entity = actors[key(sessionId, actorId)] ?: return CompletableFuture.completedFuture(-1.0)
+            val out = CompletableFuture<Double>()
+            WorldOp.dispatch(plugin, entity) { out.complete(fractionOf(it)) }
+                .whenComplete { _, _ -> out.complete(-1.0) } // 實體已 retired:上面那行沒跑到,補完成
+            return out
+        }
+
+        private fun fractionOf(entity: org.bukkit.entity.Entity?): Double {
+            val living = entity as? LivingEntity ?: return -1.0
+            if (!living.isValid) return -1.0
+            val max = living.getAttribute(Attribute.MAX_HEALTH)?.value ?: return -1.0
             if (max <= 0.0) return -1.0
-            return (entity.health / max).coerceIn(0.0, 1.0)
+            return (living.health / max).coerceIn(0.0, 1.0)
         }
 
         override fun teleport(actorId: String, location: Location): CompletableFuture<Void> =
@@ -111,7 +134,7 @@ class ActorController(private val plugin: Plugin) {
             }
 
         override fun setMainHand(actorId: String, item: ItemStack?): CompletableFuture<Void> =
-            withActor(actorId) { entity -> (entity as? Mannequin)?.equipment?.setItemInMainHand(item) }
+            withActor(actorId) { entity -> (entity as? LivingEntity)?.equipment?.setItemInMainHand(item) }
 
         override fun setDisplayName(actorId: String, text: String?, visible: Boolean): CompletableFuture<Void> =
             withActor(actorId) { entity ->
@@ -122,38 +145,104 @@ class ActorController(private val plugin: Plugin) {
         override fun setInvulnerable(actorId: String, invulnerable: Boolean): CompletableFuture<Void> =
             withActor(actorId) { it.isInvulnerable = invulnerable }
 
+        override fun setDescription(actorId: String, text: String): CompletableFuture<Void> =
+            withActor(actorId) { entity ->
+                (entity as? Mannequin)?.description =
+                    if (text.isBlank()) net.kyori.adventure.text.Component.empty() else MINI.deserialize(text)
+            }
+
+        override fun swingMainHand(actorId: String): CompletableFuture<Void> =
+            withActor(actorId) { (it as? LivingEntity)?.swingMainHand() }
+
+        override fun playHurtAnimation(actorId: String, yawDegrees: Float): CompletableFuture<Void> =
+            withActor(actorId) { (it as? LivingEntity)?.playHurtAnimation(yawDegrees) }
+
+        override fun setPose(actorId: String, poseName: String, fixed: Boolean): CompletableFuture<Void> =
+            withActor(actorId) { entity ->
+                val pose = poseByName(poseName) ?: return@withActor
+                // 伺服器對 Mannequin 只接受一部分姿勢,而且清單只有 runtime 拿得到。套用不被
+                // 接受的姿勢在某些核心上會丟 IllegalArgumentException,先過濾再套。
+                if (entity is Mannequin && pose !in validPoses()) {
+                    plugin.logger.warning("[HanaToki] 這台伺服器不接受 Mannequin 的姿勢 $poseName,略過(可用:${validPoseNames()})")
+                    return@withActor
+                }
+                entity.setPose(pose, fixed)
+            }
+
+        override fun validPoseNames(): List<String> = validPoses().map { it.name }
+
+        override fun setRotation(actorId: String, yawDegrees: Float, pitchDegrees: Float): CompletableFuture<Void> =
+            withActor(actorId) { it.setRotation(yawDegrees, pitchDegrees) }
+
+        override fun setEquipment(actorId: String, slotName: String, item: ItemStack?): CompletableFuture<Void> =
+            withActor(actorId) { entity ->
+                val slot = runCatching { EquipmentSlot.valueOf(slotName) }.getOrNull() ?: run {
+                    plugin.logger.warning("[HanaToki] $slotName 不是已知的 EquipmentSlot,略過")
+                    return@withActor
+                }
+                (entity as? LivingEntity)?.equipment?.setItem(slot, item)
+            }
+
+        override fun damage(actorId: String, amount: Double): CompletableFuture<Void> =
+            withActor(actorId) { (it as? LivingEntity)?.damage(amount) }
+
+        override fun locationOf(actorId: String): CompletableFuture<Location> {
+            val entity = actors[key(sessionId, actorId)] ?: return CompletableFuture.completedFuture(null)
+            val out = CompletableFuture<Location>()
+            // 座標一律在**實體自己的 EntityScheduler** 裡讀(ARCH §5.1④)。回傳的是一份 clone,
+            // 呼叫端拿到之後在任何執行緒上做距離計算都安全(Location 是純資料)。
+            WorldOp.dispatch(plugin, entity) { out.complete(if (it.isValid) it.location.clone() else null) }
+                .whenComplete { _, _ -> out.complete(null) } // 實體已 retired:上面那行沒跑到,補完成
+            return out
+        }
+
         private fun withActor(actorId: String, action: (Entity) -> Unit): CompletableFuture<Void> {
             val entity = actors[key(sessionId, actorId)] ?: return CompletableFuture.completedFuture(null)
             return WorldOp.dispatch(plugin, entity, action)
         }
     }
 
-    private fun applySpec(m: Mannequin, spec: ActorSpec) {
-        m.isPersistent = false
-        m.isSilent = spec.silent
-        m.setGravity(spec.gravity)
-        m.isInvulnerable = spec.invulnerable
-        m.isImmovable = spec.immovable
-        m.setAI(false)
-        m.isCollidable = false
-        spec.maxHealth?.let { hp ->
-            m.getAttribute(Attribute.MAX_HEALTH)?.baseValue = hp
-            m.health = hp
-        }
+    /**
+     * 套用 [ActorSpec]。分成三段:所有實體共通的、[LivingEntity] 才有的、[Mannequin] 專屬的
+     * ——後兩段對不是那個型別的載體自動略過(見 [ActorSpec.entityType] 的 KDoc)。
+     */
+    private fun applySpec(entity: Entity, spec: ActorSpec) {
+        entity.isPersistent = false
+        entity.isSilent = spec.silent
+        entity.setGravity(spec.gravity)
+        entity.isInvulnerable = spec.invulnerable
+        entity.isGlowing = spec.glowing
         spec.displayName?.let { name ->
-            m.customName(MINI.deserialize(name))
-            m.isCustomNameVisible = spec.displayNameVisible
+            entity.customName(MINI.deserialize(name))
+            entity.isCustomNameVisible = spec.displayNameVisible
         }
-        profileFor(spec)?.let { m.profile = it }
-        val eq = m.equipment
-        spec.mainHand?.let { eq.setItemInMainHand(it) }
-        spec.offHand?.let { eq.setItemInOffHand(it) }
-        // `EntityEquipment` 的護甲槽在 Bukkit 是 `setX(ItemStack)`(非 Kotlin property 語法可寫的
-        // var——getter/setter 簽章不成對),一律用 setEquipment(slot, item) 這條統一入口。
-        spec.helmet?.let { eq.setItem(EquipmentSlot.HEAD, it) }
-        spec.chestplate?.let { eq.setItem(EquipmentSlot.CHEST, it) }
-        spec.leggings?.let { eq.setItem(EquipmentSlot.LEGS, it) }
-        spec.boots?.let { eq.setItem(EquipmentSlot.FEET, it) }
+
+        val living = entity as? LivingEntity
+        living?.setAI(spec.ai)
+        living?.isCollidable = spec.collidable
+        spec.removeWhenFarAway?.let { living?.setRemoveWhenFarAway(it) }
+        spec.maxHealth?.let { hp ->
+            living?.getAttribute(Attribute.MAX_HEALTH)?.baseValue = hp
+            living?.health = hp
+        }
+        val eq = living?.equipment
+        if (eq != null) {
+            spec.mainHand?.let { eq.setItemInMainHand(it) }
+            spec.offHand?.let { eq.setItemInOffHand(it) }
+            // `EntityEquipment` 的護甲槽在 Bukkit 是 `setX(ItemStack)`(非 Kotlin property 語法可寫的
+            // var——getter/setter 簽章不成對),一律用 setEquipment(slot, item) 這條統一入口。
+            spec.helmet?.let { eq.setItem(EquipmentSlot.HEAD, it) }
+            spec.chestplate?.let { eq.setItem(EquipmentSlot.CHEST, it) }
+            spec.leggings?.let { eq.setItem(EquipmentSlot.LEGS, it) }
+            spec.boots?.let { eq.setItem(EquipmentSlot.FEET, it) }
+        }
+
+        val mannequin = entity as? Mannequin ?: return
+        mannequin.isImmovable = spec.immovable
+        // 清掉 Mannequin 的預設描述(名牌下面那行)。內容層要顯示什麼再自己 setDescription;
+        // 預設值是原版寫的,對玩家沒有意義(2026-08-24 真人回饋)。
+        mannequin.description = net.kyori.adventure.text.Component.empty()
+        profileFor(spec)?.let { mannequin.profile = it }
     }
 
     /**
@@ -175,6 +264,26 @@ class ActorController(private val plugin: Plugin) {
             plugin.logger.warning("[HanaToki] actor 皮膚 profile 建立失敗,退回預設外觀:${it.message}")
         }.getOrNull()
     }
+
+    /**
+     * 這台核心接受哪些 Mannequin 姿勢。`Mannequin.validPoses()` 是 runtime 橋接
+     * (`InternalAPIBridge`),API jar 裡查不到內容——**只能在伺服器上實際問**,所以查一次
+     * 快取起來,並且對「這顆核心沒有實作」的情況降級成空集合(那時 setPose 全部略過,
+     * 演出退回換裝/揮擊/朝向,關卡照樣能玩)。
+     */
+    private val cachedValidPoses: Set<Pose> by lazy {
+        runCatching { Mannequin.validPoses() }
+            .onFailure { plugin.logger.warning("[HanaToki] 取不到 Mannequin.validPoses(),actor 姿勢功能停用:${it.message}") }
+            .getOrDefault(emptySet())
+    }
+
+    internal fun validPoses(): Set<Pose> = cachedValidPoses
+
+    private fun poseByName(name: String): Pose? =
+        runCatching { Pose.valueOf(name) }.getOrElse {
+            plugin.logger.warning("[HanaToki] $name 不是已知的 Pose")
+            null
+        }
 
     private companion object {
         val MINI: MiniMessage = MiniMessage.miniMessage()

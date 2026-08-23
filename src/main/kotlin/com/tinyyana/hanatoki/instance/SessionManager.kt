@@ -5,10 +5,31 @@ import java.util.concurrent.ConcurrentHashMap
 
 sealed class EnterResult<out A> {
     object NoSlot : EnterResult<Nothing>()
+
+    /** 新開了一個 instance(呼叫端要啟動 stage 狀態機)。 */
     data class Entered<A>(val session: Session, val anchor: A) : EnterResult<A>()
+
+    /**
+     * 加入了一個**已經在跑**的 instance(常駐副本,MIGRATION_PLAN §5.0 決策 B)。
+     *
+     * 跟 [Entered] 分開是必要的而不是潔癖:呼叫端看到 [Entered] 會 `stageEngine.startFor(...)`,
+     * 對常駐副本那等於「每有一個人走進來就把整座副本重置回 dormant」——Boss 打到一半有人進場
+     * 會直接消失。
+     */
+    data class Joined<A>(val session: Session, val anchor: A) : EnterResult<A>()
 }
 
-data class EndedSession(val sessionId: UUID, val dungeonId: String, val slotId: String, val reason: EndReason)
+/**
+ * @param memberIds 這局結束時登記在案的**全部**成員(含已 DROPPED 的)。呼叫端要靠它把人送出
+ *   副本世界——session 一旦結束,`sessionOf` 就查不到人了,那時再問「誰在這一局」已經來不及。
+ */
+data class EndedSession(
+    val sessionId: UUID,
+    val dungeonId: String,
+    val slotId: String,
+    val reason: EndReason,
+    val memberIds: List<UUID> = emptyList(),
+)
 
 /**
  * 串起 [SlotPool] 分配與 [Session] lifecycle 的登記表(ARCH §5.1①「全域註冊表」)。
@@ -25,19 +46,78 @@ class SessionManager<A>(private val slotPool: SlotPool<A>) {
     private val bySlot = ConcurrentHashMap<String, UUID>()
     private val byPlayer = ConcurrentHashMap<UUID, UUID>()
 
+    /** 常駐副本的 dungeonId -> 那唯一一個 instance。MIGRATION_PLAN §5.0 決策 B 的查表面。 */
+    private val persistentByDungeon = ConcurrentHashMap<String, UUID>()
+
+    /** 只保護常駐副本的「查 + 建 + 登記」三步(見 [enterPersistent])。 */
+    private val persistentEnterLock = Any()
+
+    /**
+     * @param persistent 常駐形態(見 [Session.persistent])。true 時同一個 [dungeonId] 只會有一個
+     *   instance:已經存在就把 [players] 併進它的成員集合並回傳 [EnterResult.Joined]。
+     */
     fun enter(
         dungeonId: String,
         players: List<UUID>,
         nowMs: Long,
         timeLimitMs: Long,
         graceMs: Long,
+        persistent: Boolean = false,
     ): EnterResult<A> {
+        if (persistent) return enterPersistent(dungeonId, players, nowMs, timeLimitMs, graceMs)
         val slot = slotPool.allocate(dungeonId) ?: return EnterResult.NoSlot
-        val session = Session(UUID.randomUUID(), dungeonId, slot.slotId, nowMs, timeLimitMs, graceMs)
-        players.forEach { session.addMember(it, nowMs); byPlayer[it] = session.sessionId }
+        val session = Session(UUID.randomUUID(), dungeonId, slot.slotId, nowMs, timeLimitMs, graceMs, false)
+        addMembers(session, players, nowMs)
         sessions[session.sessionId] = session
         bySlot[slot.slotId] = session.sessionId
         return EnterResult.Entered(session, slot.anchor)
+    }
+
+    /**
+     * 常駐副本:同一個 dungeonId 只會有一個 instance。
+     *
+     * ⚠ 「先查有沒有、沒有才建」如果不上鎖有真的競態:兩個人同時走進蒼櫻,兩條執行緒都看到
+     * 沒有 instance,兩邊都去 `slotPool.allocate`,只有一個拿得到——**另一個人會收到「客滿」**,
+     * 而那座副本明明只有他們兩個。
+     *
+     * 這裡用一把小鎖而不是 `computeIfAbsent`/CAS 迴圈:鎖裡面只有幾次 map 讀寫,沒有 I/O、沒有
+     * 派工、不會阻塞;而 CAS 迴圈在「session 已從 `sessions` 移除但 `persistentByDungeon` 還沒
+     * 清掉」那個瞬間會空轉。進場是低頻操作,可讀性值這個代價。
+     */
+    private fun enterPersistent(
+        dungeonId: String,
+        players: List<UUID>,
+        nowMs: Long,
+        timeLimitMs: Long,
+        graceMs: Long,
+    ): EnterResult<A> = synchronized(persistentEnterLock) {
+        val existing = persistentByDungeon[dungeonId]?.let { sessions[it] }
+        if (existing != null) {
+            val anchor = slotPool.anchorOf(existing.slotId) ?: return@synchronized EnterResult.NoSlot
+            addMembers(existing, players, nowMs)
+            return@synchronized EnterResult.Joined(existing, anchor)
+        }
+        val slot = slotPool.allocate(dungeonId) ?: return@synchronized EnterResult.NoSlot
+        val created = Session(UUID.randomUUID(), dungeonId, slot.slotId, nowMs, timeLimitMs, graceMs, true)
+        sessions[created.sessionId] = created
+        bySlot[slot.slotId] = created.sessionId
+        persistentByDungeon[dungeonId] = created.sessionId
+        addMembers(created, players, nowMs)
+        EnterResult.Entered(created, slot.anchor)
+    }
+
+    /**
+     * 把人加進成員集合。**已經在名單上的人不重加**(除非早就被 DROPPED 出去了)——重加會把
+     * [Session.addMember] 建的 `Member` 換成全新的一份,把 joinedAt 與離線 grace 的計時一起洗掉。
+     * 常駐副本會反覆對同一個人走這條路徑(每次跨世界、每次登入),所以這條防護是必要的;
+     * session 形態的 `enter` 一定是全新的 session,成員本來就都是新的,行為完全不變。
+     */
+    private fun addMembers(session: Session, players: List<UUID>, nowMs: Long) {
+        for (playerId in players) {
+            val state = session.stateOf(playerId)
+            if (state == null || state == MemberState.DROPPED) session.addMember(playerId, nowMs)
+            byPlayer[playerId] = session.sessionId
+        }
     }
 
     fun sessionOf(playerId: UUID): Session? = byPlayer[playerId]?.let { sessions[it] }
@@ -94,8 +174,10 @@ class SessionManager<A>(private val slotPool: SlotPool<A>) {
     private fun endSessionBookkeeping(session: Session, reason: EndReason): EndedSession? {
         sessions.remove(session.sessionId) ?: return null
         bySlot.remove(session.slotId)
-        session.memberIds().forEach { byPlayer.remove(it) }
-        return EndedSession(session.sessionId, session.dungeonId, session.slotId, reason)
+        persistentByDungeon.remove(session.dungeonId, session.sessionId)
+        val members = session.memberIds()
+        members.forEach { byPlayer.remove(it) }
+        return EndedSession(session.sessionId, session.dungeonId, session.slotId, reason, members)
     }
 
     /** 世界 diff 回滾完成後呼叫,slot 才真正回到可分配池(ARCH §5.1 硬規則)。*/

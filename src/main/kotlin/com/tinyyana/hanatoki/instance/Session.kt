@@ -27,6 +27,15 @@ class Session(
     val startedAtMs: Long,
     val timeLimitMs: Long,
     val graceMs: Long,
+    /**
+     * 常駐形態([com.tinyyana.hanatoki.config.ExecutionMode.PERSISTENT])。
+     *
+     * MIGRATION_PLAN §5.0 決策 A:整個 instance 生命週期的分岔在這裡收斂成**兩個述詞**——
+     * [isExpired] 與 [isAllDropped] 恆 false,也就是「時間」與「人數」都不再是結束條件。
+     * 其餘狀態機行為(加入/離線 grace/重連/drop)完全共用,常駐副本的成員照樣會因為離線逾時
+     * 被 drop,只是最後一個人 drop 掉不會把 instance 一起收走。
+     */
+    val persistent: Boolean = false,
 ) {
     private val members = linkedMapOf<UUID, Member>()
 
@@ -91,9 +100,9 @@ class Session(
         members.values.filter { it.state != MemberState.DROPPED }.map { it.playerId }
 
     fun isAllDropped(): Boolean =
-        members.isNotEmpty() && members.values.all { it.state == MemberState.DROPPED }
+        !persistent && members.isNotEmpty() && members.values.all { it.state == MemberState.DROPPED }
 
-    fun isExpired(nowMs: Long): Boolean = nowMs - startedAtMs >= timeLimitMs
+    fun isExpired(nowMs: Long): Boolean = !persistent && nowMs - startedAtMs >= timeLimitMs
 
     fun remainingMs(nowMs: Long): Long = (timeLimitMs - (nowMs - startedAtMs)).coerceAtLeast(0)
 }

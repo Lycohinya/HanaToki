@@ -3,12 +3,18 @@
 # test-puzzle/test-combat:Phase 2 的 architecture probe(ARCH §8「三燈引路」+ §5 最小 encounter
 # 驗證),不是正式副本內容——正式內容屬 integration/內容插件(ARCH §11)。
 #
-# 三座定義共用同一個 world,靠 anchor-offset-z 互相錯開(各自沿 X 軸展開 slot,offset 只是把
-# 不同副本的整組 slot 挪到不同 Z 帶,避免 slot#0 撞在同一個座標——見 DungeonDefinition KDoc)。
+# 三座定義共用同一個世界 `hanatoki_probe`,靠 anchor-offset-z 互相錯開(各自沿 X 軸展開 slot,
+# offset 只是把不同副本的整組 slot 挪到不同 Z 帶,避免 slot#0 撞在同一個座標——見
+# DungeonDefinition KDoc)。
+#
+# ⚠ `world` 欄位**不要指向生存主世界**。副本場地是程式化蓋出來又要逐格回滾的,放在主世界會
+#   佔用玩家的固定座標、被路人挖掉、回滾時在主世界產生可見的方塊跳變。預設 `world-create: true`
+#   會在世界不存在時自動建一個 void 專屬世界(見 world/DungeonWorldProvisioner),不需要
+#   Multiverse 或任何手動步驟;只有「場地是手工蓋好、世界由管理員準備」的常駐型副本才設 false。
 dungeons:
   test-empty:
     display: "測試用空副本"
-    world: world
+    world: hanatoki_probe
     slot-count: 2
     slot-spacing-blocks: 1024
     session-time-limit-seconds: 60
@@ -19,7 +25,7 @@ dungeons:
   test-puzzle:
     display: "三燈引路(測試)"
     description: "純解謎 architecture probe,不是正式內容"
-    world: world
+    world: hanatoki_probe
     slot-count: 2
     slot-spacing-blocks: 1024
     anchor-offset-z: 5000
@@ -54,7 +60,7 @@ dungeons:
   test-combat:
     display: "測試戰鬥關(測試)"
     description: "最小 encounter/ architecture probe,不是正式內容"
-    world: world
+    world: hanatoki_probe
     slot-count: 2
     slot-spacing-blocks: 1024
     anchor-offset-z: 10000

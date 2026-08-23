@@ -1,10 +1,13 @@
 package com.tinyyana.hanatoki
 
+import com.tinyyana.hanatoki.api.DungeonAccess
 import com.tinyyana.hanatoki.api.PresenceBridge
 import com.tinyyana.hanatoki.command.HanaTokiCommand
 import com.tinyyana.hanatoki.stage.DungeonBehaviorRegistry
 import com.tinyyana.hanatoki.testcontent.CombatTestBehavior
 import com.tinyyana.hanatoki.testcontent.PuzzleTestBehavior
+import com.tinyyana.hanatoki.world.DungeonWorldProvisioner
+import com.tinyyana.hanatoki.world.VoidChunkGenerator
 import org.bukkit.Bukkit
 import org.bukkit.plugin.ServicePriority
 import org.bukkit.plugin.java.JavaPlugin
@@ -24,7 +27,12 @@ class HanaTokiPlugin : JavaPlugin() {
         saveResource("messages.yml", false)
         core.texts.reload(File(dataFolder, "messages.yml"))
         val dungeonsFile = File(dataFolder, "dungeons.yml")
-        core.registry.loadAll(dungeonsFile, core.slotPool) { name -> Bukkit.getWorld(name) }
+        // 載入會順帶建立副本專屬世界(`world-create: true` 的定義),而 Folia/Lecithin 的
+        // `createWorld` 只能在 global region tick thread 上呼叫。伺服器啟動時的 onEnable 本來
+        // 就在那條執行緒上(直接跑),PlugMan 熱插拔則是由指令觸發、跑在別的 region 上(派工過去)。
+        DungeonWorldProvisioner.runOnGlobalRegion(this) {
+            core.registry.loadAll(dungeonsFile, core.slotPool)
+        }
 
         // Kotlin extension point(ARCH §3):內容判定邏輯不進 YAML,在這裡註冊 dungeonId -> behavior。
         // test-puzzle/test-combat 是引擎自帶的 architecture probe,不是正式副本內容(見兩個
@@ -52,8 +60,34 @@ class HanaTokiPlugin : JavaPlugin() {
             this,
             ServicePriority.Normal,
         )
+        // 外部 UI(LycohinyaCore 的 `/lyco dungeon` 選單)用的進出入口,見 api/DungeonAccess。
+        server.servicesManager.register(
+            DungeonAccess::class.java,
+            core,
+            this,
+            ServicePriority.Normal,
+        )
 
-        logger.info("[HanaToki] Phase 1 骨架已啟用")
+        logger.info("[HanaToki] 已啟用")
+    }
+
+    /**
+     * 副本世界如果被別人(Multiverse、`bukkit.yml` 的 worlds 區塊)載入,要拿到的仍然是
+     * [VoidChunkGenerator] 而不是原版地形——這台伺服器上真的裝了 Multiverse,一旦它用預設
+     * 生成器把某座副本世界 import 進來,那個世界會開始長出真的地形,場地就泡在裡面了。
+     *
+     * 只認 HanaToki 自己登記過的副本世界名(`world-create: true` 的那些),其餘回 null 交還原版。
+     *
+     * ⚠ 常駐副本(蒼櫻)有自己的地形生成器,**不能**一律回 [VoidChunkGenerator]——那會讓
+     * Multiverse 掛載時把一個既有的地形世界接上 void 生成器。查定義拿它登記的生成器 id
+     * (見 `world/WorldGeneratorRegistry`);查不到就回 null 交還原版,而不是猜一個。
+     */
+    override fun getDefaultWorldGenerator(worldName: String, id: String?): org.bukkit.generator.ChunkGenerator? {
+        if (!this::core.isInitialized) return null
+        val def = core.registry.definitions.values.firstOrNull { it.worldCreate && it.worldName == worldName }
+            ?: return null
+        if (def.worldGeneratorId == null) return VoidChunkGenerator()
+        return com.tinyyana.hanatoki.world.WorldGeneratorRegistry.create(def.worldGeneratorId)
     }
 
     override fun onDisable() {

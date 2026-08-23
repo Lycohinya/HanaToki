@@ -22,9 +22,24 @@ class InstanceState(val graph: StageGraph) {
 
     fun stage(): StageDefinition = graph.stage(currentStageId)
 
+    /**
+     * 「這一段還沒結算過」的原子認領(MIGRATION_PLAN §5.0 決策 C)。
+     *
+     * Session 型副本的重複結算防護原本靠 `SessionManager.endSession` 的 `sessions.remove` 回傳值
+     * ——但常駐副本的 `resolve()` **不結束 session**,那道保險整個消失。改用這裡的旗標:
+     * 每次 [enterStage] 重置一次,所以語意是「一個 stage 只結算一次」。對蒼櫻剛好就是
+     * 「一輪 Boss 只發一次獎」(Boss 死 → resolve → 轉回 dormant → 下一輪重新可用)。
+     *
+     * Session 型副本兩道保險都保留(這裡先擋一次,`endSession` 再擋一次),不減弱既有行為。
+     */
+    private val resolutionClaimed = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    fun claimResolution(): Boolean = resolutionClaimed.compareAndSet(false, true)
+
     fun enterStage(stageId: String, nowMs: Long) {
         currentStageId = stageId
         stageEnteredAtMs = nowMs
+        resolutionClaimed.set(false)
         // one-shot 旗標是「stage 內」的一次性,不是整局一次性——重進同一 stage(例如錯解重置後
         // 迴到 puzzle stage)要能重新觸發同一批 trigger(ARCH §8 案例:燈重置後可以再點）。
         firedOnce.clear()
