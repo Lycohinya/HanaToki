@@ -1,0 +1,34 @@
+name: HanaToki
+description: $description
+prefix: HanaToki
+version: '${version}'
+
+main: com.tinyyana.hanatoki.HanaTokiPlugin
+api-version: '26.2'
+load: POSTWORLD
+
+folia-supported: true
+
+authors: [ TinyYana ]
+website: https://tinyyana.com
+
+# Paper library loader:runtime 依賴不 shade,啟動時從 Maven Central 下載
+libraries:
+  - org.jetbrains.kotlin:kotlin-stdlib-jdk8:2.4.20-Beta1
+
+# 引擎本體零依賴(ARCH §3):不 depend/softdepend 任何 Lyco* 插件。GUI 才會 softdepend LycoLib,
+# Phase 1 沒有 GUI。
+
+commands:
+  hanatoki:
+    description: HanaToki 副本引擎指令(Phase 1:進出測試 + 管理員工具,無 GUI)
+    aliases: [ hana ]
+    usage: /hanatoki <enter|leave|admin> ...
+
+permissions:
+  hanatoki.enter:
+    description: 進出 HanaToki 副本 slot(Phase 1 測試用,無等級/道具門檻)
+    default: true
+  hanatoki.admin:
+    description: HanaToki 管理指令(list/kick/reset/debug)
+    default: op

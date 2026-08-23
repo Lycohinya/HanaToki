@@ -1,0 +1,45 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# HanaToki 是零 Lyco 依賴的獨立引擎(不 includeBuild 任何 Lyco* 插件),沒有跨 repo composite
+# build 的問題,所以這裡直接完整編譯 + 跑單元測試,不是 LycoQuest 那種只驗證 wrapper 的 Tier2 CI。
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - uses: gradle/actions/setup-gradle@v5
+
+      - name: Build (compile + unit tests + jar)
+        run: |
+          chmod +x gradlew
+          ./gradlew build
+
+      - name: Upload test report on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: HanaToki-test-report
+          path: build/reports/tests/test
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: HanaToki-jar
+          path: |
+            build/libs/*.jar
+            !build/libs/*-thin.jar
+          if-no-files-found: error

@@ -1,0 +1,12 @@
+# HanaToki 副本定義(ARCH §2 DungeonDefinition)。Phase 1 沒有 stage 圖,只有場地/時限/人數/
+# 重連參數——進去、計時、超時送回。Phase 1 內建一座測試用副本,方便 L3/L4 手動/mineflayer 驗證。
+dungeons:
+  test-empty:
+    display: "測試用空副本"
+    world: world
+    slot-count: 2
+    slot-spacing-blocks: 1024
+    session-time-limit-seconds: 60
+    solo-cap: 1
+    party-cap: 4
+    reconnect-grace-seconds: 30
