@@ -11,7 +11,7 @@ data class Member(
     var offlineSinceMs: Long? = null,
 )
 
-enum class EndReason { TIMEOUT, ALL_DROPPED, ADMIN_RESET, ABANDONED }
+enum class EndReason { TIMEOUT, ALL_DROPPED, ADMIN_RESET, ABANDONED, RESOLVED }
 
 /**
  * Instance 裡的玩家集合與每人狀態(ARCH §2「Session」)。純邏輯類別,不碰 Bukkit——

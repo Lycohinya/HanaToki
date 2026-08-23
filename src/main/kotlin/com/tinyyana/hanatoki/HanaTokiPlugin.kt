@@ -2,6 +2,9 @@ package com.tinyyana.hanatoki
 
 import com.tinyyana.hanatoki.api.PresenceBridge
 import com.tinyyana.hanatoki.command.HanaTokiCommand
+import com.tinyyana.hanatoki.stage.DungeonBehaviorRegistry
+import com.tinyyana.hanatoki.testcontent.CombatTestBehavior
+import com.tinyyana.hanatoki.testcontent.PuzzleTestBehavior
 import org.bukkit.Bukkit
 import org.bukkit.plugin.ServicePriority
 import org.bukkit.plugin.java.JavaPlugin
@@ -18,8 +21,16 @@ class HanaTokiPlugin : JavaPlugin() {
         core = HanaTokiCore(this)
 
         saveResource("dungeons.yml", false)
+        saveResource("messages.yml", false)
+        core.texts.reload(File(dataFolder, "messages.yml"))
         val dungeonsFile = File(dataFolder, "dungeons.yml")
         core.registry.loadAll(dungeonsFile, core.slotPool) { name -> Bukkit.getWorld(name) }
+
+        // Kotlin extension point(ARCH §3):內容判定邏輯不進 YAML,在這裡註冊 dungeonId -> behavior。
+        // test-puzzle/test-combat 是引擎自帶的 architecture probe,不是正式副本內容(見兩個
+        // behavior 類別的 KDoc)。
+        DungeonBehaviorRegistry.register("test-puzzle", PuzzleTestBehavior())
+        DungeonBehaviorRegistry.register("test-combat", CombatTestBehavior())
 
         val command = HanaTokiCommand(core)
         getCommand("hanatoki")?.setExecutor(command)

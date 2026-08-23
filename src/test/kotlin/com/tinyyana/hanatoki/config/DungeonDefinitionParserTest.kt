@@ -56,6 +56,56 @@ class DungeonDefinitionParserTest {
     }
 
     @Test
+    fun `stage 圖與 interaction encounter 解析正確`() {
+        val def = DungeonDefinitionParser.parse(
+            "test-puzzle",
+            mapOf(
+                "world" to "world",
+                "stages" to mapOf(
+                    "start" to "entry",
+                    "list" to mapOf(
+                        "entry" to emptyMap<String, Any?>(),
+                        "puzzle" to mapOf("timeout-seconds" to 120),
+                    ),
+                ),
+                "interactions" to mapOf(
+                    "lamp_a" to mapOf("x" to -2, "y" to 0, "z" to 0, "kind" to "right-click"),
+                    "goal-plate" to mapOf("x" to 0, "y" to 0, "z" to 5, "kind" to "physical"),
+                ),
+                "encounters" to mapOf(
+                    "ambush-wave" to mapOf("entity" to "ZOMBIE", "count" to 2, "x" to 0, "y" to 0, "z" to 0, "radius" to 2.0),
+                ),
+            ),
+        )
+        assertEquals("entry", def.stageGraph?.startStage)
+        assertEquals(120L, def.stageGraph?.stage("puzzle")?.timeoutSeconds)
+        assertEquals(InteractionKind.RIGHT_CLICK, def.interactions["lamp_a"]?.kind)
+        assertEquals(InteractionKind.PHYSICAL, def.interactions["goal-plate"]?.kind)
+        assertEquals(-2, def.interactions["lamp_a"]?.dx)
+        assertEquals("ZOMBIE", def.encounters["ambush-wave"]?.entityType)
+        assertEquals(2, def.encounters["ambush-wave"]?.count)
+    }
+
+    @Test
+    fun `stage start 不在 list 裡丟出 DefinitionError`() {
+        assertFailsWith<DungeonDefinitionParser.DefinitionError> {
+            DungeonDefinitionParser.parse(
+                "bad",
+                mapOf(
+                    "world" to "world",
+                    "stages" to mapOf("start" to "missing", "list" to mapOf("entry" to emptyMap<String, Any?>())),
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `沒給 stages 時 stageGraph 為 null(向後相容 test-empty)`() {
+        val def = DungeonDefinitionParser.parse("test-empty", mapOf("world" to "world"))
+        assertEquals(null, def.stageGraph)
+    }
+
+    @Test
     fun `沒給的欄位吃預設值`() {
         val def = DungeonDefinitionParser.parse("d", mapOf("world" to "world"))
         assertEquals("d", def.display) // 沒給 display 時退回用 id

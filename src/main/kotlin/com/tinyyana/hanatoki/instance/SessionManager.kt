@@ -78,6 +78,12 @@ class SessionManager<A>(private val slotPool: SlotPool<A>) {
         return ended
     }
 
+    /** Stage 引擎的 Resolution 用:直接以 sessionId 結束(不論成員 online/offline 狀態)。 */
+    fun endSession(sessionId: UUID, reason: EndReason): EndedSession? {
+        val session = sessions[sessionId] ?: return null
+        return endSessionBookkeeping(session, reason)
+    }
+
     /** 從登記表移除 session/player 對照(不動 slot 佔用狀態——那要等回滾完成)。*/
     private fun endSessionBookkeeping(session: Session, reason: EndReason): EndedSession {
         sessions.remove(session.sessionId)

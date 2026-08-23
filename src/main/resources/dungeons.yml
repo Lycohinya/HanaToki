@@ -1,5 +1,10 @@
-# HanaToki 副本定義(ARCH §2 DungeonDefinition)。Phase 1 沒有 stage 圖,只有場地/時限/人數/
-# 重連參數——進去、計時、超時送回。Phase 1 內建一座測試用副本,方便 L3/L4 手動/mineflayer 驗證。
+# HanaToki 副本定義(ARCH §2 DungeonDefinition)。
+# test-empty:Phase 1 骨架驗證用,沒有 stage 圖,進去、計時、超時送回。
+# test-puzzle/test-combat:Phase 2 的 architecture probe(ARCH §8「三燈引路」+ §5 最小 encounter
+# 驗證),不是正式副本內容——正式內容屬 integration/內容插件(ARCH §11)。
+#
+# 三座定義共用同一個 world,靠 anchor-offset-z 互相錯開(各自沿 X 軸展開 slot,offset 只是把
+# 不同副本的整組 slot 挪到不同 Z 帶,避免 slot#0 撞在同一個座標——見 DungeonDefinition KDoc)。
 dungeons:
   test-empty:
     display: "測試用空副本"
@@ -10,3 +15,59 @@ dungeons:
     solo-cap: 1
     party-cap: 4
     reconnect-grace-seconds: 30
+
+  test-puzzle:
+    display: "三燈引路(測試)"
+    description: "純解謎 architecture probe,不是正式內容"
+    world: world
+    slot-count: 2
+    slot-spacing-blocks: 1024
+    anchor-offset-z: 5000
+    session-time-limit-seconds: 180
+    solo-cap: 1
+    party-cap: 2
+    reconnect-grace-seconds: 60
+    tags: [puzzle]
+    expected-minutes: "2-3"
+    stages:
+      start: entry
+      list:
+        entry: {}
+        puzzle:
+          timeout-seconds: 120
+        ambush: {}
+        clear_path: {}
+    # ⚠ 所有偏移都刻意避開 (0,0,0):那是 slot anchor 本身,也是玩家進場的傳送點——
+    # 如果哪個 interaction 用了 (0,0,0),進場那一刻玩家腳下的方塊會被 entry stage 換成實心方塊,
+    # 直接把人卡住(2026-08-23 L4 測試抓到,見 HANDOFF)。
+    interactions:
+      mural: { x: 0, y: 0, z: -2, kind: right-click }
+      lamp_a: { x: -2, y: 0, z: 2, kind: right-click }
+      lamp_b: { x: 0, y: 0, z: 2, kind: right-click }
+      lamp_c: { x: 2, y: 0, z: 2, kind: right-click }
+      shrine: { x: 0, y: 0, z: 4, kind: right-click }
+      door: { x: 0, y: 0, z: 6, kind: right-click }
+      goal-plate: { x: 0, y: 0, z: 8, kind: physical }
+    encounters:
+      ambush-wave: { entity: ZOMBIE, count: 2, x: 0, y: 0, z: 2, radius: 2 }
+
+  test-combat:
+    display: "測試戰鬥關(測試)"
+    description: "最小 encounter/ architecture probe,不是正式內容"
+    world: world
+    slot-count: 2
+    slot-spacing-blocks: 1024
+    anchor-offset-z: 10000
+    session-time-limit-seconds: 90
+    solo-cap: 1
+    party-cap: 2
+    reconnect-grace-seconds: 60
+    tags: [pve]
+    expected-minutes: "1"
+    stages:
+      start: entry
+      list:
+        entry:
+          timeout-seconds: 60
+    encounters:
+      main-wave: { entity: ZOMBIE, count: 3, x: 0, y: 0, z: 3, radius: 2 }

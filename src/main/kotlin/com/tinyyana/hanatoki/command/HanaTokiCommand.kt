@@ -29,19 +29,31 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
         return true
     }
 
+    /**
+     * `/hanatoki enter <dungeonId> [player2] [player3]...`——多人組隊進場(ARCH §2「Session 裡的
+     * 玩家集合」原本就支援多人,Phase 1 指令只暴露了單人;Phase 2 的多玩家同時互動驗證需要真的把
+     * 兩個玩家丟進同一個 session,這裡補齊指令面,不是新架構)。額外玩家名字找不到/不在線一律
+     * 略過並提示,不整個取消進場。
+     */
     private fun handleEnter(sender: CommandSender, args: Array<out String>) {
         val player = sender as? Player ?: run { sender.sendMessage("§c只有玩家能進場"); return }
         if (!player.hasPermission("hanatoki.enter")) { sender.sendMessage("§c沒有權限"); return }
-        val dungeonId = args.getOrNull(1) ?: run { sender.sendMessage("§c用法:/hanatoki enter <dungeonId>"); return }
-        when (val result = core.enter(dungeonId, listOf(player))) {
+        val dungeonId = args.getOrNull(1) ?: run { sender.sendMessage("§c用法:/hanatoki enter <dungeonId> [player2] ..."); return }
+        val extraPlayers = args.drop(2).mapNotNull { name ->
+            Bukkit.getPlayerExact(name) ?: run { sender.sendMessage("§c找不到玩家 $name,略過"); null }
+        }
+        val party = (listOf(player) + extraPlayers).distinct()
+        when (val result = core.enter(dungeonId, party)) {
             is EnterResult.NoSlot -> sender.sendMessage("§c副本 $dungeonId 目前客滿或不存在,稍後再試")
             is EnterResult.Entered -> {
-                player.teleportAsync(result.anchor).thenAccept { ok ->
-                    if (ok) {
-                        player.sendMessage("§a已進入副本 $dungeonId(slot=${result.session.slotId}),限時 ${result.session.timeLimitMs / 1000} 秒")
-                    } else {
-                        sender.sendMessage("§c傳送失敗,已從 session 移除")
-                        core.kick(player.uniqueId)
+                party.forEach { member ->
+                    member.teleportAsync(result.anchor).thenAccept { ok ->
+                        if (ok) {
+                            member.sendMessage("§a已進入副本 $dungeonId(slot=${result.session.slotId}),限時 ${result.session.timeLimitMs / 1000} 秒")
+                        } else {
+                            member.sendMessage("§c傳送失敗,已從 session 移除")
+                            core.kick(member.uniqueId)
+                        }
                     }
                 }
             }

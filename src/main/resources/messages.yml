@@ -1,0 +1,19 @@
+# HanaToki 內建測試副本(architecture probe,非正式內容)的訊息外部化。
+# 正式副本的內容層文字屬 integration/內容插件的責任(ARCH §11),不會放在這份引擎自帶的檔案裡。
+puzzle:
+  entry: "§7一間小祠。三座花燈,一面壁畫——順序藏在畫裡。"
+  mural-hint: "§e壁畫暗示:先中,再左,最後右。"
+  lit: "§a燈亮了({count}/3)"
+  already-lit: "§7這座燈已經亮著了"
+  wrong: "§c順序不對,燈全暗了……"
+  solved: "§a三燈全亮!前方的門開了。"
+  shrine-success: "§d感應到一絲共鳴——順序是「中、左、右」。"
+  shrine-fail: "§7感應失敗,什麼都沒看清。"
+  ambush: "§c錯解引來了騷動!"
+  ambush-cleared: "§a清乾淨了,燈已經重置,再試一次。"
+  cleared: "§a抵達終點,副本結算為通關!"
+  timeout: "§c時間到,副本結算為逾時。"
+combat:
+  entry: "§7三隻普通敵人擋在路上。"
+  cleared: "§a敵人全滅,副本結算為通關!"
+  timeout: "§c時間到,副本結算為逾時。"
