@@ -38,6 +38,38 @@ class PropController(private val plugin: Plugin) {
     /** 擺設是不是副本生出來的(死亡掉落清除/debug 反查用,同 actor/encounter)。 */
     fun isTracked(entityId: UUID): Boolean = props.values.any { it.uniqueId == entityId }
 
+    /**
+     * 掃掉**登記表以外**的骨架部件(見 [PropHandle.PART_TAG])。
+     *
+     * 為什麼需要:`props` 是記憶體登記表,`/pmxt reload` 會把它清空**但實體還留在世界裡**,
+     * 於是場上多出幾顆永遠不會被收走的浮空部件。LycoItems 的居合刀身踩過同一個洞。
+     *
+     * ⚠ **不能用 `world.entities`**——Folia 上那個呼叫會拋跨 region ownership 例外,有人在線時
+     * 熱插拔當場炸。照 `IaiBladeAnimation.sweepOrphans` / `CompanionService.sweepOrphans` 的
+     * 寫法:逐 chunk,而且只碰目前 region 擁有的 chunk。
+     *
+     * @return 這一輪掃掉幾顆
+     */
+    fun sweepOrphanParts(world: org.bukkit.World, centerChunkX: Int, centerChunkZ: Int, radiusChunks: Int): Int {
+        val live = props.values.mapTo(HashSet()) { it.uniqueId }
+        var removed = 0
+        for (cx in (centerChunkX - radiusChunks)..(centerChunkX + radiusChunks)) {
+            for (cz in (centerChunkZ - radiusChunks)..(centerChunkZ + radiusChunks)) {
+                if (!world.isChunkLoaded(cx, cz)) continue
+                val chunk = runCatching { world.getChunkAt(cx, cz) }.getOrNull() ?: continue
+                // 別的 region 擁有的 chunk 一律跳過:讀它的實體清單就是跨 region 存取。
+                if (!runCatching { org.bukkit.Bukkit.isOwnedByCurrentRegion(world, cx, cz) }.getOrDefault(false)) continue
+                for (e in runCatching { chunk.entities }.getOrDefault(emptyArray())) {
+                    if (!e.scoreboardTags.contains(PropHandle.PART_TAG)) continue
+                    if (live.contains(e.uniqueId)) continue
+                    e.remove()
+                    removed += 1
+                }
+            }
+        }
+        return removed
+    }
+
     private inner class SessionPropHandle(private val sessionId: UUID) : PropHandle {
 
         override fun spawnItem(
@@ -94,6 +126,66 @@ class PropController(private val plugin: Plugin) {
                     d.setTeleportDuration(teleportDurationTicks.coerceIn(0, 59))
                 }
                 props[k] = display
+            }
+        }
+
+        override fun spawnPart(
+            propId: String,
+            location: Location,
+            item: ItemStack,
+            teleportDurationTicks: Int,
+        ): CompletableFuture<Void> {
+            val k = key(sessionId, propId)
+            props.remove(k)?.let { old -> WorldOp.dispatch(plugin, old) { it.remove() } }
+            return WorldOp.dispatchAt(plugin, location) { loc ->
+                val world = loc.world ?: return@dispatchAt
+                val display = world.spawn(loc, ItemDisplay::class.java) { d ->
+                    d.isPersistent = false
+                    d.setItemStack(item)
+                    d.billboard = Display.Billboard.FIXED
+                    // ⚠ NONE 而不是 GROUND:GROUND 會把模型自己的 display context 疊在
+                    // 我們算的 transformation 上,骨架的關節座標會整組對不準。
+                    d.itemDisplayTransform = ItemDisplay.ItemDisplayTransform.NONE
+                    d.brightness = Display.Brightness(11, 15)
+                    d.viewRange = 2.0f
+                    d.setTeleportDuration(teleportDurationTicks.coerceIn(0, 59))
+                    // 重開之後認得回來的唯一憑據,見 PropHandle.PART_TAG
+                    d.addScoreboardTag(PropHandle.PART_TAG)
+                }
+                props[k] = display
+            }
+        }
+
+        override fun pose(
+            propId: String,
+            tx: Float,
+            ty: Float,
+            tz: Float,
+            pitchDegrees: Float,
+            yawDegrees: Float,
+            rollDegrees: Float,
+            scale: Float,
+            interpolationTicks: Int,
+        ): CompletableFuture<Void> {
+            val entity = props[key(sessionId, propId)] ?: return CompletableFuture.completedFuture(null)
+            return WorldOp.dispatch(plugin, entity) { e ->
+                val d = e as? Display ?: return@dispatch
+                if (!d.isValid) return@dispatch
+                // ⚠ 順序:先補間參數、再 transformation。反過來會沿用上一段的 duration
+                // (LycoItems/IaiBladeAnimation.kt 踩過的坑,那裡也寫了同一條註解)。
+                d.interpolationDelay = 0
+                d.interpolationDuration = interpolationTicks.coerceAtLeast(0)
+                // yaw → pitch → roll 的外旋順序,跟「先轉身、再抬手、最後翻腕」的直覺一致。
+                val q = org.joml.Quaternionf()
+                    .rotateY(Math.toRadians(yawDegrees.toDouble()).toFloat())
+                    .rotateX(Math.toRadians(pitchDegrees.toDouble()).toFloat())
+                    .rotateZ(Math.toRadians(rollDegrees.toDouble()).toFloat())
+                d.transformation = Transformation(
+                    Vector3f(tx, ty, tz),
+                    q,
+                    Vector3f(scale, scale, scale),
+                    org.joml.Quaternionf(),
+                )
             }
         }
 

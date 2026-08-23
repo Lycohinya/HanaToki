@@ -27,8 +27,11 @@ commands:
 
 permissions:
   hanatoki.enter:
-    description: 進出 HanaToki 副本 slot(Phase 1 測試用,無等級/道具門檻)
-    default: true
+    # ⚠ 2026-08-24 由 true 改成 op。`/hanatoki enter` 是**開發/驗收指令**,不是玩家入口——
+    #   玩家走整合插件的選單(LycohinyaCore 的 `/lyco dungeon` → api/DungeonAccess),那條路
+    #   不查這個權限。留 true 的話玩家可以繞過選單直接指定任何 dungeonId 進場。
+    description: 直接用指令進出 HanaToki 副本 slot(開發/驗收用;玩家走整合插件的選單)
+    default: op
   hanatoki.admin:
     description: HanaToki 管理指令(list/kick/reset/debug)
     default: op

@@ -161,4 +161,18 @@ class DungeonDefinitionParserTest {
             DungeonDefinitionParser.parse("bad", mapOf("world" to "world", "mode" to "persistent", "slot-count" to 2))
         }
     }
+
+    @Test
+    fun `test-only 預設 false,正式副本不會被上線閘門誤擋`() {
+        val def = DungeonDefinitionParser.parse("real", mapOf("world" to "w"))
+        assertEquals(false, def.testOnly)
+    }
+
+    @Test
+    fun `test-only 讀得出來`() {
+        // 這是上線閘門的第一半:標了的定義由 DungeonRegistry 在 enable-test-dungeons: false 時
+        // 整條跳過(世界不建、slot 不登記、指令查不到)。
+        val def = DungeonDefinitionParser.parse("probe", mapOf("world" to "w", "test-only" to true))
+        assertEquals(true, def.testOnly)
+    }
 }

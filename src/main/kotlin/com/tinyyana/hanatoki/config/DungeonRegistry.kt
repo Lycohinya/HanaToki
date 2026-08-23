@@ -74,10 +74,14 @@ class DungeonRegistry(
             return
         }
         val yaml = YamlConfiguration.loadConfiguration(file)
+        // 引擎自帶的 architecture probe 閘門(見 [DungeonDefinition.testOnly])。
+        // **逐檔各自判斷**:內容插件的定義檔如果哪天也想放 probe,它自己那份檔案要自己開。
+        val enableTest = yaml.getBoolean("enable-test-dungeons", false)
         val root = yaml.getConfigurationSection("dungeons") ?: run {
             logger.warning("[HanaToki] ${file.name} 沒有 dungeons: 區塊")
             return
         }
+        var skippedTest = 0
         for (id in root.getKeys(false)) {
             val section = root.getConfigurationSection(id) ?: continue
             // ⚠ `ConfigurationSection.getValues(false)` **不會**把巢狀 section 遞迴轉成 Map——
@@ -90,6 +94,12 @@ class DungeonRegistry(
                 DungeonDefinitionParser.parse(id, raw)
             } catch (e: DungeonDefinitionParser.DefinitionError) {
                 logger.warning("[HanaToki] 副本定義 $id 解析失敗,跳過:${e.message}")
+                continue
+            }
+            // probe 副本沒開就**整條跳過**:不進 definitions(選單/指令查不到)、世界不建、
+            // slot 不登記。只是「不註冊 behavior」不夠——定義還在的話 `/hanatoki enter` 照樣進得去。
+            if (def.testOnly && !enableTest) {
+                skippedTest++
                 continue
             }
             definitions[id] = def
@@ -133,6 +143,9 @@ class DungeonRegistry(
                 }
                 encounterLocations[slotId] = encMap
             }
+        }
+        if (skippedTest > 0) {
+            logger.info("[HanaToki] ${file.name} 跳過 $skippedTest 座測試副本(enable-test-dungeons: false)")
         }
         logger.info("[HanaToki] ${file.name} 載入後共 ${definitions.size} 座副本定義、${definitions.values.sumOf { it.slotCount }} 個 slot")
     }

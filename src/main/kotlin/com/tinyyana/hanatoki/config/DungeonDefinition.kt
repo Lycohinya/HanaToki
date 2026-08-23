@@ -105,6 +105,18 @@ data class DungeonDefinition(
     val stageGraph: StageGraph? = null,
     val interactions: Map<String, InteractionDef> = emptyMap(),
     val encounters: Map<String, EncounterDef> = emptyMap(),
+    /**
+     * **這是引擎自帶的 architecture probe,不是正式內容。**
+     *
+     * 標了這個的定義預設**不會被註冊**(世界不建、slot 不登記、玩家看不到也進不去),
+     * 要在 `dungeons.yml` 的頂層設 `enable-test-dungeons: true` 才會載入。
+     *
+     * 存在理由(2026-08-24 上線前查到):`test-empty`/`test-puzzle`/`test-combat` 原本是
+     * 無條件註冊的,而 `/hanatoki enter` 又是 `default: true`——引擎一裝上正式服,**全體玩家
+     * 都可以進 probe 副本**,而 integration 那側還替其中兩座配了通關花蜜,等於一條刷花蜜的路。
+     * 這不是引擎的錯誤設定,是「開發期預設」跟「上線」之間少了一道閘門。
+     */
+    val testOnly: Boolean = false,
 )
 
 /**
@@ -198,6 +210,7 @@ object DungeonDefinitionParser {
             stageGraph = stageGraph,
             interactions = interactions,
             encounters = encounters,
+            testOnly = (raw["test-only"] as? Boolean) ?: false,
         )
     }
 

@@ -212,6 +212,7 @@ class ActorController(private val plugin: Plugin) {
         entity.setGravity(spec.gravity)
         entity.isInvulnerable = spec.invulnerable
         entity.isGlowing = spec.glowing
+        (entity as? LivingEntity)?.isInvisible = spec.invisible
         spec.displayName?.let { name ->
             entity.customName(MINI.deserialize(name))
             entity.isCustomNameVisible = spec.displayNameVisible

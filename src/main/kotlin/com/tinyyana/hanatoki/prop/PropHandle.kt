@@ -57,6 +57,54 @@ interface PropHandle {
         teleportDurationTicks: Int,
     ): CompletableFuture<Void>
 
+    /**
+     * 放一個**骨架部件**:跟 [spawnItem] 同樣是 ItemDisplay,差別在三件事——
+     *
+     * 1. `itemDisplayTransform` 是 **NONE** 而不是 `GROUND`。`GROUND` 會把模型自己的
+     *    display context 疊在你算的 transformation 上,座標永遠對不準(LycoCosplay
+     *    `DisplayRenderer` 2026-08-05 查證過的同一個坑)。
+     * 2. billboard 固定([Display.Billboard.FIXED]):部件的朝向由 [pose] 決定,不能跟鏡頭轉。
+     * 3. 會被標上 scoreboard tag,`/hanatoki admin reset` 與熱插拔之後掃得回來(見 [PART_TAG])。
+     *
+     * @param teleportDurationTicks 位移補間長度(0–59)。跟著會動的載體走時填成更新間隔。
+     */
+    fun spawnPart(
+        propId: String,
+        location: Location,
+        item: ItemStack,
+        teleportDurationTicks: Int,
+    ): CompletableFuture<Void>
+
+    /**
+     * 把部件擺到一個姿勢,並讓**客戶端自己補間**過去([Display.setInterpolationDuration])。
+     *
+     * 這是骨架動畫的唯一入口:一段動作 = 對每個部件依序丟幾個 [pose],每個帶自己的
+     * `interpolationTicks`。伺服器只在關鍵影格送封包,中間的每一幀由客戶端算——所以
+     * 一段 60 tick 的動作對伺服器來說只有三、四次封包,不是 60 次。
+     *
+     * ⚠ **參數順序有意義**:實作必須先設 `interpolationDelay = 0` 與 `interpolationDuration`,
+     * **再**設 `transformation`,否則這一段會沿用上一段的補間參數
+     * (`LycoItems/IaiBladeAnimation.kt` 踩過並寫進註解的坑)。
+     *
+     * 旋轉用**度數的 pitch/yaw/roll**而不是四元數:內容層寫動作時想的是「前臂往前抬 40 度」,
+     * 不是 `Quaternionf(0.34f, …)`。轉換在引擎內做一次,內容層不必碰 joml
+     * (也順帶讓這支簽章維持 primitive-only,過 `tools/check-cross-plugin-kotlin.py` 的紅線)。
+     *
+     * @param tx 相對部件實體位置的位移(格)。骨架的「關節」就是靠這個 + 旋轉組出來的。
+     * @param interpolationTicks 補間長度;0 = 立刻跳過去(用在需要「頓一下」的預告拍)。
+     */
+    fun pose(
+        propId: String,
+        tx: Float,
+        ty: Float,
+        tz: Float,
+        pitchDegrees: Float,
+        yawDegrees: Float,
+        rollDegrees: Float,
+        scale: Float,
+        interpolationTicks: Int,
+    ): CompletableFuture<Void>
+
     /** 把擺設移到新位置(跟隨會動的 actor 用)。找不到就是 no-op。 */
     fun moveTo(propId: String, location: Location): CompletableFuture<Void>
 
@@ -66,4 +114,19 @@ interface PropHandle {
     fun despawnAll(): CompletableFuture<Void>
 
     fun count(): Int
+
+    companion object {
+        /**
+         * 骨架部件的 scoreboard tag。
+         *
+         * 存在理由:記憶體登記表在 `/pmxt reload` 之後**會被清空,但實體還在世界裡**——
+         * LycoItems 的居合刀身就是這樣留下孤兒 display,Yana 在遊戲裡看得到一顆浮空的刀
+         * (2026-08-24 修過的同一個洞)。tag 是「重開之後還認得回來」的唯一憑據。
+         *
+         * ⚠ 掃描**不能**用 `world.entities`:Folia 上有人在線時那個呼叫會拋跨 region ownership
+         * 例外,熱插拔當場炸。照 `IaiBladeAnimation.sweepOrphans` 的逐 chunk +
+         * `isOwnedByCurrentRegion` 寫法。
+         */
+        const val PART_TAG = "hanatoki_rig_part"
+    }
 }
