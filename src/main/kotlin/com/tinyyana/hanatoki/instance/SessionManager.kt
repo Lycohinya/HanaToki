@@ -72,21 +72,27 @@ class SessionManager<A>(private val slotPool: SlotPool<A>) {
             val timedOut = session.isExpired(nowMs)
             val allGone = session.isAllDropped()
             if (timedOut || allGone) {
-                ended += endSessionBookkeeping(session, if (timedOut) EndReason.TIMEOUT else EndReason.ALL_DROPPED)
+                endSessionBookkeeping(session, if (timedOut) EndReason.TIMEOUT else EndReason.ALL_DROPPED)
+                    ?.let { ended += it }
             }
         }
         return ended
     }
 
     /** Stage 引擎的 Resolution 用:直接以 sessionId 結束(不論成員 online/offline 狀態)。 */
-    fun endSession(sessionId: UUID, reason: EndReason): EndedSession? {
-        val session = sessions[sessionId] ?: return null
-        return endSessionBookkeeping(session, reason)
-    }
+    fun endSession(sessionId: UUID, reason: EndReason): EndedSession? =
+        endSessionBookkeeping(sessions[sessionId] ?: return null, reason)
 
-    /** 從登記表移除 session/player 對照(不動 slot 佔用狀態——那要等回滾完成)。*/
-    private fun endSessionBookkeeping(session: Session, reason: EndReason): EndedSession {
-        sessions.remove(session.sessionId)
+    /**
+     * 從登記表移除 session/player 對照(不動 slot 佔用狀態——那要等回滾完成)。
+     *
+     * ⚠ `sessions.remove(...)` 的回傳值就是**原子認領**:同一個 session 被兩條路徑同時結束
+     * (例如 behavior 在 Boss 死亡時 `resolve()`,同一刻逾時 tick 也判定該收)只有一條會拿到
+     * 非 null,另一條回 null。少了這條,`resolveSession` 會對同一局發兩次獎——`completionId`
+     * 每次 Resolution 都是新的,integration 端的幂等去重擋不住「同一局兩個不同 completionId」。
+     */
+    private fun endSessionBookkeeping(session: Session, reason: EndReason): EndedSession? {
+        sessions.remove(session.sessionId) ?: return null
         bySlot.remove(session.slotId)
         session.memberIds().forEach { byPlayer.remove(it) }
         return EndedSession(session.sessionId, session.dungeonId, session.slotId, reason)
@@ -99,7 +105,7 @@ class SessionManager<A>(private val slotPool: SlotPool<A>) {
 
     /** onDisable 收斂用:立即結束全部 session(視為 abandoned),回傳給呼叫端逐一處理回滾與送人。*/
     fun endAll(reason: EndReason): List<EndedSession> =
-        sessions.values.toList().map { endSessionBookkeeping(it, reason) }
+        sessions.values.toList().mapNotNull { endSessionBookkeeping(it, reason) }
 
     fun snapshot(): List<Session> = sessions.values.toList()
 }

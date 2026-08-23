@@ -28,6 +28,12 @@ interface DungeonBehavior {
     /** encounter/ 模組:這一波敵人全滅。 */
     fun onEncounterCleared(ctx: StageContext, encounterId: String) {}
 
+    /**
+     * actor/ 模組:某位 actor 綁定的實體死亡(Boss 型 actor 的勝利判定入口)。
+     * callback 已在 anchor region 序列化執行,同其他 callback。
+     */
+    fun onActorDeath(ctx: StageContext, actorId: String) {}
+
     /** encounter/ 模組:全員離場或判定失敗導致的戰鬥失敗(v1 combat-test 用不到,先留 hook)。 */
     fun onEncounterFailed(ctx: StageContext, encounterId: String) {}
 }

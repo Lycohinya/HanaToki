@@ -1,5 +1,6 @@
 package com.tinyyana.hanatoki
 
+import com.tinyyana.hanatoki.folia.PlayerOp
 import org.bukkit.event.EventHandler
 import org.bukkit.event.EventPriority
 import org.bukkit.event.Listener
@@ -35,8 +36,9 @@ class HanaTokiListener(private val core: HanaTokiCore) : Listener {
         if (reconnected) {
             val session = core.sessionManager.sessionOf(player.uniqueId) ?: return
             val anchor = core.slotPool.anchorOf(session.slotId) ?: return
+            val display = core.registry.definitions[session.dungeonId]?.display ?: session.dungeonId
             player.teleportAsync(anchor)
-            player.sendMessage("§a已重連回副本 ${session.dungeonId}")
+            PlayerOp.message(core.plugin, player.uniqueId, core.texts.format("session.reconnected", mapOf("dungeon" to display)))
         }
     }
 
@@ -47,9 +49,26 @@ class HanaTokiListener(private val core: HanaTokiCore) : Listener {
         core.stageEngine.handleInteraction(event.player.uniqueId, block.location, event.action)
     }
 
-    @EventHandler(priority = EventPriority.MONITOR)
+    /**
+     * 一個實體死亡可能是 encounter 的小怪,也可能是 Boss 型 actor——兩邊各自查表,查不到就是
+     * no-op(絕大多數死亡事件跟 HanaToki 無關,兩次 ConcurrentHashMap 查表的成本可忽略)。
+     *
+     * 副本生成的實體**一律不掉落物品與經驗**:①actor 的裝備是演出道具(Boss 手上那把刀),
+     * 掉出來就變成玩家可以帶走的複製品;②掉在場地上的東西會在整局結束的 diff 回滾之後留在
+     * 那裡(回滾只還原方塊,不收拾掉落物),下一局玩家會撿到上一局的殘骸;③獎勵一律走
+     * `RewardSink`(有 completionId 幂等、有額度閘門),掉落物是繞過那條線的免費產出。
+     *
+     * 用 `HIGHEST` 而不是 `MONITOR`:MONITOR 依約定不該改事件內容,而這裡要清 drops。
+     */
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun onEntityDeath(event: EntityDeathEvent) {
-        core.stageEngine.encounters.onEntityDeath(event.entity.uniqueId)
+        val entityId = event.entity.uniqueId
+        if (core.isDungeonOwnedEntity(entityId)) {
+            event.drops.clear()
+            event.droppedExp = 0
+        }
+        core.stageEngine.encounters.onEntityDeath(entityId)
+        core.stageEngine.handleActorDeath(entityId)
     }
 
     /** ARCH §5.3:副本內死亡 = 退出 Session(重生點交還一般死亡流程,不是 HanaToki 的責任)。 */

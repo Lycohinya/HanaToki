@@ -1,11 +1,13 @@
 package com.tinyyana.hanatoki
 
+import com.tinyyana.hanatoki.actor.ActorController
 import com.tinyyana.hanatoki.api.DungeonInfo
 import com.tinyyana.hanatoki.api.MusicCue
 import com.tinyyana.hanatoki.api.PresenceBridge
 import com.tinyyana.hanatoki.check.CheckResolver
 import com.tinyyana.hanatoki.config.DungeonRegistry
 import com.tinyyana.hanatoki.folia.InstanceDispatch
+import com.tinyyana.hanatoki.folia.PlayerOp
 import com.tinyyana.hanatoki.folia.WorldOp
 import com.tinyyana.hanatoki.instance.EndReason
 import com.tinyyana.hanatoki.instance.EnterResult
@@ -34,6 +36,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge {
     val registry = DungeonRegistry(plugin, plugin.logger)
     val texts = Texts()
     val rewardDispatcher = RewardDispatcher(plugin)
+    val actorController = ActorController(plugin)
     val stageEngine = StageEngine(this)
 
     // 每個 slot 一份 diff recorder(Phase 1 場地重置的最小單位是 slot,不是整個 instance)。
@@ -58,10 +61,18 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge {
         return resolver.resolve(playerId, checkId)
     }
 
-    /** ARCH §4「MusicCue」:integration 缺席時無聲降級。 */
+    /**
+     * ARCH §4「MusicCue」:integration 缺席時無聲降級。
+     *
+     * 派工到**該玩家自己的 EntityScheduler**(ARCH §5.2 規則 2):BGM 最終是對這位玩家送封包,
+     * 跟 message/title/sound 同一類操作,不該從 instance 的 anchor region 直接打過去。
+     * 這同時保證 cue 是「stage 進入的當下就送出」而不是等下一輪輪詢——現況蒼櫻的 BGM 要等
+     * MusicService 的下一次輪詢才切,玩家開打了音樂還沒進來,那個問題在 HanaToki 這條路徑
+     * 結構上不存在(見 `LycohinyaCore` 的 MusicService 修正)。
+     */
     fun musicCue(playerId: UUID, cueId: String) {
         val cue = plugin.server.servicesManager.getRegistration(MusicCue::class.java)?.provider ?: return
-        cue.cue(playerId, cueId)
+        PlayerOp.dispatch(plugin, playerId) { cue.cue(playerId, cueId) }
     }
 
     fun enter(dungeonId: String, players: List<Player>): EnterResult<Location> {
@@ -121,19 +132,24 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge {
         val session = sessionManager.sessionById(sessionId) ?: return
         val durationMs = System.currentTimeMillis() - session.startedAtMs
         val members = session.activeMembers()
+        // ⚠ 順序:**先原子認領這個 session**(endSession 內部是 `sessions.remove` 的回傳值),
+        // 認領成功才發獎。反過來寫的話,同一局被兩條路徑同時結算(behavior 的 resolve 撞上
+        // 逾時 tick,或 behavior 自己不小心呼叫兩次 resolve)會產生**兩組不同的 completionId**,
+        // integration 端的 completionId 幂等去重完全擋不住——那是「同一局兩次結算」不是「同一筆
+        // 送兩次」。2026-08-23 Phase 4 補測時發現的洞。
+        val ended = sessionManager.endSession(sessionId, EndReason.RESOLVED) ?: return
         for (playerId in members) {
             rewardDispatcher.dispatch(
                 CompletionResult(
                     completionId = UUID.randomUUID(),
                     playerId = playerId,
-                    dungeonId = session.dungeonId,
+                    dungeonId = ended.dungeonId,
                     resultKey = resultKey,
                     durationMs = durationMs,
                     stats = state.stats.toMap(),
                 ),
             )
         }
-        val ended = sessionManager.endSession(sessionId, EndReason.RESOLVED) ?: return
         stageEngine.endFor(sessionId)
         handleSessionEnded(ended.slotId, ended.dungeonId, ended.reason)
     }
@@ -188,6 +204,23 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge {
             activeSessionCount = sessionManager.snapshot().count { it.dungeonId == def.id },
         )
     }
+
+    /**
+     * 內容插件用的定義載入入口(ARCH §11:正式副本內容屬 integration,定義應該跟內容同一個 repo)。
+     *
+     * ⚠ 簽章刻意只有 [java.io.File]:**跨插件簽章不准出現任何 Kotlin 專屬型別**。初版是
+     * `DungeonRegistry.loadAdditional(File, SlotPool, (String) -> World?)`,一被 LycoHanaToki
+     * 呼叫就丟 `LinkageError: loader constraint violation ... kotlin/jvm/functions/Function1`
+     * ——兩個插件各自從 Paper library loader 載入自己那份 kotlin-stdlib,`Function1` 不是同一個
+     * Class(2026-08-23 L3 實測,不是理論顧慮)。世界解析與 slotPool 都由這裡自己拿。
+     */
+    fun loadContentDefinitions(file: java.io.File) {
+        registry.loadAdditional(file, slotPool) { name -> plugin.server.getWorld(name) }
+    }
+
+    /** 這個實體是不是副本生出來的(encounter 小怪或 actor)。死亡掉落物清除、debug 用。 */
+    fun isDungeonOwnedEntity(entityId: UUID): Boolean =
+        stageEngine.encounters.isTracked(entityId) || actorController.actorIdOf(entityId) != null
 
     // ---- PresenceBridge(ARCH §4,HanaToki 是 provider)----
     override fun isInside(playerId: UUID): Boolean = sessionManager.sessionOf(playerId) != null

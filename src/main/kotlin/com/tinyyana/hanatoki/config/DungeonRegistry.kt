@@ -30,13 +30,32 @@ class DungeonRegistry(private val plugin: Plugin, private val logger: Logger) {
         interactionLocations.clear()
         encounterLocations.clear()
         slotPool.unregisterAll()
+        loadFile(file, slotPool, resolveWorld)
+    }
+
+    /**
+     * 追加載入一份副本定義檔,**不清空**已載入的內容。
+     *
+     * 存在理由:正式副本的內容屬 integration/內容插件(ARCH §11),它的副本定義應該跟內容住在
+     * 同一個 repo/同一個 dataFolder,而不是要求管理員手動把一段 YAML 貼進引擎自己的
+     * `dungeons.yml`(那份是引擎的檔案,升級時會被拿來比對,混進內容定義只會讓兩邊都難維護)。
+     * 內容插件在 onEnable 時把自己的定義檔交進來即可——它 `depend` HanaToki,一定比引擎晚啟動,
+     * 這時候引擎的 `loadAll` 已經跑完。
+     *
+     * 同 id 重複載入 = 後者覆蓋前者(reload 語意,同 [SlotPool.register])。
+     */
+    fun loadAdditional(file: File, slotPool: SlotPool<Location>, resolveWorld: (String) -> World?) {
+        loadFile(file, slotPool, resolveWorld)
+    }
+
+    private fun loadFile(file: File, slotPool: SlotPool<Location>, resolveWorld: (String) -> World?) {
         if (!file.exists()) {
-            logger.warning("[HanaToki] dungeons.yml 不存在,沒有任何副本定義被載入:${file.path}")
+            logger.warning("[HanaToki] 副本定義檔不存在,略過:${file.path}")
             return
         }
         val yaml = YamlConfiguration.loadConfiguration(file)
         val root = yaml.getConfigurationSection("dungeons") ?: run {
-            logger.warning("[HanaToki] dungeons.yml 沒有 dungeons: 區塊")
+            logger.warning("[HanaToki] ${file.name} 沒有 dungeons: 區塊")
             return
         }
         for (id in root.getKeys(false)) {
@@ -83,7 +102,7 @@ class DungeonRegistry(private val plugin: Plugin, private val logger: Logger) {
                 encounterLocations[slotId] = encMap
             }
         }
-        logger.info("[HanaToki] 載入 ${definitions.size} 座副本定義,共 ${definitions.values.sumOf { it.slotCount }} 個 slot")
+        logger.info("[HanaToki] ${file.name} 載入後共 ${definitions.size} 座副本定義、${definitions.values.sumOf { it.slotCount }} 個 slot")
     }
 
     private fun sectionToMap(section: ConfigurationSection): Map<String, Any?> =

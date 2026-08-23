@@ -1,6 +1,7 @@
 package com.tinyyana.hanatoki.command
 
 import com.tinyyana.hanatoki.HanaTokiCore
+import com.tinyyana.hanatoki.folia.PlayerOp
 import com.tinyyana.hanatoki.instance.EnterResult
 import org.bukkit.Bukkit
 import org.bukkit.command.Command
@@ -43,15 +44,28 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
             Bukkit.getPlayerExact(name) ?: run { sender.sendMessage("§c找不到玩家 $name,略過"); null }
         }
         val party = (listOf(player) + extraPlayers).distinct()
+        val display = core.registry.definitions[dungeonId]?.display ?: dungeonId
         when (val result = core.enter(dungeonId, party)) {
-            is EnterResult.NoSlot -> sender.sendMessage("§c副本 $dungeonId 目前客滿或不存在,稍後再試")
+            is EnterResult.NoSlot -> sender.sendMessage(core.texts.format("session.no-slot", mapOf("dungeon" to display)))
             is EnterResult.Entered -> {
                 party.forEach { member ->
+                    // teleportAsync 的 callback 不保證在哪條執行緒——對玩家的訊息一律經 PlayerOp
+                    // 派回他自己的 EntityScheduler(ARCH §5.2 規則 2)。
                     member.teleportAsync(result.anchor).thenAccept { ok ->
                         if (ok) {
-                            member.sendMessage("§a已進入副本 $dungeonId(slot=${result.session.slotId}),限時 ${result.session.timeLimitMs / 1000} 秒")
+                            PlayerOp.message(
+                                core.plugin,
+                                member.uniqueId,
+                                core.texts.format(
+                                    "session.entered",
+                                    mapOf(
+                                        "dungeon" to display,
+                                        "seconds" to (result.session.timeLimitMs / 1000).toString(),
+                                    ),
+                                ),
+                            )
                         } else {
-                            member.sendMessage("§c傳送失敗,已從 session 移除")
+                            PlayerOp.message(core.plugin, member.uniqueId, core.texts.format("session.teleport-failed"))
                             core.kick(member.uniqueId)
                         }
                     }
@@ -63,7 +77,7 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
     private fun handleLeave(sender: CommandSender) {
         val player = sender as? Player ?: run { sender.sendMessage("§c只有玩家能離開"); return }
         core.kick(player.uniqueId)
-        sender.sendMessage("§a已離開副本")
+        sender.sendMessage(core.texts.format("session.left"))
     }
 
     private fun handleAdmin(sender: CommandSender, args: Array<out String>) {

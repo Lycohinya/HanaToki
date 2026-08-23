@@ -92,7 +92,7 @@ class PuzzleTestBehavior : DungeonBehavior {
             ?: mutableListOf<String>().also { ctx.state.set("lit", it) }
         lit += lampId
         ctx.interactionLocation(lampId)?.let { loc -> ctx.mutate(loc) { it.type = Material.GLOWSTONE } }
-        ctx.messageAll("puzzle.lit", "count" to lit.size.toString())
+        ctx.messageAll("puzzle.lit", mapOf("count" to lit.size.toString()))
         when {
             lit.size < 3 -> return
             lit == correctOrder -> solvePuzzle(ctx)
