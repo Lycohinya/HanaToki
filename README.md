@@ -25,9 +25,10 @@ HanaToki 是給 Paper／Folia 插件使用的微型副本引擎。
 |---|---|
 | 安裝、設定、開測試副本、查指令或排錯 | [使用手冊](docs/USAGE.md) |
 | 寫內容插件、接服務、查 callback 與執行緒契約 | [API 文件](docs/API.md) |
-| 直接看一份可執行的內容實作 | 相鄰 repo `LycoHanaToki` |
 
 第一次接觸建議先讀使用手冊。API 文件是查契約用的，不需要從第一行背到最後一行。
+
+Lycohinya 正式使用的內容層 `LycoHanaToki` 是閉源專案，不提供公開閱讀連結；這個 repo 只維護通用引擎、probe 與整合契約。
 
 ## 五分鐘接進內容插件
 

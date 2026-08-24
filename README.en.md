@@ -25,9 +25,10 @@ The engine does not own your economy, quests, items, menus, or player database. 
 |---|---|
 | Install, configure, operate, and troubleshoot the plugin | [Usage guide (Traditional Chinese)](docs/USAGE.md) |
 | Build a content plugin and look up API contracts | [API reference (Traditional Chinese)](docs/API.md) |
-| Inspect a working content implementation | The adjacent `LycoHanaToki` repository |
 
 The README is the entry point. Detailed schemas, method tables, failure semantics, and current limitations live in the linked documents so this page remains readable.
+
+Lycohinya's production content layer, `LycoHanaToki`, is closed source and has no public reading link. This repository publishes only the generic engine, its probes, and integration contracts.
 
 ## Five-minute integration
 
