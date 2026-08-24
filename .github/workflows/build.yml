@@ -8,8 +8,8 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# HanaToki 是零 Lyco 依賴的獨立引擎(不 includeBuild 任何 Lyco* 插件),沒有跨 repo composite
-# build 的問題,所以這裡直接完整編譯 + 跑單元測試,不是 LycoQuest 那種只驗證 wrapper 的 Tier2 CI。
+# HanaToki 是零依賴的獨立引擎(不 includeBuild 任何其他插件),沒有跨 repo composite build
+# 的問題,所以這裡直接完整編譯 + 跑單元測試。
 jobs:
   build:
     runs-on: ubuntu-latest

@@ -1,7 +1,7 @@
-# HanaToki 副本定義(ARCH §2 DungeonDefinition)。
-# test-empty:Phase 1 骨架驗證用,沒有 stage 圖,進去、計時、超時送回。
-# test-puzzle/test-combat:Phase 2 的 architecture probe(ARCH §8「三燈引路」+ §5 最小 encounter
-# 驗證),不是正式副本內容——正式內容屬 integration/內容插件(ARCH §11)。
+# HanaToki 副本定義(見 config/DungeonDefinition.kt)。
+# test-empty:最小骨架驗證用,沒有 stage 圖,進去、計時、超時送回。
+# test-puzzle/test-combat:分別是「解謎流程」與「最小戰鬥 encounter」的 architecture probe,
+# 不是正式副本內容——正式內容一律屬於消費端(內容)插件,不住在引擎這個 repo 裡。
 #
 # 三座定義共用同一個世界 `hanatoki_probe`,靠 anchor-offset-z 互相錯開(各自沿 X 軸展開 slot,
 # offset 只是把不同副本的整組 slot 挪到不同 Z 帶,避免 slot#0 撞在同一個座標——見
@@ -15,9 +15,9 @@
 #   它們都標了 `test-only: true`,**預設不會被註冊**(世界不建、slot 不登記、玩家看不到也
 #   進不去)。開發/驗收時把這個值改成 true 再重啟。
 #
-#   為什麼需要這道閘門(2026-08-24 上線前查到):`/hanatoki enter` 的權限是 `default: op`,
-#   但這三座定義原本是無條件註冊的,而 integration 那側還替其中兩座配了通關花蜜——一旦有人
-#   把 enter 權限發給玩家,就多出一條刷花蜜的路。定義不存在比「只是沒註冊 behavior」安全。
+#   為什麼需要這道閘門:`/hanatoki enter` 的權限雖然預設是 op,但這三座定義本來是無條件
+#   註冊的——如果消費端插件另外替它們配了通關獎勵,一旦 op 權限被誤發給玩家,就多出一條
+#   刷獎勵的路。定義不存在比「只是沒註冊 behavior」安全。
 enable-test-dungeons: false
 
 dungeons:
@@ -56,7 +56,7 @@ dungeons:
         clear_path: {}
     # ⚠ 所有偏移都刻意避開 (0,0,0):那是 slot anchor 本身,也是玩家進場的傳送點——
     # 如果哪個 interaction 用了 (0,0,0),進場那一刻玩家腳下的方塊會被 entry stage 換成實心方塊,
-    # 直接把人卡住(2026-08-23 L4 測試抓到,見 HANDOFF)。
+    # 直接把人卡住(實測踩過的坑)。
     interactions:
       mural: { x: 0, y: 0, z: -2, kind: right-click }
       lamp_a: { x: -2, y: 0, z: 2, kind: right-click }

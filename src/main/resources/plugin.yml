@@ -16,8 +16,7 @@ website: https://tinyyana.com
 libraries:
   - org.jetbrains.kotlin:kotlin-stdlib-jdk8:2.4.20-Beta1
 
-# 引擎本體零依賴(ARCH §3):不 depend/softdepend 任何 Lyco* 插件。GUI 才會 softdepend LycoLib,
-# Phase 1 沒有 GUI。
+# 引擎本體零依賴:不 depend/softdepend 任何其他插件(玩法內容一律由消費端插件自行提供)。
 
 commands:
   hanatoki:
@@ -27,10 +26,11 @@ commands:
 
 permissions:
   hanatoki.enter:
-    # ⚠ 2026-08-24 由 true 改成 op。`/hanatoki enter` 是**開發/驗收指令**,不是玩家入口——
-    #   玩家走整合插件的選單(LycohinyaCore 的 `/lyco dungeon` → api/DungeonAccess),那條路
-    #   不查這個權限。留 true 的話玩家可以繞過選單直接指定任何 dungeonId 進場。
-    description: 直接用指令進出 HanaToki 副本 slot(開發/驗收用;玩家走整合插件的選單)
+    # ⚠ 預設是 op,不是 true。`/hanatoki enter` 是**開發/驗收指令**,不是玩家入口——玩家該走
+    #   消費端插件自己建的入口(選單/NPC/告示牌...),透過 api/DungeonAccess 服務呼叫,那條路
+    #   不查這個權限。留 true 的話玩家可以繞過那層入口,直接用指令指定任意 dungeonId 進場
+    #   (包括還沒設計好給玩家碰的內容)。
+    description: 直接用指令進出 HanaToki 副本 slot(開發/驗收用;玩家應該走消費端插件自建的入口)
     default: op
   hanatoki.admin:
     description: HanaToki 管理指令(list/kick/reset/debug)
