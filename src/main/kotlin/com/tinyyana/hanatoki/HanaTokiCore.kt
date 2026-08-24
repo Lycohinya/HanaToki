@@ -392,6 +392,23 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         }
     }
 
+    override fun enterDungeonDuo(playerId: UUID, partnerId: UUID, dungeonId: String): Boolean {
+        val player = plugin.server.getPlayer(playerId) ?: return false
+        val partner = plugin.server.getPlayer(partnerId) ?: return false
+        val def = registry.definitions[dungeonId] ?: return false
+        val party = listOf(player, partner)
+        party.forEach { returnPoints.remember(it) }
+        return when (val result = enter(dungeonId, party)) {
+            is EnterResult.NoSlot -> false
+            is EnterResult.Entered -> {
+                party.forEach { it.teleportAsync(entryLocationFor(def, result.anchor)) }; true
+            }
+            is EnterResult.Joined -> {
+                party.forEach { it.teleportAsync(entryLocationFor(def, result.anchor)) }; true
+            }
+        }
+    }
+
     override fun leaveDungeon(playerId: UUID): Boolean {
         val session = sessionManager.sessionOf(playerId) ?: return false
         if (!session.persistent) {

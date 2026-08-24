@@ -29,6 +29,15 @@ interface DungeonAccess {
      */
     fun enterDungeon(playerId: UUID, dungeonId: String): Boolean
 
+    /**
+     * 把兩個玩家一起送進副本(2026-08-24 新增:刀塚 `party-cap: 2` 的兩人組隊入口)。
+     * 兩人其中一個不在線 / 副本不存在 / 沒有空位都回 false,呼叫端自己決定訊息。
+     *
+     * 刻意是雙人專用簽章而不是 `List<UUID>`——目前唯一用得到的副本(刀塚)party-cap 就是 2,
+     * 沒有第三人以上的實際案例;真的出現才擴,不猜測性先做泛型 party API(ARCH §12)。
+     */
+    fun enterDungeonDuo(playerId: UUID, partnerId: UUID, dungeonId: String): Boolean
+
     /** 把玩家送出他所在的副本(回進場前的位置,沒登記就回重生點/第一個非副本世界)。 */
     fun leaveDungeon(playerId: UUID): Boolean
 }
