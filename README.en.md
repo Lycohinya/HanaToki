@@ -1,257 +1,148 @@
-[繁體中文](README.md) | **English**
+[繁體中文](README.md) · **English**
 
 # HanaToki
 
-A Folia-first micro-dungeon / instance engine for Paper plugins. It handles the generic
-lifecycle every instanced encounter needs — slot allocation, session/party state, a stage
-(state machine) graph, world provisioning and rollback, spawning and tracking mobs, roll
-checks, and rewards — so a game plugin only has to describe *its own* content: what the
-stages are called, what happens in each one, and what a "win" looks like.
+HanaToki is a small dungeon engine for Paper and Folia plugins.
 
-It works equally well for a 90-second boss duel and for a permanent shared arena world; both
-are the same engine underneath, just configured differently via `ExecutionMode`
-(`SESSION` vs `PERSISTENT` — see `config/DungeonDefinition.kt`).
+It handles the awkward parts of an encounter lifecycle: allocating an arena, tracking the party, advancing stages, spawning and cleaning up entities, restoring block changes recorded through `StageContext.mutate`, and returning players when the run ends. The content plugin still decides what happens inside the dungeon and what counts as a clear.
 
-License: TinyYana Universal Software License (TYUSL) 1.0 — see `LICENSE`.
+In short: **YAML describes the space, Kotlin defines the game, and HanaToki owns the lifecycle.**
 
-## What it is / isn't
+## Is it a fit?
 
-HanaToki **is**:
+| What you need | HanaToki |
+|---|---|
+| Short dungeon runs, boss rooms, or persistent arenas on one Paper／Folia server | Yes |
+| YAML coordinates plus Kotlin behavior and presentation | Yes |
+| A complete no-code dungeon plugin | No |
+| Built-in GUI, matchmaking, mid-run joining for session instances, cross-server routing, or block protection | Not currently included |
 
-- An engine for defining "instanced spaces" (dungeon, arena, puzzle room, boss room — any
-  bounded area a player or party enters, does something in, and leaves) purely from YAML +
-  a small Kotlin extension point.
-- **Content-agnostic.** It has no idea what a "coin", a "combo meter", or a "greatsword" is.
-  It only ever deals in abstract concepts: a dungeon ID, a check ID, an outcome string, a
-  reward key. Your plugin supplies the actual meaning.
-- Folia-native. Every state change that touches the world, an entity, or a player is
-  dispatched to whichever region/entity scheduler actually owns that object — nothing assumes
-  a single global tick thread.
+The engine does not own your economy, quests, items, menus, or player database. Content-specific rules remain in a separate plugin and connect through the API.
 
-HanaToki **is not** (yet):
+## Documentation
 
-- A GUI/menu system, a matchmaker, or a way to join an in-progress instance mid-run.
-- A block-protection plugin. An instance's arena has no built-in protection against players
-  breaking blocks — if you're running it inside a shared/persistent world (not a disposable
-  void world), pair it with a claim/protection plugin or your own listener.
+| Goal | Read |
+|---|---|
+| Install, configure, operate, and troubleshoot the plugin | [Usage guide (Traditional Chinese)](docs/USAGE.md) |
+| Build a content plugin and look up API contracts | [API reference (Traditional Chinese)](docs/API.md) |
+| Inspect a working content implementation | The adjacent `LycoHanaToki` repository |
 
-## Quick start
+The README is the entry point. Detailed schemas, method tables, failure semantics, and current limitations live in the linked documents so this page remains readable.
 
-### 1. Add it as a build dependency
+## Five-minute integration
 
-HanaToki has **zero dependency** on any other plugin (no `depend`/`softdepend`, no compile-time
-dependency on anything but Paper + Kotlin). To compile against its types from another Gradle
-project, pull it in as an included build:
+The current build targets Java 25 and Paper API 26.2. Treat [`gradle.properties`](gradle.properties) and [`plugin.yml`](src/main/resources/plugin.yml) as the version sources of truth.
+
+### 1. Add the composite build
 
 ```kotlin
-// settings.gradle.kts of your plugin
+// settings.gradle.kts
 includeBuild("../HanaToki")
 ```
 
 ```kotlin
-// build.gradle.kts of your plugin
+// build.gradle.kts
 dependencies {
-    compileOnly("com.tinyyana:HanaToki")
+    compileOnly("com.tinyyana:HanaToki:0.1.2")
 }
 ```
 
-At runtime, just make sure `HanaToki.jar` is in the server's `plugins/` folder alongside
-yours, and declare it as a `depend` in your `plugin.yml`.
-
-### 2. Describe a dungeon in YAML
-
-Ship a YAML file with your plugin (or generate one at runtime) and load it with
-`HanaTokiCore.loadContentDefinitions(file)` — see step 3. Minimal example, a two-minute solo
-combat encounter with one interactive lever:
+### 2. Declare startup order
 
 ```yaml
-dungeons:
-  goblin-den:
-    display: "Goblin Den"
-    world: goblin_den_instance      # created automatically as an empty "void" world
-    slot-count: 8                   # up to 8 concurrent, fully independent copies
-    slot-spacing-blocks: 1024       # how far apart each copy is placed, so they never overlap
-    session-time-limit-seconds: 120 # hard cap; instance is force-ended if this is exceeded
-    solo-cap: 1
-    party-cap: 4
-    reconnect-grace-seconds: 60     # a disconnected player has this long to rejoin before being dropped
-    stages:
-      start: entry
-      list:
-        entry: {}
-        combat:
-          timeout-seconds: 90
-        victory: {}
-    interactions:
-      lever: { x: 3, y: 0, z: -2, kind: right-click }
-    encounters:
-      goblins: { entity: ZOMBIE, count: 5, x: 0, y: 0, z: 4, radius: 3 }
+# plugin.yml
+depend: [HanaToki]
 ```
 
-- `world-create: true` (the default) tells the engine this world belongs to it: if it doesn't
-  exist yet, HanaToki builds an empty void world for it automatically — no manual Multiverse
-  setup needed. Set it `false` if `world` is an existing shared or hand-built world instead.
-- Every field in `interactions`/`encounters` is a coordinate **offset from the slot's anchor
-  point**, not an absolute coordinate — the engine works out the real position per slot.
-- See `DungeonDefinition.kt` for the full field list (execution mode, world generator hookup,
-  border margin, tags, etc.) — every field has a doc comment.
-
-### 3. Register your content in `onEnable`
-
-Your plugin `depend`s on HanaToki, so it always starts after it:
+### 3. Load definitions and register behavior
 
 ```kotlin
-class MyGamePlugin : JavaPlugin() {
-    override fun onEnable() {
-        val hanaToki = (server.pluginManager.getPlugin("HanaToki") as HanaTokiPlugin).core
+override fun onEnable() {
+    saveResource("dungeons.yml", false)
 
-        // Player-facing text for your stages/outcomes (merged into the engine's message table)
-        hanaToki.texts.merge(mapOf(
-            "goblin-den.entry" to "You step into the goblin den...",
-            "goblin-den.victory" to "The den falls silent.",
-        ))
+    val hanaToki = server.pluginManager.getPlugin("HanaToki") as? HanaTokiPlugin
+        ?: error("HanaToki is not enabled")
 
-        // Your dungeon definitions, loaded from the YAML you ship as a resource
-        hanaToki.loadContentDefinitions(File(dataFolder, "dungeons.yml"))
-
-        // Your gameplay logic: what actually happens at each stage
-        DungeonBehaviorRegistry.register("goblin-den", GoblinDenBehavior())
-    }
+    hanaToki.core.texts.merge(
+        mapOf("goblin-den.enter" to "<gray>Footsteps echo through the cave...</gray>"),
+    )
+    hanaToki.core.loadContentDefinitions(File(dataFolder, "dungeons.yml"))
+    DungeonBehaviorRegistry.register("goblin-den", GoblinDenBehavior())
 }
 ```
 
 ```kotlin
 class GoblinDenBehavior : DungeonBehavior {
     override fun onStageEnter(ctx: StageContext, stageId: String) {
-        if (stageId == "combat") ctx.encounters.spawn("goblins")
-    }
-
-    override fun onEncounterCleared(ctx: StageContext, encounterId: String) {
-        if (encounterId == "goblins") ctx.resolve("victory")
+        if (stageId == "combat") {
+            ctx.spawnEncounter("goblins") { resumed ->
+                resumed.resolve("cleared")
+            }
+        }
     }
 }
 ```
 
-`DungeonBehavior` is the one interface you implement per dungeon ID — see
-`stage/DungeonBehavior.kt` for the full callback list (stage enter/exit/timeout, interactions,
-check outcomes, encounter cleared/failed, actor death). `StageContext` (passed into every
-callback) is your entire toolbox for producing effects — spawning props, moving/posing actors,
-sending messages, resolving the stage, rolling checks. You never touch Bukkit's world/entity
-APIs directly from a callback; everything goes through `ctx` so the engine can keep it on the
-right scheduler thread.
+### 4. Enter through your own player-facing flow
 
-### 4. Let players in
-
-Player entry has no built-in UI — that's deliberately left to you (a menu, a sign, an NPC,
-whatever fits your game). Programmatically, other plugins reach HanaToki through the
-`DungeonAccess` service (registered via Bukkit's `ServicesManager`, so you don't need a
-compile-time dependency on HanaToki to use it):
+HanaToki does not ship a player menu. A menu, NPC, quest, or sign can retrieve `DungeonAccess` from Bukkit's `ServicesManager`:
 
 ```kotlin
-val access = server.servicesManager.getRegistration(DungeonAccess::class.java)?.provider
-access?.enterDungeon(player.uniqueId, "goblin-den")
+val access = server.servicesManager
+    .getRegistration(DungeonAccess::class.java)
+    ?.provider
+
+val accepted = access?.enterDungeon(player.uniqueId, "goblin-den") == true
 ```
 
-There's also a built-in `/hanatoki` command for testing and administration (see below) — it is
-**not** meant to be the player-facing entry point for a shipped game. It defaults to
-op-only (`hanatoki.enter`) precisely so it can't be used to bypass whatever entry flow (menu,
-NPC, quest trigger...) your own plugin builds on top of `DungeonAccess`.
+`true` only means the request was accepted. Teleportation is asynchronous on Folia, and the entry plugin must still enforce its own eligibility, party, cost, and cooldown rules.
 
-## Architecture principles
+## Responsibility map
 
-- **The engine doesn't know what your game is about.** It never sees domain vocabulary like
-  currency names, ability names, or item names — only dungeon IDs, check IDs, outcome
-  strings, and reward keys, all plain strings supplied by your content.
-- **Zero dependencies.** HanaToki doesn't `includeBuild`, `compileOnly`, or `depend`/
-  `softdepend` on any other plugin. If another plugin wants to compile against its types, it
-  includes HanaToki as a build (see Quick Start above).
-- **Folia-native.** Every core state change is dispatched through the region/entity
-  scheduler that actually owns the affected location or entity — the engine never assumes a
-  single global tick thread, or that "an instance has an anchor point" means that anchor's
-  thread owns the whole arena.
+```text
+Content plugin
+  ├─ dungeons.yml: world, slots, stages, interactions, encounters
+  ├─ DungeonBehavior: rules and presentation
+  └─ ServicesManager: checks, rewards, music, and other integrations
+                │
+                ▼
+HanaToki
+  session → stage → actor / prop / encounter → resolution → cleanup
+                │
+                ▼
+Paper／Folia region, entity, and global schedulers
+```
 
-## Modules
+`DungeonBehavior` callbacks must use `StageContext` for player, world, and entity work. A future may complete on any thread; call `ctx.submit { ... }` before mutating instance state, transitioning, or resolving.
 
-| Module | Contents |
-|---|---|
-| `instance/` | `SlotPool` (lock-free arena slot allocation), `Session`/`MemberState` (join/leave/timing/offline-grace state machine), `SessionManager` |
-| `stage/` | `StageGraph`/`InstanceState` (pure-logic state machine), `StageEngine`, `StageContext` (your only interface to produce effects), `DungeonBehavior` (your extension point) |
-| `encounter/` | `EncounterController`: spawning, entity binding, death tracking, cleanup |
-| `actor/` | `ActorSpec`/`ActorHandle`/`ActorController`: scripted NPCs (backed by vanilla `Mannequin`) |
-| `check/` | `CheckResolver`/`CheckDescriptor` port + `CheckAggregator` (individual or majority-vote outcomes) |
-| `reward/` | `CompletionResult` + `RewardSink` port + `RewardDispatcher` (retries delivery that failed) |
-| `world/` | `DiffLog` (pure sort/group logic for block changes), `WorldDiffRecorder` (actual diff recording and rollback) |
-| `folia/` | `WorldOp` (world/entity mutation dispatch), `PlayerOp` (player-action dispatch), `InstanceDispatch` (serializes an instance's own logic onto one thread) |
-| `api/` | `DungeonAccess` (enter/leave, consumed by other plugins), `PresenceBridge` (is-player-inside queries), `MusicCue`, `DungeonInfo` |
-| `config/` | `DungeonDefinitionParser`/`DungeonRegistry` (YAML dungeon-definition parsing) |
-| `command/` | `/hanatoki` (alias `hana`) |
+## Current boundaries
 
-## The engine/content boundary
+- Built-in `test-*` dungeons are disabled by default and are development probes, not shipped game content.
+- `solo-cap` and `party-cap` are parsed but not enforced by the core yet. Entry plugins must validate party rules.
+- There is no configuration reload command. A full restart is the supported way to apply YAML or content updates.
+- Reloading only a content plugin can leave the previous behavior registration behind because the registry has no unregister operation.
+- Missing `RewardSink` deliveries are queued only in this JVM's memory; the queue does not survive a restart.
+- Session instances do not support joining an already-running session. Persistent instances deliberately share one long-lived instance and can add members as players enter its world.
+- Block rollback covers only writes made through `ctx.mutate`. Player edits and direct Bukkit block writes need separate protection or rollback logic.
 
-The engine ships with a handful of `test-*` dungeon definitions
-(`src/main/resources/dungeons.yml`) that exist purely as regression fixtures for the engine's
-own capabilities — they are **not** meant to be real content, and are disabled by default
-(`enable-test-dungeons: false`, and each definition is additionally flagged
-`test-only: true`). Turn `enable-test-dungeons` on locally if you want to poke at them while
-developing against the engine.
-
-Real content — the actual dungeons your game ships — lives entirely in *your* plugin: your
-own YAML file(s), your own `DungeonBehavior` implementation(s), your own player-facing text.
-Load and register them from your `onEnable()` as shown in Quick Start step 3.
-
-## Cross-plugin call safety
-
-`StageContext`, `DungeonBehavior`, and `ActorHandle` are interfaces implemented and called
-across a plugin boundary — and every Paper plugin gets its **own copy** of the Kotlin
-stdlib via the library loader, loaded by a different classloader. Two plugins holding
-different `Class` objects for the same Kotlin runtime type causes a hard `LinkageError` at
-the call site, not a compile error, so this repo holds itself to a few rules on any type
-that crosses that boundary:
-
-- **No Kotlin-only types in a public signature.** `kotlin.Pair`, `() -> Unit` (`Function0`),
-  `(T) -> Unit` (`Function1`), etc. all fail with
-  `LinkageError: loader constraint violation ... different Class objects for the type
-  kotlin/jvm/functions/Function1`. Use `Runnable` / `java.util.function.Consumer` for
-  callbacks instead (a Kotlin caller can still pass a lambda — SAM conversion handles it),
-  and named-parameter-style calls should use `Map<String, String>` instead of a data class
-  (`kotlin.collections.Map` compiles down to `java.util.Map`, which is safe).
-- **No Kotlin default parameter values** on a cross-plugin-visible method — they compile to a
-  synthetic `xxx$default` overload, which is the same class of `NoSuchMethodError` risk.
-  Write explicit overloads instead if you want the convenience.
-- Interface methods with a body (`DefaultImpls`) are fine to use, but both sides need to be
-  recompiled together whenever one is added or removed.
-
-## Commands and permissions
-
-| Command | What it does |
-|---|---|
-| `/hanatoki enter <dungeonId> [player2] [player3] ...` | Enter a dungeon slot, optionally bringing named online players along as party members |
-| `/hanatoki leave` | Leave whatever instance you're currently in |
-| `/hanatoki admin list` | List current slot/session state |
-| `/hanatoki admin kick <player>` | Remove a player from their current session |
-| `/hanatoki admin reset <slotId>` | Force-resolve and reclaim a slot (including cleanup) |
-| `/hanatoki admin debug` | Dump internal state for debugging |
-
-| Permission | Default | What it gates |
-|---|---|---|
-| `hanatoki.enter` | op | Direct command-line entry/exit. This is a **development and admin testing tool**, not the player-facing entry point — a shipped game should give players a real entry flow (menu, NPC, sign, quest trigger...) built on the `DungeonAccess` API from another plugin, which does not check this permission. |
-| `hanatoki.admin` | op | Admin subcommands (`list`/`kick`/`reset`/`debug`) |
+See the [usage guide](docs/USAGE.md#9-現有限制與操作邊界) for operational consequences and recovery paths.
 
 ## Development
 
-```bash
-./gradlew build   # compile + unit tests + jar
-./gradlew test    # unit tests only
+Windows:
+
+```powershell
+.\gradlew.bat clean test build
 ```
 
-Unit tests cover the pure logic that doesn't touch Bukkit types directly (`SlotPool`,
-`Session`, `SessionManager`, `InstanceState`, `DiffLog`, `CheckAggregator`,
-`DungeonDefinitionParser`). The parts that involve real `Location`/`BlockData`/entities/
-scheduling (`WorldDiffRecorder`, `WorldOp`/`PlayerOp`, `ActorController`, `DungeonRegistry`,
-the command) are covered by integration tests run against a live Folia server instead.
+Linux／macOS:
 
-## Contributing
+```bash
+./gradlew clean test build
+```
 
-Issues and pull requests are welcome. If you're adding a feature, a short note on the
-motivating use case in the PR description is appreciated — this engine deliberately avoids
-building capabilities speculatively ahead of an actual need.
+Artifacts are written to `build/libs/`. Unit tests cover pure logic; world, entity, teleport, and scheduler paths still require integration testing on a real Folia／Lecithin server.
+
+## License
+
+[TinyYana Universal Software License 1.0](LICENSE)
