@@ -11,6 +11,7 @@ import org.bukkit.event.player.PlayerInteractEvent
 import org.bukkit.event.player.PlayerJoinEvent
 import org.bukkit.event.player.PlayerQuitEvent
 import org.bukkit.event.player.PlayerRespawnEvent
+import com.destroystokyo.paper.event.player.PlayerPostRespawnEvent
 
 /**
  * ARCH §5.3:離線標記/重連只做 submit()——這裡的 handler 本身不碰狀態機內部,只轉呼叫
@@ -48,6 +49,9 @@ class HanaTokiListener(private val core: HanaTokiCore) : Listener {
             core.leavePersistent(player.uniqueId)
         }
         core.joinPersistentByWorld(player.uniqueId, player.world.name)
+        // 跨世界是局內物品最直接的洩漏路徑(用傳送簽名/`/spawn` 走出去)。到了新世界之後
+        // 掃一次背包,不合法的局內物品當場清掉——事件在該玩家自己的 region 觸發,可以直接動背包。
+        core.instanceItemGuard.purgeIllegal(player)
     }
 
     @EventHandler
@@ -60,6 +64,11 @@ class HanaTokiListener(private val core: HanaTokiCore) : Listener {
             core.joinPersistentByWorld(player.uniqueId, player.world.name)
             return
         }
+        // 局內背包:上次沒收斂完的交易在這裡接手(崩潰重啟、還原途中登出、死亡後直接離線)。
+        // 順序在 session 重連判定之前——玩家的永久背包比他站在哪重要。
+        core.instanceInventory.recoverOnJoin(player.uniqueId)
+        core.instanceItemGuard.purgeIllegal(player)
+
         val reconnected = core.sessionManager.reconnect(player.uniqueId, System.currentTimeMillis())
         if (reconnected) {
             val session = core.sessionManager.sessionOf(player.uniqueId) ?: return
@@ -85,9 +94,34 @@ class HanaTokiListener(private val core: HanaTokiCore) : Listener {
      */
     @EventHandler
     fun onRespawn(event: PlayerRespawnEvent) {
+        // ⚠ 還原的排程要在**任何 early return 之前**:玩家在副本裡死掉、但重生點是主世界的床時,
+        //   下面那個 `isDungeonWorld` 判斷會直接 return,而他一樣欠著一份永久背包。
+        scheduleRestoreAfterRespawn(event.player)
+
         if (!core.isDungeonWorld(event.respawnLocation.world.name)) return
         val destination = core.returnPoints.destinationFor(event.player) ?: return
         event.respawnLocation = destination
+    }
+
+    /**
+     * 死亡當下不能把永久背包寫回去(`PlayerDeathEvent` 之後原版才會把背包清成掉落物),
+     * 所以還原被推遲到重生。這裡在**玩家自己的 EntityScheduler** 上排一 tick 之後執行,
+     * 讓原版的重生流程先跑完。
+     *
+     * ⚠ 用 `PlayerRespawnEvent` 而不是 `PlayerPostRespawnEvent`:後者在 API 裡還在,
+     * 但這台核心(Lecithin 26.2)**不會觸發它**——2026-08-29 實測,整個 L4 跑下來
+     * 「(respawn)」的還原 log 一次都沒出現過。當時死亡路徑之所以還會過,是因為收斂流程
+     * 意外地重複呼叫了還原,晚的那次剛好撞在重生之後;把重複呼叫收斂成單一管線之後,
+     * 這個洞就露出來了。不要再依賴那個事件。
+     */
+    private fun scheduleRestoreAfterRespawn(player: org.bukkit.entity.Player) {
+        player.scheduler.runDelayed(
+            core.plugin,
+            { _ -> core.instanceInventory.restoreForPlayer(player.uniqueId, "respawn") },
+            // retired(重生途中又登出):journal 留在 RESTORING,下次登入的恢復會接手。
+            null,
+            1L,
+        )
     }
 
     @EventHandler(ignoreCancelled = true)
@@ -126,9 +160,39 @@ class HanaTokiListener(private val core: HanaTokiCore) : Listener {
      * (沒有床就回世界出生點,蒼櫻的出生點就在競技場邊緣)。踢掉他等於「你死一次就不算參與者了,
      * 站在原地但收不到廣播也拿不到獎勵」——那不是現況行為。真的走掉的話 `onWorldChange` 會處理。
      */
-    @EventHandler
+    /**
+     * ARCH §5.3 + §5.6:副本內死亡。
+     *
+     * 三件事,順序有意義:
+     * 1. **先把局內物品從掉落清單移除**——不然它們會落在場地上,活過 session 結束
+     *    (場地回滾只還原方塊,不收拾掉落物),下一局的人就撿得到。
+     * 2. 定義有開 `death-resolution` 的話走一次 `resultKey=death` 的 Resolution
+     *    (Roguelike 語意:死亡也是一種 Run 結果)。
+     * 3. 否則維持既有行為:死亡 = 退出這一局。
+     *
+     * ⚠ 常駐副本例外(決策 D):那裡的成員資格是「人在不在世界裡」,死掉的人重生之後還在
+     * 那個世界。踢掉他等於「死一次就不算參與者」,不是現況行為。
+     *
+     * 用 `HIGHEST` 是因為要改 `drops`(`MONITOR` 依約定不該改事件內容)。
+     */
+    @EventHandler(priority = EventPriority.HIGHEST)
     fun onPlayerDeath(event: PlayerDeathEvent) {
-        if (core.sessionManager.sessionOf(event.player.uniqueId)?.persistent == true) return
-        core.kick(event.player.uniqueId)
+        val playerId = event.player.uniqueId
+        val stripped = core.instanceItemGuard.stripInstanceItemsFromDrops(event.drops)
+        if (stripped > 0) {
+            core.plugin.logger.info("[HanaToki] ${event.player.name} 死亡時移除了 $stripped 組局內物品掉落")
+        }
+        if (core.sessionManager.sessionOf(playerId)?.persistent == true) return
+        if (core.handlePlayerDeath(playerId)) return // 已走 Resolution,session 由那條路收斂
+        core.kick(playerId)
+    }
+
+    /**
+     * 保險絲:這台核心目前不觸發這個事件(見 [scheduleRestoreAfterRespawn] 的說明),
+     * 留著是為了「哪天核心又開始送它」時仍然正確——還原是冪等的,重複呼叫沒有代價。
+     */
+    @EventHandler
+    fun onPostRespawn(event: PlayerPostRespawnEvent) {
+        core.instanceInventory.restoreForPlayer(event.player.uniqueId, "post-respawn")
     }
 }

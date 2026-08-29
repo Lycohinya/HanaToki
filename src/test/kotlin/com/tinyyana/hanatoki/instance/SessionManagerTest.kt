@@ -3,6 +3,7 @@ package com.tinyyana.hanatoki.instance
 import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -94,5 +95,60 @@ class SessionManagerTest {
         assertEquals(2, ended.size)
         assertTrue(ended.all { it.reason == EndReason.ABANDONED })
         assertEquals(0, mgr.snapshot().size)
+    }
+
+    // ---- 同一局只能結束一次(= 只能結算一次)------------------------------
+    //
+    // 「死亡」跟「逾時 / 手動 resolve / admin reset」可能在同一刻打到同一個 session。
+    // 兩邊都結算的話會產生**兩個不同的 completionId**,integration 端的幂等去重擋不住
+    // ——那是「同一局兩次結算」不是「同一筆送兩次」。防線是 `sessions.remove` 的回傳值。
+
+    @Test
+    fun `同一個 session 結束兩次,只有第一次拿得到 EndedSession`() {
+        val pool = SlotPool<String>().apply { register("d", "d#0", "anchor") }
+        val sm = SessionManager(pool)
+        val entered = sm.enter("d", listOf(UUID.randomUUID()), 0, 60_000, 30_000) as EnterResult.Entered
+        val id = entered.session.sessionId
+
+        assertNotNull(sm.endSession(id, EndReason.RESOLVED))
+        assertNull(sm.endSession(id, EndReason.TIMEOUT), "第二條路徑必須拿到 null,不能也發一次獎")
+    }
+
+    @Test
+    fun `多執行緒同時結束同一個 session,只有一條成功`() {
+        val pool = SlotPool<String>().apply { register("d", "d#0", "anchor") }
+        val sm = SessionManager(pool)
+        val entered = sm.enter("d", listOf(UUID.randomUUID()), 0, 60_000, 30_000) as EnterResult.Entered
+        val id = entered.session.sessionId
+
+        val threads = 8
+        val start = java.util.concurrent.CountDownLatch(1)
+        val winners = java.util.concurrent.atomic.AtomicInteger(0)
+        val pool2 = java.util.concurrent.Executors.newFixedThreadPool(threads)
+        repeat(threads) {
+            pool2.submit {
+                start.await()
+                if (sm.endSession(id, EndReason.RESOLVED) != null) winners.incrementAndGet()
+            }
+        }
+        start.countDown()
+        pool2.shutdown()
+        pool2.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)
+
+        assertEquals(1, winners.get(), "$threads 條執行緒同時結束同一局,只能有一條認領成功")
+    }
+
+    @Test
+    fun `無時限 session 不會被 tick 收掉,但全員退出照樣收斂`() {
+        val pool = SlotPool<String>().apply { register("d", "d#0", "anchor") }
+        val sm = SessionManager(pool)
+        val player = UUID.randomUUID()
+        val entered = sm.enter("d", listOf(player), 0, null, 30_000) as EnterResult.Entered
+
+        assertTrue(sm.tick(999_999_999L).isEmpty(), "沒有時限就不該因為時間到而結束")
+        assertNotNull(sm.sessionById(entered.session.sessionId))
+
+        assertNotNull(sm.kick(player), "全員退出仍然要收斂")
+        assertNull(sm.sessionById(entered.session.sessionId))
     }
 }

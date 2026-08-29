@@ -25,7 +25,15 @@ class Session(
     val dungeonId: String,
     val slotId: String,
     val startedAtMs: Long,
-    val timeLimitMs: Long,
+    /**
+     * 這一局的時限(毫秒)。**null = 沒有時限**(Endless Run,MIGRATION_PLAN §5.6)。
+     *
+     * ⚠ 刻意用 null 而不是 `Long.MAX_VALUE`/一個很大的秒數:假無限值會在
+     * 「還剩多久」這類算式裡溢位成負數,也讓 `remainingMs` 印出一個沒有意義的天文數字
+     * ——2026-08-29 之前常駐副本就是塞 `Long.MAX_VALUE`,`sessionRemainingSeconds()`
+     * 回傳的是 2.9 億年。沒有時限就明確表達成「沒有」,呼叫端必須自己決定要顯示什麼。
+     */
+    val timeLimitMs: Long?,
     val graceMs: Long,
     /**
      * 常駐形態([com.tinyyana.hanatoki.config.ExecutionMode.PERSISTENT])。
@@ -102,7 +110,28 @@ class Session(
     fun isAllDropped(): Boolean =
         !persistent && members.isNotEmpty() && members.values.all { it.state == MemberState.DROPPED }
 
-    fun isExpired(nowMs: Long): Boolean = !persistent && nowMs - startedAtMs >= timeLimitMs
+    /** 這一局有沒有時限。false = Endless(見 [timeLimitMs])。常駐副本恆 false。 */
+    fun hasTimeLimit(): Boolean = !persistent && timeLimitMs != null
 
-    fun remainingMs(nowMs: Long): Long = (timeLimitMs - (nowMs - startedAtMs)).coerceAtLeast(0)
+    fun isExpired(nowMs: Long): Boolean {
+        val limit = timeLimitMs ?: return false
+        return !persistent && nowMs - startedAtMs >= limit
+    }
+
+    /**
+     * 還剩多少毫秒。**沒有時限時回傳 [NO_TIME_LIMIT](-1)**,不是 0、也不是一個超大值——
+     * 0 會被顯示層當成「時間到」畫成空的進度條,超大值則是本來要避免的假無限。
+     */
+    fun remainingMs(nowMs: Long): Long {
+        val limit = timeLimitMs ?: return NO_TIME_LIMIT
+        return (limit - (nowMs - startedAtMs)).coerceAtLeast(0)
+    }
+
+    /** 這一局已經跑了多久。Endless Run 的顯示層要的是這個,不是倒數。 */
+    fun elapsedMs(nowMs: Long): Long = (nowMs - startedAtMs).coerceAtLeast(0)
+
+    companion object {
+        /** [remainingMs] 對無時限 session 的回傳值(見該方法 KDoc)。 */
+        const val NO_TIME_LIMIT: Long = -1L
+    }
 }

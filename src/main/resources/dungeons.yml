@@ -89,3 +89,41 @@ dungeons:
           timeout-seconds: 60
     encounters:
       main-wave: { entity: ZOMBIE, count: 3, x: 0, y: 0, z: 3, radius: 2 }
+
+  # 「安全 Run 容器」的 architecture probe(2026-08-29)。不是正式 Roguelike 內容——
+  # 地圖、武器、Threat、Loot Director 都屬內容插件,這裡只證明引擎層的四件事:
+  # 無時限 SESSION、局內背包隔離、死亡走 Resolution、局內物品帶不出去。
+  test-roguelike:
+    test-only: true
+    display: "試作 Run(測試)"
+    description: "無時限 + 局內背包隔離的引擎 probe,不是正式內容"
+    world: hanatoki_probe
+    slot-count: 2
+    slot-spacing-blocks: 1024
+    anchor-offset-z: 15000
+    # ⚠ 無時限就明確寫 unlimited。不接受「填一個很大的秒數」——那個值會變成 HUD 上的假倒數,
+    #   而且時間到時會真的把玩家的 Run 收掉(見 config/DungeonDefinition.parseTimeLimit)。
+    session-time-limit-seconds: unlimited
+    solo-cap: 1
+    party-cap: 1
+    reconnect-grace-seconds: 120
+    # 死亡 = 一種 Run 結果(resultKey=death),不是「默默退出」。
+    # 其他副本不設這個就維持既有語意(死亡 = 退出這一局,不結算)。
+    death-resolution: true
+    tags: [roguelike]
+    expected-minutes: "不限"
+    # 局內背包隔離:進場傳送落地之後才會拍永久背包快照、清空、發下面這組起始裝備。
+    # 離場/死亡/斷線/關服/崩潰重啟都會把永久背包覆蓋還原(見 inventory/InstanceInventoryService)。
+    instance-inventory:
+      enabled: true
+      loadout:
+        - { material: STONE_SWORD, amount: 1, slot: 0, name: "<gray>試作刃</gray>" }
+        - { material: BREAD, amount: 8, slot: 1 }
+        - { material: TORCH, amount: 16, slot: 2 }
+    stages:
+      start: run
+      list:
+        run: {}
+    interactions:
+      # 撤離板。刻意不在 (0,0,0):那是 anchor 本身,也是進場落點。
+      extract: { x: 3, y: 0, z: 3, kind: physical }

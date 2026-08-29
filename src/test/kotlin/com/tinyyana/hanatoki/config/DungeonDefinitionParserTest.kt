@@ -3,6 +3,10 @@ package com.tinyyana.hanatoki.config
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
+import kotlin.test.assertNull
+import kotlin.test.assertNotNull
+import kotlin.test.assertFalse
 
 class DungeonDefinitionParserTest {
     @Test
@@ -174,5 +178,131 @@ class DungeonDefinitionParserTest {
         // 整條跳過(世界不建、slot 不登記、指令查不到)。
         val def = DungeonDefinitionParser.parse("probe", mapOf("world" to "w", "test-only" to true))
         assertEquals(true, def.testOnly)
+    }
+
+    // ---- 無時限 / 死亡結算 / 局內背包(2026-08-29)--------------------------
+
+    private fun minimal(extra: Map<String, Any?>): DungeonDefinition =
+        DungeonDefinitionParser.parse("d", mapOf("world" to "w") + extra)
+
+    @Test
+    fun `session-time-limit-seconds 寫 unlimited 解析成 null`() {
+        assertNull(minimal(mapOf("session-time-limit-seconds" to "unlimited")).sessionTimeLimitSeconds)
+    }
+
+    @Test
+    fun `unlimited 的其他寫法都認得`() {
+        for (word in listOf("none", "infinite", "endless", "-1", "UNLIMITED", " unlimited ")) {
+            assertNull(
+                minimal(mapOf("session-time-limit-seconds" to word)).sessionTimeLimitSeconds,
+                "「$word」應該被當成無時限",
+            )
+        }
+    }
+
+    @Test
+    fun `數字 -1 也是無時限`() {
+        assertNull(minimal(mapOf("session-time-limit-seconds" to -1)).sessionTimeLimitSeconds)
+    }
+
+    @Test
+    fun `正整數照舊解析成秒數`() {
+        assertEquals(90L, minimal(mapOf("session-time-limit-seconds" to 90)).sessionTimeLimitSeconds)
+    }
+
+    @Test
+    fun `沒寫的話維持既有預設 180 秒`() {
+        assertEquals(180L, minimal(emptyMap()).sessionTimeLimitSeconds)
+    }
+
+    @Test
+    fun `0 不是無時限而是設定錯誤(不讓人靠猜)`() {
+        assertFailsWith<DungeonDefinitionParser.DefinitionError> {
+            minimal(mapOf("session-time-limit-seconds" to 0))
+        }
+    }
+
+    @Test
+    fun `負數(-1 以外)是設定錯誤`() {
+        assertFailsWith<DungeonDefinitionParser.DefinitionError> {
+            minimal(mapOf("session-time-limit-seconds" to -30))
+        }
+    }
+
+    @Test
+    fun `看不懂的字串是設定錯誤,不會默默當成無時限`() {
+        assertFailsWith<DungeonDefinitionParser.DefinitionError> {
+            minimal(mapOf("session-time-limit-seconds" to "forever-ish"))
+        }
+    }
+
+    @Test
+    fun `death-resolution 預設 false,寫 true 才開`() {
+        assertFalse(minimal(emptyMap()).deathResolution)
+        assertTrue(minimal(mapOf("death-resolution" to true)).deathResolution)
+    }
+
+    @Test
+    fun `沒寫 instance-inventory 的副本不做背包隔離`() {
+        assertNull(minimal(emptyMap()).instanceInventory)
+    }
+
+    @Test
+    fun `instance-inventory enabled false 等同沒開`() {
+        assertNull(minimal(mapOf("instance-inventory" to mapOf("enabled" to false))).instanceInventory)
+    }
+
+    @Test
+    fun `instance-inventory 的 loadout 解析出 material amount slot 與顯示名`() {
+        val def = minimal(
+            mapOf(
+                "instance-inventory" to mapOf(
+                    "enabled" to true,
+                    "loadout" to listOf(
+                        mapOf("material" to "STONE_SWORD", "amount" to 1, "slot" to 0, "name" to "<gray>試作刃</gray>"),
+                        mapOf("material" to "BREAD", "amount" to 8),
+                    ),
+                ),
+            ),
+        )
+        val inv = assertNotNull(def.instanceInventory)
+        assertEquals(2, inv.loadout.size)
+        assertEquals("STONE_SWORD", inv.loadout[0].material)
+        assertEquals(0, inv.loadout[0].slot)
+        assertEquals("<gray>試作刃</gray>", inv.loadout[0].displayName)
+        assertEquals(8, inv.loadout[1].amount)
+        assertNull(inv.loadout[1].slot, "沒寫 slot 就是找空位放")
+        assertNull(inv.loadout[1].displayName)
+    }
+
+    @Test
+    fun `空的 instance-inventory 是「進去就是空背包」而不是不開`() {
+        val inv = assertNotNull(minimal(mapOf("instance-inventory" to mapOf("enabled" to true))).instanceInventory)
+        assertTrue(inv.loadout.isEmpty())
+    }
+
+    @Test
+    fun `loadout 缺 material 是設定錯誤`() {
+        assertFailsWith<DungeonDefinitionParser.DefinitionError> {
+            minimal(mapOf("instance-inventory" to mapOf("loadout" to listOf(mapOf("amount" to 1)))))
+        }
+    }
+
+    @Test
+    fun `loadout 的 slot 超出背包範圍是設定錯誤`() {
+        assertFailsWith<DungeonDefinitionParser.DefinitionError> {
+            minimal(
+                mapOf("instance-inventory" to mapOf("loadout" to listOf(mapOf("material" to "BREAD", "slot" to 41)))),
+            )
+        }
+    }
+
+    @Test
+    fun `loadout 的 amount 小於 1 是設定錯誤`() {
+        assertFailsWith<DungeonDefinitionParser.DefinitionError> {
+            minimal(
+                mapOf("instance-inventory" to mapOf("loadout" to listOf(mapOf("material" to "BREAD", "amount" to 0)))),
+            )
+        }
     }
 }

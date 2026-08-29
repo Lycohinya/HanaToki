@@ -6,6 +6,7 @@ import com.tinyyana.hanatoki.command.HanaTokiCommand
 import com.tinyyana.hanatoki.stage.DungeonBehaviorRegistry
 import com.tinyyana.hanatoki.testcontent.CombatTestBehavior
 import com.tinyyana.hanatoki.testcontent.PuzzleTestBehavior
+import com.tinyyana.hanatoki.testcontent.RoguelikeShellBehavior
 import com.tinyyana.hanatoki.world.DungeonWorldProvisioner
 import com.tinyyana.hanatoki.world.VoidChunkGenerator
 import org.bukkit.Bukkit
@@ -39,12 +40,16 @@ class HanaTokiPlugin : JavaPlugin() {
         // behavior 類別的 KDoc)。
         DungeonBehaviorRegistry.register("test-puzzle", PuzzleTestBehavior())
         DungeonBehaviorRegistry.register("test-combat", CombatTestBehavior())
+        DungeonBehaviorRegistry.register("test-roguelike", RoguelikeShellBehavior())
 
         val command = HanaTokiCommand(core)
         getCommand("hanatoki")?.setExecutor(command)
         getCommand("hanatoki")?.tabCompleter = command
 
         server.pluginManager.registerEvents(HanaTokiListener(core), this)
+        // 局內物品的洩漏防線(丟棄/拾取/容器/漏斗)。跟主 listener 分開註冊:它只在有副本
+        // 開了局內背包時才會真的擋東西,而且規則自成一組,混進主 listener 會讓兩邊都難讀。
+        server.pluginManager.registerEvents(core.instanceItemGuard, this)
 
         // ARCH §5.2 規則 5:v1 用 GlobalRegionScheduler 驅動 tick 訊號,訊號本身只做無副作用/
         // 單 session 操作的查表與 session.tick() 呼叫(Phase 1 尚無跨 session 共享狀態需要序列化到
@@ -53,6 +58,11 @@ class HanaTokiPlugin : JavaPlugin() {
         tickTaskHandle = Bukkit.getGlobalRegionScheduler().runAtFixedRate(this, { _ ->
             if (acceptingNewSessions) core.tick()
         }, 20L, 20L)
+
+        // 上次沒收斂完的局內背包交易(崩潰重啟/上次 onDisable 標成 RESTORING 的那些)。
+        // 一定要在 listener 註冊之後:在線玩家的還原會經他們自己的 EntityScheduler,
+        // 而剛登入的玩家由 `HanaTokiListener.onJoin` 接手。
+        core.recoverInstanceInventories()
 
         server.servicesManager.register(
             PresenceBridge::class.java,
@@ -64,6 +74,13 @@ class HanaTokiPlugin : JavaPlugin() {
         server.servicesManager.register(
             DungeonAccess::class.java,
             core,
+            this,
+            ServicePriority.Normal,
+        )
+        // 局內物品所有權(道具插件鑄造局內武器時蓋章用),見 api/InstanceItems。
+        server.servicesManager.register(
+            com.tinyyana.hanatoki.api.InstanceItems::class.java,
+            core.instanceInventory.items,
             this,
             ServicePriority.Normal,
         )

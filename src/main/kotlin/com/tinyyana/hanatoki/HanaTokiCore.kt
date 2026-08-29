@@ -2,6 +2,8 @@ package com.tinyyana.hanatoki
 
 import com.tinyyana.hanatoki.actor.ActorController
 import com.tinyyana.hanatoki.api.DungeonAccess
+import com.tinyyana.hanatoki.api.DungeonEntryOutcome
+import com.tinyyana.hanatoki.api.DungeonEntryStatus
 import com.tinyyana.hanatoki.api.DungeonInfo
 import com.tinyyana.hanatoki.api.MusicCue
 import com.tinyyana.hanatoki.api.PresenceBridge
@@ -13,10 +15,14 @@ import com.tinyyana.hanatoki.folia.InstanceDispatch
 import com.tinyyana.hanatoki.folia.PlayerOp
 import com.tinyyana.hanatoki.folia.WorldOp
 import com.tinyyana.hanatoki.hud.SessionBossBars
+import com.tinyyana.hanatoki.instance.DungeonEntry
 import com.tinyyana.hanatoki.instance.EndReason
 import com.tinyyana.hanatoki.instance.EnterResult
 import com.tinyyana.hanatoki.instance.SessionManager
 import com.tinyyana.hanatoki.instance.SlotPool
+import com.tinyyana.hanatoki.inventory.InstanceInventoryService
+import com.tinyyana.hanatoki.inventory.InstanceItemGuard
+import com.tinyyana.hanatoki.inventory.InstanceJournal
 import com.tinyyana.hanatoki.prop.PropController
 import com.tinyyana.hanatoki.reward.CompletionResult
 import com.tinyyana.hanatoki.reward.RewardDispatcher
@@ -49,6 +55,17 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
     val propController = PropController(plugin)
     val bossBars = SessionBossBars(plugin)
     val stageEngine = StageEngine(this)
+
+    /**
+     * 局內背包的持久化 journal 與交易服務(ARCH §5.6)。
+     *
+     * 檔案放在 `plugins/HanaToki/instances/`——引擎自己的 dataFolder,不碰任何其他插件的
+     * 資料層。這是 HanaToki 第一份持久化狀態,理由與範圍見 [InstanceJournal] 的 KDoc。
+     */
+    val instanceJournal = InstanceJournal(java.io.File(plugin.dataFolder, "instances"), plugin.logger)
+    val instanceInventory = InstanceInventoryService(plugin, instanceJournal)
+    val instanceItemGuard = InstanceItemGuard(plugin, instanceInventory, texts)
+    private val dungeonEntry = DungeonEntry(this)
 
     // 每個 slot 一份 diff recorder(Phase 1 場地重置的最小單位是 slot,不是整個 instance)。
     private val diffRecorders = ConcurrentHashMap<String, WorldDiffRecorder>()
@@ -95,9 +112,10 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
             dungeonId,
             players.map { it.uniqueId },
             now,
-            // 常駐 instance 沒有時限:`Session.isExpired` 對 persistent 恆 false,這個值只剩
-            // `sessionRemainingSeconds()` 的顯示用途,給一個不會溢位的極大值。
-            if (persistent) Long.MAX_VALUE else def.sessionTimeLimitSeconds * 1000,
+            // null = 沒有時限。常駐副本本來就沒有;session 型副本也可以在定義裡寫
+            // `session-time-limit-seconds: unlimited`(Endless Run)。以前這裡塞的是
+            // `Long.MAX_VALUE`,那個假無限值會讓 `sessionRemainingSeconds()` 回傳 2.9 億年。
+            if (persistent) null else def.sessionTimeLimitSeconds?.times(1000),
             def.reconnectGraceSeconds * 1000,
             persistent,
         )
@@ -138,7 +156,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
             dungeonId,
             listOf(playerId),
             now,
-            Long.MAX_VALUE,
+            null, // 常駐 instance 沒有時限(見 enter() 的說明)
             def.reconnectGraceSeconds * 1000,
             true,
         )
@@ -171,10 +189,18 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
 
     fun kick(playerId: UUID) {
         val ended = sessionManager.kick(playerId)
-        // 這個人一定要送出去,不論整局有沒有跟著結束——多人局裡其他人還在打,離開的那位
-        // 如果留在副本世界,他會站在一個沒有 session 綁定的場地裡看別人打(而且整局結束的
-        // diff 回滾會在他腳下發生)。
-        sendHome(playerId)
+        // 這個人的永久背包一定要還,不論整局有沒有跟著結束。多人局裡其他人還在打時
+        // `ended` 是 null,下面那條 handleSessionEnded 不會跑到——少了這一句,單獨離場的
+        // 那位就會帶著局內背包走出去,而他的永久背包留在 journal 裡等到下次登入才還。
+        //
+        // ⚠ 送人回家一定要**等還原完成**才做(同 handleSessionEnded 的說明:跨世界傳送會
+        //   讓還原派工撞上 retired,實測會讓玩家拿到空背包)。
+        instanceInventory.restoreForPlayer(playerId, "leave").whenComplete { _, _ ->
+            // 這個人一定要送出去,不論整局有沒有跟著結束——多人局裡其他人還在打,離開的那位
+            // 如果留在副本世界,他會站在一個沒有 session 綁定的場地裡看別人打(而且整局結束的
+            // diff 回滾會在他腳下發生)。
+            sendHome(playerId)
+        }
         if (ended == null) return
         stageEngine.endFor(ended.sessionId)
         handleSessionEnded(ended.slotId, ended.dungeonId, ended.reason, ended.memberIds)
@@ -289,9 +315,20 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         //   專屬副本世界的回滾終點是虛空(void 生成),人還站在場地上就會直接往下掉。
         //   `sendHome` 的 future 綁的是 `teleportAsync` 的完成,不是「派工完成」,所以這個
         //   barrier 是真的等到人離開了才放行(離線玩家與不在副本世界的人立即完成,不會卡住)。
-        val sends = memberIds.map { sendHome(it) }
-        CompletableFuture.allOf(*sends.toTypedArray())
-            .whenComplete { _, _ -> rollbackAndRelease(slotId, dungeonId) }
+        // ⚠ 順序是 **還背包 → 送人回家 → 回滾場地**,三段嚴格串起來,不可以並行。
+        //
+        // 2026-08-29 L4 實測:並行版本會壞。還原派工到玩家自己的 EntityScheduler,而同一時間
+        // `sendHome` 正在把他跨世界傳送出去——跨世界會讓舊 region 的 entity retired,還原的
+        // task 就走 retired 分支根本沒跑,接著跨世界的局內物品清理把手上的東西清掉,玩家拿到
+        // 一個空背包。「先把東西還完再送人走」讓這個競態不存在。
+        //
+        // 回滾仍然排在最後:專屬副本世界回滾的終點是虛空,人還站在上面就會往下掉。
+        val restores = memberIds.map { instanceInventory.restoreForPlayer(it, "session-end-${reason.name.lowercase()}") }
+        CompletableFuture.allOf(*restores.toTypedArray()).whenComplete { _, _ ->
+            val sends = memberIds.map { sendHome(it) }
+            CompletableFuture.allOf(*sends.toTypedArray())
+                .whenComplete { _, _ -> rollbackAndRelease(slotId, dungeonId) }
+        }
     }
 
     private fun rollbackAndRelease(slotId: String, dungeonId: String) {
@@ -329,6 +366,38 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
             stageEngine.endFor(e.sessionId)
             handleSessionEnded(e.slotId, e.dungeonId, e.reason, e.memberIds)
         }
+        // ⚠ 一定要在最後、而且是同步的:上面那條路徑走的是 AsyncScheduler,插件停用時它會被
+        //   取消,不保證跑得完。這一句把所有還沒收斂的 journal 同步標成 RESTORING,
+        //   讓下次啟用的 `recoverAll()` 一定接得住(細節見 InstanceInventoryService.shutdownFlush)。
+        instanceInventory.shutdownFlush()
+    }
+
+    /**
+     * onEnable 呼叫:掃未完成的 journal 並恢復(ARCH §5.2 規則 6「onEnable 接在線玩家」)。
+     */
+    fun recoverInstanceInventories() {
+        instanceInventory.recoverAll()
+    }
+
+    /**
+     * 副本內死亡的收斂(`HanaTokiListener.onPlayerDeath` 轉呼叫)。
+     *
+     * 定義沒開 `death-resolution` 就是既有行為:死亡 = 退出這一局,不結算。
+     * 開了就先走一次 `resultKey=death` 的 Resolution(帶 duration/stats),再由
+     * [resolveSession] 內部走完整的結束流程——`InstanceState.claimResolution` 與
+     * `SessionManager.endSession` 的兩道原子認領保證它跟同一刻的逾時/手動 resolve
+     * 只會有一邊結算成功。
+     *
+     * 回傳 true = 已經由這裡處理掉了(呼叫端不要再 kick)。
+     */
+    fun handlePlayerDeath(playerId: UUID): Boolean {
+        val session = sessionManager.sessionOf(playerId) ?: return false
+        if (session.persistent) return false // 常駐副本的死亡不退出成員集合(決策 D)
+        val def = registry.definitions[session.dungeonId] ?: return false
+        if (!def.deathResolution) return false
+        val state = stageEngine.stateOf(session.sessionId) ?: return false
+        resolveSession(session.sessionId, "death", state)
+        return true
     }
 
     /** ARCH §10 / Phase 2 目標 §7:未來 GUI 的資料來源,現在只有 `/hanatoki admin debug` 消費。 */
@@ -376,37 +445,91 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
 
     override fun hasDungeon(dungeonId: String): Boolean = registry.definitions.containsKey(dungeonId)
 
+    /**
+     * 舊的布林進場入口。**語意沒有改**:回傳 true 仍然只代表「請求受理」,不代表傳送成功。
+     *
+     * 現在它底下走的是 [DungeonEntry] 的完整交易,所以比以前多了兩件事:①同步就能知道的
+     * 失敗(沒這座副本、玩家不在線、客滿)照樣回 false,呼叫端的錯誤訊息路徑不變;
+     * ②非同步才會知道的失敗(傳送失敗、背包交易失敗)現在會**完整回滾並主動告訴玩家**,
+     * 而不是像以前那樣留下一個「系統認為他在副本裡、人卻站在原地」的幽靈狀態。
+     *
+     * 要拿到真正的結果,用 [enterDungeonTracked]。
+     */
     override fun enterDungeon(playerId: UUID, dungeonId: String): Boolean {
         val player = plugin.server.getPlayer(playerId) ?: return false
-        val def = registry.definitions[dungeonId] ?: return false
-        // 進場前記下他站在哪(離開時要送回來)。已經在副本世界裡的位置不會被記,見 ReturnPointRegistry。
-        returnPoints.remember(player)
-        return when (val result = enter(dungeonId, listOf(player))) {
-            is EnterResult.NoSlot -> false
-            is EnterResult.Entered -> {
-                player.teleportAsync(entryLocationFor(def, result.anchor)); true
-            }
-            is EnterResult.Joined -> {
-                player.teleportAsync(entryLocationFor(def, result.anchor)); true
-            }
-        }
+        if (!registry.definitions.containsKey(dungeonId)) return false
+        // 客滿的同步預檢:留住舊呼叫端「false 就顯示客滿訊息」的路徑。這裡跟真正的配置之間
+        // 有理論上的競態(預檢過了、配置時被別人搶走),那條路會走非同步的 NO_SLOT 分支並
+        // 通知玩家,不會留下髒狀態。
+        val persistent = registry.definitions[dungeonId]?.mode == ExecutionMode.PERSISTENT
+        if (!persistent && !slotPool.hasFree(dungeonId) && sessionManager.sessionOf(playerId) == null) return false
+        fireAndReport(dungeonEntry.enter(listOf(player), dungeonId), listOf(playerId))
+        return true
     }
 
     override fun enterDungeonDuo(playerId: UUID, partnerId: UUID, dungeonId: String): Boolean {
         val player = plugin.server.getPlayer(playerId) ?: return false
         val partner = plugin.server.getPlayer(partnerId) ?: return false
-        val def = registry.definitions[dungeonId] ?: return false
-        val party = listOf(player, partner)
-        party.forEach { returnPoints.remember(it) }
-        return when (val result = enter(dungeonId, party)) {
-            is EnterResult.NoSlot -> false
-            is EnterResult.Entered -> {
-                party.forEach { it.teleportAsync(entryLocationFor(def, result.anchor)) }; true
+        if (!registry.definitions.containsKey(dungeonId)) return false
+        fireAndReport(dungeonEntry.enter(listOf(player, partner), dungeonId), listOf(playerId, partnerId))
+        return true
+    }
+
+    /**
+     * 同 repo 內部用的多人進場入口(`/hanatoki enter <id> [player2] ...` 的驗收指令走這條)。
+     *
+     * 不放進 [DungeonAccess]:那支介面是跨插件的穩定面,而目前**沒有第二個消費者**需要
+     * 「任意人數進場」——刀塚的 party-cap 是 2,已經有 [enterDungeonDuoTracked]。
+     * 有真的案例再擴(ARCH §12「先有案例再抽象」)。
+     */
+    fun enterParty(players: List<Player>, dungeonId: String): CompletableFuture<DungeonEntryOutcome> =
+        dungeonEntry.enter(players, dungeonId)
+
+    override fun enterDungeonTracked(playerId: UUID, dungeonId: String): CompletableFuture<DungeonEntryOutcome> {
+        val player = plugin.server.getPlayer(playerId)
+            ?: return CompletableFuture.completedFuture(offlineOutcome())
+        return dungeonEntry.enter(listOf(player), dungeonId)
+    }
+
+    override fun enterDungeonDuoTracked(
+        playerId: UUID,
+        partnerId: UUID,
+        dungeonId: String,
+    ): CompletableFuture<DungeonEntryOutcome> {
+        val player = plugin.server.getPlayer(playerId)
+            ?: return CompletableFuture.completedFuture(offlineOutcome())
+        val partner = plugin.server.getPlayer(partnerId)
+            ?: return CompletableFuture.completedFuture(offlineOutcome())
+        return dungeonEntry.enter(listOf(player, partner), dungeonId)
+    }
+
+    /**
+     * 布林入口的非同步尾巴:交易失敗時把原因寫進 log 並通知玩家。
+     *
+     * 沒有這一段的話,`enterDungeon` 回 true 之後傳送失敗,玩家只會看到自己站在原地、
+     * 什麼訊息都沒有——那正是這次要修掉的體驗。
+     */
+    private fun fireAndReport(future: CompletableFuture<DungeonEntryOutcome>, playerIds: List<UUID>) {
+        future.whenComplete { outcome, error ->
+            if (error != null) {
+                plugin.logger.warning("[HanaToki] 進場交易丟出例外:${error.message}")
+                playerIds.forEach { PlayerOp.message(plugin, it, texts.format("session.entry-failed")) }
+                return@whenComplete
             }
-            is EnterResult.Joined -> {
-                party.forEach { it.teleportAsync(entryLocationFor(def, result.anchor)) }; true
-            }
+            if (outcome == null || outcome.succeeded()) return@whenComplete
+            plugin.logger.warning("[HanaToki] 進場失敗 status=${outcome.status()} reason=${outcome.failureReason()} rolledBack=${outcome.rolledBack()}")
+            val key = if (outcome.status() == DungeonEntryStatus.NO_SLOT) "session.no-slot" else "session.entry-failed"
+            playerIds.forEach { PlayerOp.message(plugin, it, texts.format(key, mapOf("dungeon" to ""))) }
         }
+    }
+
+    private fun offlineOutcome(): DungeonEntryOutcome = object : DungeonEntryOutcome {
+        override fun status(): String = DungeonEntryStatus.PLAYER_OFFLINE
+        override fun succeeded(): Boolean = false
+        override fun sessionId(): String? = null
+        override fun instanceId(): String? = null
+        override fun failureReason(): String = "玩家不在線"
+        override fun rolledBack(): Boolean = true
     }
 
     override fun leaveDungeon(playerId: UUID): Boolean {
@@ -425,7 +548,10 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
             plugin.logger.warning("[HanaToki] 找不到 $playerId 的返回點,也沒有任何非副本世界可送")
             return false
         }
-        PlayerOp.dispatch(plugin, playerId) { it.teleportAsync(destination) }
+        // 同 kick():先還完背包才傳送,不然跨世界會把還原的派工打掉。
+        instanceInventory.restoreForPlayer(playerId, "leave-persistent").whenComplete { _, _ ->
+            PlayerOp.dispatch(plugin, playerId) { it.teleportAsync(destination) }
+        }
         return true
     }
 

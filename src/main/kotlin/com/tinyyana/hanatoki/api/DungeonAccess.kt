@@ -1,6 +1,7 @@
 package com.tinyyana.hanatoki.api
 
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
 
 /**
  * 「把某個玩家送進/送出某座副本」的對外入口(ServicesManager 註冊,provider 是 HanaToki)。
@@ -40,4 +41,26 @@ interface DungeonAccess {
 
     /** 把玩家送出他所在的副本(回進場前的位置,沒登記就回重生點/第一個非副本世界)。 */
     fun leaveDungeon(playerId: UUID): Boolean
+
+    /**
+     * 進場,而且**等交易真的做完**才 complete(2026-08-29 新增)。
+     *
+     * 跟 [enterDungeon] 的差別就是那個 `Boolean` 沒辦法表達的東西:傳送到底成不成功、
+     * 失敗的原因是什麼、已經建立的狀態有沒有清乾淨。要顯示「進場失敗,原因是…」或要在
+     * 進場成功之後才做下一步(發訊息、記錄、開 UI)的呼叫端,用這一支。
+     *
+     * [enterDungeon] 沒有被取代也沒有改語意——既有呼叫端(LycohinyaCore 的 `/lyco dungeon`
+     * 走反射)不需要重編。
+     *
+     * ⚠ 回傳的 future 在**任意執行緒** complete(內部串了 `teleportAsync` 與非同步 I/O)。
+     * 接著要對玩家做事的話,自己派回該玩家的 scheduler(ARCH §5.2 規則 2)。
+     */
+    fun enterDungeonTracked(playerId: UUID, dungeonId: String): CompletableFuture<DungeonEntryOutcome>
+
+    /** [enterDungeonTracked] 的雙人版(語意全有全無:一個人失敗兩個人都不進去)。 */
+    fun enterDungeonDuoTracked(
+        playerId: UUID,
+        partnerId: UUID,
+        dungeonId: String,
+    ): CompletableFuture<DungeonEntryOutcome>
 }

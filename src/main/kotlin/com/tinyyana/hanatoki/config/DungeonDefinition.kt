@@ -95,7 +95,16 @@ data class DungeonDefinition(
     val spawnOffsetY: Double = 0.0,
     val spawnOffsetZ: Double = 0.0,
     val spawnYaw: Float = 0f,
-    val sessionTimeLimitSeconds: Long,
+    /**
+     * 這一局的時限(秒)。**null = 沒有時限**(Endless Run)。
+     *
+     * YAML 寫 `session-time-limit-seconds: unlimited`(或 `none`/`-1`)就是 null。
+     * 刻意不接受「寫一個很大的秒數當無限」——那個值最後會變成 HUD 上的假倒數,
+     * 而且到期時會真的把玩家的 Run 收掉(見 [com.tinyyana.hanatoki.instance.Session.timeLimitMs])。
+     *
+     * ⚠ [ExecutionMode.PERSISTENT] 本來就不看這個值(常駐 instance 恆不逾時)。
+     */
+    val sessionTimeLimitSeconds: Long?,
     val soloCap: Int,
     val partyCap: Int,
     val reconnectGraceSeconds: Long,
@@ -117,6 +126,45 @@ data class DungeonDefinition(
      * 這不是引擎的錯誤設定,是「開發期預設」跟「上線」之間少了一道閘門。
      */
     val testOnly: Boolean = false,
+    /**
+     * SESSION 形態下,玩家死亡要不要走 Resolution(`resultKey=death`)而不是直接退出這一局。
+     *
+     * false(預設)= 既有行為:死亡 = 退出 Session,不結算、不發獎(刀塚等既有副本靠這個)。
+     * true = Roguelike 語意:死亡也是一種 Run 結果,帶 duration/stats 走一次 Resolution 之後
+     * 才收斂;`InstanceState.claimResolution` + `SessionManager.endSession` 的兩道原子認領保證
+     * 「死亡」與「同一刻的逾時/手動 resolve」只會結算其中一次。
+     *
+     * ⚠ 對 [ExecutionMode.PERSISTENT] 無效——常駐副本的死亡本來就不退出成員集合(決策 D),
+     * 把它改成會結算等於「在蒼櫻死一次就發一次獎」。
+     */
+    val deathResolution: Boolean = false,
+    /** 局內背包隔離設定;null(預設)= 這座副本不做背包隔離,既有副本行為完全不變。 */
+    val instanceInventory: InstanceInventoryDef? = null,
+)
+
+/**
+ * 局內背包隔離(Roguelike 的「安全 Run 容器」)。
+ *
+ * 開啟後,玩家進場**傳送真的落地之後**才會把永久背包快照持久化、清空、換成 [loadout];
+ * 離場(通關/死亡/主動退出/admin reset/斷線逾時/關服/崩潰重啟)一律走同一條 restore。
+ * 詳見 `com.tinyyana.hanatoki.inventory.InstanceInventoryService`。
+ */
+data class InstanceInventoryDef(
+    /** 進場時發給玩家的局內起始物品。空 = 進場後就是一個空背包(Roguelike 從零開始)。 */
+    val loadout: List<LoadoutEntry> = emptyList(),
+)
+
+/**
+ * 一格局內起始物品。**只有 material/amount/slot/顯示名**——這是引擎層的最小表達能力,
+ * 真正的武器/能力核由內容插件用 `InstanceItems` 自己鑄造後放進來(ARCH §11:正式內容不進引擎)。
+ *
+ * @param slot 放進哪一格(0-8 是快捷列)。null = 找空位放。
+ */
+data class LoadoutEntry(
+    val material: String,
+    val amount: Int = 1,
+    val slot: Int? = null,
+    val displayName: String? = null,
 )
 
 /**
@@ -156,8 +204,7 @@ object DungeonDefinitionParser {
             throw DefinitionError("dungeons.$id 是 persistent 形態,slot-count 必須是 1(目前 $slotCount)")
         }
 
-        val timeLimit = long("session-time-limit-seconds", 180)
-        if (timeLimit <= 0) throw DefinitionError("dungeons.$id.session-time-limit-seconds 必須 > 0")
+        val timeLimit = parseTimeLimit(id, raw["session-time-limit-seconds"])
 
         @Suppress("UNCHECKED_CAST")
         val tags = (raw["tags"] as? List<*>)?.map { it.toString() } ?: emptyList()
@@ -211,7 +258,58 @@ object DungeonDefinitionParser {
             interactions = interactions,
             encounters = encounters,
             testOnly = (raw["test-only"] as? Boolean) ?: false,
+            deathResolution = (raw["death-resolution"] as? Boolean) ?: false,
+            instanceInventory = parseInstanceInventory(id, raw["instance-inventory"]),
         )
+    }
+
+    /**
+     * `session-time-limit-seconds`:正整數 = 秒數;`unlimited`/`none`/`infinite`/`-1` = 沒有時限。
+     *
+     * 0 或其他負數**不當成無限**而是報錯——「寫 0 就是不限時」是每個人都會猜錯一次的隱含約定,
+     * 而猜錯的後果是一座本來該限時的副本悄悄變成永不結束。要無限就把 `unlimited` 寫出來。
+     */
+    private fun parseTimeLimit(id: String, raw: Any?): Long? {
+        if (raw == null) return 180L
+        if (raw is String) {
+            return when (raw.trim().lowercase()) {
+                "unlimited", "none", "infinite", "endless", "-1" -> null
+                else -> throw DefinitionError(
+                    "dungeons.$id.session-time-limit-seconds=$raw 不是秒數也不是 unlimited",
+                )
+            }
+        }
+        val seconds = (raw as? Number)?.toLong()
+            ?: throw DefinitionError("dungeons.$id.session-time-limit-seconds 必須是秒數或 unlimited")
+        if (seconds == -1L) return null
+        if (seconds <= 0) {
+            throw DefinitionError(
+                "dungeons.$id.session-time-limit-seconds 必須 > 0;要無時限請明確寫 unlimited(或 -1)",
+            )
+        }
+        return seconds
+    }
+
+    private fun parseInstanceInventory(id: String, raw: Any?): InstanceInventoryDef? {
+        @Suppress("UNCHECKED_CAST")
+        val m = raw as? Map<String, Any?> ?: return null
+        if ((m["enabled"] as? Boolean) == false) return null
+        val loadoutRaw = m["loadout"] as? List<*> ?: emptyList<Any?>()
+        val loadout = loadoutRaw.mapIndexed { index, entry ->
+            @Suppress("UNCHECKED_CAST")
+            val e = entry as? Map<String, Any?>
+                ?: throw DefinitionError("dungeons.$id.instance-inventory.loadout[$index] 格式錯誤")
+            val material = (e["material"] as? String)?.takeIf { it.isNotBlank() }
+                ?: throw DefinitionError("dungeons.$id.instance-inventory.loadout[$index].material 缺少必要欄位")
+            val amount = (e["amount"] as? Number)?.toInt() ?: 1
+            if (amount < 1) throw DefinitionError("dungeons.$id.instance-inventory.loadout[$index].amount 必須 >= 1")
+            val slot = (e["slot"] as? Number)?.toInt()
+            if (slot != null && slot !in 0..40) {
+                throw DefinitionError("dungeons.$id.instance-inventory.loadout[$index].slot 必須在 0..40")
+            }
+            LoadoutEntry(material, amount, slot, (e["name"] as? String)?.takeIf { it.isNotBlank() })
+        }
+        return InstanceInventoryDef(loadout)
     }
 
     private fun parseStageGraph(dungeonId: String, raw: Map<String, Any?>): StageGraph {

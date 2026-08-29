@@ -142,6 +142,34 @@ interface DungeonAccess {
     fun enterDungeon(playerId: UUID, dungeonId: String): Boolean
     fun enterDungeonDuo(playerId: UUID, partnerId: UUID, dungeonId: String): Boolean
     fun leaveDungeon(playerId: UUID): Boolean
+
+    // 2026-08-29 新增：等交易真的做完才 complete
+    fun enterDungeonTracked(playerId: UUID, dungeonId: String): CompletableFuture<DungeonEntryOutcome>
+    fun enterDungeonDuoTracked(
+        playerId: UUID,
+        partnerId: UUID,
+        dungeonId: String,
+    ): CompletableFuture<DungeonEntryOutcome>
+}
+
+interface DungeonEntryOutcome {
+    fun status(): String          // 見 DungeonEntryStatus 的常數
+    fun succeeded(): Boolean
+    fun sessionId(): String?      // 成功時是這一局的 sessionId
+    fun instanceId(): String?     // 有開局內背包時是這次交易的 instanceId
+    fun failureReason(): String?  // 失敗原因（給 log／管理員看）
+    fun rolledBack(): Boolean     // 失敗時已建立的狀態有沒有清乾淨
+}
+
+object DungeonEntryStatus {
+    const val ENTERED = "ENTERED"            // 新開一局，人已落地
+    const val JOINED = "JOINED"              // 加入一個正在跑的常駐副本，人已落地
+    const val NO_DUNGEON = "NO_DUNGEON"
+    const val NO_SLOT = "NO_SLOT"
+    const val PLAYER_OFFLINE = "PLAYER_OFFLINE"
+    const val TELEPORT_FAILED = "TELEPORT_FAILED"
+    const val INVENTORY_FAILED = "INVENTORY_FAILED"
+    const val SHUTTING_DOWN = "SHUTTING_DOWN"
 }
 ```
 
@@ -158,7 +186,8 @@ val access = server.servicesManager
 | 方法 | `true`／回傳值代表什麼 | 呼叫端仍要處理 |
 |---|---|---|
 | `hasDungeon(id)` | definition map 有這個 id | 不代表世界／slot provision 成功，也不代表目前有空位 |
-| `enterDungeon(player, id)` | 玩家在線、definition 存在，且 session manager 分到／加入 slot | 傳送仍非同步；不代表傳送成功 |
+| `enterDungeon(player, id)` | 玩家在線、definition 存在，且同步預檢有空位 | 傳送仍非同步；**不代表傳送成功**。要知道結果請改用 `enterDungeonTracked` |
+| `enterDungeonTracked(player, id)` | future complete 時，`succeeded()` 為 true 代表**人已經真的站在場地上**、局內背包（若有開）也換好了 | future 在任意執行緒 complete；接著要對玩家做事請自己派回他的 scheduler |
 | `enterDungeonDuo(a, b, id)` | 兩人在線、definition 存在，且 session manager 分到／加入 slot | 不檢查兩個 UUID 是否相同，也不執行 `party-cap` |
 | `leaveDungeon(player)` | 找到玩家目前的 session，並開始離場 | persistent 返回點缺失時可能回 false；傳送仍非同步 |
 
@@ -171,9 +200,37 @@ val access = server.servicesManager
 
 核心目前不會擋「已在 session 的玩家再次 enter」。這可能新開另一局並覆蓋 player-to-session 索引，呼叫端要先用 `PresenceBridge.isInside` 擋掉。
 
-`enter*` 丟掉 `teleportAsync` 的結果。傳送稍後失敗或 exceptional completion 時，核心不會自動 rollback session membership；玩家可能留在原地，`PresenceBridge` 卻已經回 true，之後也可能被 callback／reward 視為成員。入口插件要在自己的 timeout 後驗證玩家真的抵達；若沒有，呼叫 `leaveDungeon` 收斂狀態並顯示失敗／重試路徑。
+**2026-08-29 修正（原本的缺陷描述已不成立）**：`enter*` 不再丟掉 `teleportAsync` 的結果。傳送回 false 或 exceptional、進場途中登出、world/slot 失效、局內背包交易失敗時，核心會**完整回滾** session 成員資格、slot 佔用、stage 狀態與排程、bossbar、返回點登記與局內背包 journal，不會留下「`PresenceBridge` 說他在裡面、人卻站在原地」的狀態。布林版 `enterDungeon` 另外會主動對玩家發失敗訊息。
 
-`enter*` 會直接讀取 Bukkit `Player.location` 來保存返回點。請從發起玩家的 EntityScheduler 或玩家事件所在執行緒呼叫；這支 API 目前沒有承諾可從任意 region thread 安全呼叫，雙人入口尤其要把跨 region 讀取視為尚未封裝的限制。
+多人進場是**全有全無**：任何一位傳送失敗，整局回滾，兩個人都留在原地。
+
+`enter*` 保存返回點時，**已改為在該玩家自己的 EntityScheduler 上讀取 `Player.location`**，因此可以從任意執行緒呼叫。
+
+## 5.1 局內背包與 `InstanceItems`（2026-08-29）
+
+副本定義寫了 `instance-inventory.enabled: true` 時，玩家進場（**傳送真的落地之後**）會把永久背包持久化保存、清空、換成定義的 `loadout`；離場、死亡、主動退出、admin reset、斷線 grace 逾時、關服、崩潰重啟都走同一條還原路徑。
+
+不變式：**只要快照曾經成功落地，不論 JVM 在哪一步死掉，玩家最後都能回到一份合法的永久背包——恰好一份。** 狀態機、崩潰恢復規則與收斂順序見 `docs/hanatoki/HANATOKI_ARCHITECTURE.md` §5.6。
+
+journal 檔案在 `plugins/HanaToki/instances/`，一個 instance 一個檔案。伺服器開著時用 `/hanatoki admin journal` 看，關著時用 `tools/hanatoki-journal.py show <dir>`。`/hanatoki admin restore <instanceId>` 可以人工推一筆卡住的交易。
+
+局內物品的所有權標記由引擎提供，道具插件鑄造局內武器時蓋章即可，**不要另建一套平行的 scope 欄位**：
+
+```kotlin
+interface InstanceItems {
+    fun mark(item: ItemStack, instanceId: String): ItemStack
+    fun instanceIdOf(item: ItemStack): String?
+    fun isInstanceScoped(item: ItemStack): Boolean
+    fun activeInstanceIdOf(playerId: UUID): String?
+    fun isLegalFor(playerId: UUID, item: ItemStack): Boolean
+}
+
+val items = server.servicesManager.getRegistration(InstanceItems::class.java)?.provider
+```
+
+沒有標記 = 永久物品（預設；既有物品完全不受影響）。標記過的物品**丟不掉、不能被非本局的人撿、不能進任何容器（含終界箱）、死亡時不會掉落、跨世界與登入時會被清掉**。這些攔截由引擎的 listener 負責，消費端不需要自己做。
+
+`instanceId` 從 `DungeonEntryOutcome.instanceId()` 或 `activeInstanceIdOf(playerId)` 拿。
 
 ## 6. `PresenceBridge`
 

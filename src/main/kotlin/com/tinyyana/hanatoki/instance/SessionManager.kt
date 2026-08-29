@@ -60,7 +60,8 @@ class SessionManager<A>(private val slotPool: SlotPool<A>) {
         dungeonId: String,
         players: List<UUID>,
         nowMs: Long,
-        timeLimitMs: Long,
+        /** null = 這一局沒有時限(見 [Session.timeLimitMs])。常駐副本一律傳 null。 */
+        timeLimitMs: Long?,
         graceMs: Long,
         persistent: Boolean = false,
     ): EnterResult<A> {
@@ -88,7 +89,7 @@ class SessionManager<A>(private val slotPool: SlotPool<A>) {
         dungeonId: String,
         players: List<UUID>,
         nowMs: Long,
-        timeLimitMs: Long,
+        timeLimitMs: Long?,
         graceMs: Long,
     ): EnterResult<A> = synchronized(persistentEnterLock) {
         val existing = persistentByDungeon[dungeonId]?.let { sessions[it] }

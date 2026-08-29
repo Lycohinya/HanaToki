@@ -202,8 +202,25 @@ interface StageContext {
 
     fun hideBossBar()
 
-    /** 這一局的 session 時限還剩幾秒(0 = 已到期或查不到)。 */
+    /**
+     * 這一局的 session 時限還剩幾秒。
+     *
+     * - 有時限:剩餘秒數,0 = 已到期。
+     * - **無時限(Endless Run / 常駐副本):回傳 -1**,不是 0、也不是一個超大值。
+     *   0 會讓顯示層畫成「時間到」,超大值則是假倒數(以前常駐副本塞 `Long.MAX_VALUE`,
+     *   這裡會回傳 2.9 億年)。先問 [sessionHasTimeLimit] 再決定要顯示倒數還是計時。
+     * - 查不到 session:0。
+     */
     fun sessionRemainingSeconds(): Long
+
+    /**
+     * 這一局有沒有時限。false = Endless Run,顯示層應該改用 [sessionElapsedSeconds] 顯示
+     * 「已經跑了多久」而不是倒數(2026-08-29 新增)。
+     */
+    fun sessionHasTimeLimit(): Boolean
+
+    /** 這一局已經跑了幾秒。Endless Run 的 HUD 要的是這個;查不到 session 回 0。 */
+    fun sessionElapsedSeconds(): Long
 
     fun log(message: String)
 

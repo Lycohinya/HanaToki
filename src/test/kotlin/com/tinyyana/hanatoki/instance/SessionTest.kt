@@ -100,4 +100,67 @@ class SessionTest {
         assertEquals(0, s.remainingMs(5000))
         assertEquals(500, s.remainingMs(500))
     }
+
+    // ---- Endless Run(timeLimitMs = null)-----------------------------------
+    //
+    // 這一組就是「無時限不能用假無限值表達」的回歸測試。以前常駐副本塞 Long.MAX_VALUE,
+    // remainingMs 會回傳 2.9 億年;而如果改用 0 表達,顯示層會畫成「時間到」。
+
+    private fun endless(now: Long = 0L, graceMs: Long = 30_000) =
+        Session(UUID.randomUUID(), "test-roguelike", "test-roguelike#0", now, null, graceMs)
+
+    @Test
+    fun `無時限 session 永遠不會逾時`() {
+        val s = endless()
+        assertFalse(s.isExpired(0))
+        assertFalse(s.isExpired(Long.MAX_VALUE / 2))
+    }
+
+    @Test
+    fun `無時限 session 的 hasTimeLimit 是 false,有時限的是 true`() {
+        assertFalse(endless().hasTimeLimit())
+        assertTrue(session(timeLimitMs = 1000).hasTimeLimit())
+    }
+
+    @Test
+    fun `無時限 session 的 remainingMs 回傳 NO_TIME_LIMIT 而不是 0 或超大值`() {
+        val s = endless()
+        assertEquals(Session.NO_TIME_LIMIT, s.remainingMs(0))
+        assertEquals(Session.NO_TIME_LIMIT, s.remainingMs(999_999_999L))
+        assertTrue(Session.NO_TIME_LIMIT < 0, "哨兵值必須是負數,才不會被當成秒數畫進進度條")
+    }
+
+    @Test
+    fun `elapsedMs 是單調不遞減的,而且不會是負數`() {
+        val s = endless(now = 1_000)
+        assertEquals(0, s.elapsedMs(500), "時鐘回頭時要夾在 0,不能出現負的已跑時間")
+        assertEquals(0, s.elapsedMs(1_000))
+        assertEquals(9_000, s.elapsedMs(10_000))
+    }
+
+    @Test
+    fun `無時限 session 仍然會因為全員退出而收斂`() {
+        val s = endless()
+        val p = UUID.randomUUID()
+        s.addMember(p, 0)
+        s.drop(p)
+        assertTrue(s.isAllDropped(), "沒有時限不代表沒有結束條件")
+    }
+
+    @Test
+    fun `無時限 session 的離線 grace 照樣會把人 drop 掉`() {
+        val s = endless(graceMs = 1000)
+        val p = UUID.randomUUID()
+        s.addMember(p, 0)
+        s.markOffline(p, 100)
+        assertEquals(listOf(p), s.sweepExpiredGrace(1_200))
+        assertEquals(MemberState.DROPPED, s.stateOf(p))
+    }
+
+    @Test
+    fun `常駐 session 即使帶了時限也永不逾時(persistent 優先)`() {
+        val s = Session(UUID.randomUUID(), "sakura", "sakura#0", 0, 1_000, 30_000, persistent = true)
+        assertFalse(s.isExpired(999_999))
+        assertFalse(s.hasTimeLimit())
+    }
 }

@@ -347,7 +347,19 @@ private class StageContextImpl(
 
     override fun sessionRemainingSeconds(): Long {
         val session = core.sessionManager.sessionById(sessionId) ?: return 0
-        return session.remainingMs(System.currentTimeMillis()) / 1000
+        val remaining = session.remainingMs(System.currentTimeMillis())
+        // NO_TIME_LIMIT(-1)原樣往上傳,不要除以 1000 變成 0——那會讓 Endless Run 的 HUD
+        // 顯示成「時間到」。
+        if (remaining == com.tinyyana.hanatoki.instance.Session.NO_TIME_LIMIT) return remaining
+        return remaining / 1000
+    }
+
+    override fun sessionHasTimeLimit(): Boolean =
+        core.sessionManager.sessionById(sessionId)?.hasTimeLimit() ?: false
+
+    override fun sessionElapsedSeconds(): Long {
+        val session = core.sessionManager.sessionById(sessionId) ?: return 0
+        return session.elapsedMs(System.currentTimeMillis()) / 1000
     }
 
     override fun log(message: String) {

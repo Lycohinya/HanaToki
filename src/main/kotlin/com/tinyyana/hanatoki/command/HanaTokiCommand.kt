@@ -2,7 +2,6 @@ package com.tinyyana.hanatoki.command
 
 import com.tinyyana.hanatoki.HanaTokiCore
 import com.tinyyana.hanatoki.folia.PlayerOp
-import com.tinyyana.hanatoki.instance.EnterResult
 import org.bukkit.Bukkit
 import org.bukkit.command.Command
 import org.bukkit.command.CommandExecutor
@@ -45,51 +44,42 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
         }
         val party = (listOf(player) + extraPlayers).distinct()
         val display = core.registry.definitions[dungeonId]?.display ?: dungeonId
-        // 進場前先記下每個人站在哪——副本在專屬世界裡,結束時要靠這個把人送回來
-        // (見 HanaTokiCore.sendHome)。必須在 teleportAsync 之前記,而且要在確定 enter 成功之前
-        //  記也無所謂:沒進場的話這筆登記會在下一次 sendHome 的 no-op 分支被清掉。
-        party.forEach { core.returnPoints.remember(it) }
-        val def = core.registry.definitions[dungeonId] ?: run {
+        if (!core.hasDungeon(dungeonId)) {
             sender.sendMessage(core.texts.format("session.no-slot", mapOf("dungeon" to display)))
             return
         }
-        when (val result = core.enter(dungeonId, party)) {
-            is EnterResult.NoSlot -> sender.sendMessage(core.texts.format("session.no-slot", mapOf("dungeon" to display)))
-            is EnterResult.Entered -> teleportParty(party, display, result.session, core.entryLocationFor(def, result.anchor))
-            is EnterResult.Joined -> teleportParty(party, display, result.session, core.entryLocationFor(def, result.anchor))
+        // 進場交易(記返回點、分 slot、傳送、局內背包)全部在 HanaTokiCore/DungeonEntry 裡,
+        // 指令只負責把結果講給人聽——以前這裡自己 teleportAsync 又自己補救失敗,那份邏輯
+        // 跟 DungeonAccess 那條路各寫了一次,而且兩邊的回滾程度不一樣。
+        core.enterParty(party, dungeonId).whenComplete { outcome, error ->
+            if (error != null || outcome == null) {
+                sender.sendMessage("§c進場交易丟出例外:" + error?.message)
+                return@whenComplete
+            }
+            if (!outcome.succeeded()) {
+                sender.sendMessage("§c進場失敗(" + outcome.status() + "):" + outcome.failureReason() + " / 已回滾=" + outcome.rolledBack())
+                return@whenComplete
+            }
+            reportEntered(party, display, outcome.sessionId())
         }
     }
 
-    /** 進場落點在 [destination](anchor + 定義的 spawn 偏移,見 `DungeonDefinition.spawnOffsetX`)。 */
-    private fun teleportParty(
-        party: List<Player>,
-        display: String,
-        session: com.tinyyana.hanatoki.instance.Session,
-        destination: org.bukkit.Location,
-    ) {
+    /** 進場成功之後對每位成員說明這一局的時限(Endless Run 顯示 ∞ 而不是一串假秒數)。 */
+    private fun reportEntered(party: List<Player>, display: String, sessionIdRaw: String?) {
+        val session = sessionIdRaw
+            ?.let { runCatching { java.util.UUID.fromString(it) }.getOrNull() }
+            ?.let { core.sessionManager.sessionById(it) }
+        val seconds = when {
+            session == null -> "?"
+            !session.hasTimeLimit() -> "∞"
+            else -> ((session.timeLimitMs ?: 0L) / 1000).toString()
+        }
         party.forEach { member ->
-            // teleportAsync 的 callback 不保證在哪條執行緒——對玩家的訊息一律經 PlayerOp
-            // 派回他自己的 EntityScheduler(ARCH §5.2 規則 2)。
-            member.teleportAsync(destination).thenAccept { ok ->
-                if (ok) {
-                    PlayerOp.message(
-                        core.plugin,
-                        member.uniqueId,
-                        core.texts.format(
-                            "session.entered",
-                            mapOf(
-                                "dungeon" to display,
-                                // 常駐 instance 沒有時限(timeLimitMs 是 Long.MAX_VALUE 的佔位值),
-                                // 印出來會是一串沒有意義的數字。
-                                "seconds" to if (session.persistent) "∞" else (session.timeLimitMs / 1000).toString(),
-                            ),
-                        ),
-                    )
-                } else {
-                    PlayerOp.message(core.plugin, member.uniqueId, core.texts.format("session.teleport-failed"))
-                    core.kick(member.uniqueId)
-                }
-            }
+            PlayerOp.message(
+                core.plugin,
+                member.uniqueId,
+                core.texts.format("session.entered", mapOf("dungeon" to display, "seconds" to seconds)),
+            )
         }
     }
 
@@ -131,6 +121,7 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
                 }
                 sender.sendMessage("§7進行中 session 數:${core.sessionManager.snapshot().size}")
                 sender.sendMessage("§7副本世界:${core.registry.dungeonWorldNames}")
+                sender.sendMessage("§7未收斂的局內背包交易:" + core.instanceInventory.snapshotRecords().size + " 筆(明細:/hanatoki admin journal)")
             }
             // 這台核心實際接受哪些 Mannequin 姿勢。`Mannequin.validPoses()` 是 runtime 橋接,
             // API jar 與 JavaDoc 都查不到內容,而且 Lecithin 是 Folia 分支不一定跟 Paper 一致
@@ -138,6 +129,31 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
             "poses" -> {
                 val poses = core.actorController.handleFor(java.util.UUID.randomUUID()).validPoseNames()
                 sender.sendMessage("§7Mannequin 可用姿勢(${poses.size}):${poses.joinToString(", ").ifEmpty { "(核心未提供)" }}")
+            }
+            // 局內背包交易的現況(同步面:改了功能就要有對應的管理視角)。
+            "journal" -> {
+                val records = core.instanceInventory.snapshotRecords()
+                if (records.isEmpty()) { sender.sendMessage("§7目前沒有未收斂的局內背包交易"); return }
+                sender.sendMessage("§7=== 局內背包 journal(" + records.size + " 筆未收斂)===")
+                records.sortedBy { it.createdAtMs }.forEach { r ->
+                    val who = Bukkit.getOfflinePlayer(r.playerId).name ?: r.playerId.toString()
+                    val age = (System.currentTimeMillis() - r.updatedAtMs) / 1000
+                    sender.sendMessage(
+                        "§7  " + r.state + " instance=" + r.instanceId + " player=" + who +
+                            " dungeon=" + r.dungeonId + " slot=" + r.slotId +
+                            " 快照=" + (if (r.snapshot != null) "有" else "無") + " " + age + "s 前更新",
+                    )
+                }
+                sender.sendMessage("§7(ACTIVE/RESTORING 表示還欠玩家一份永久背包,他下次登入就會還)")
+            }
+            // 強制收斂某一筆交易(玩家離線太久、或 journal 卡住需要人工推一把)。
+            "restore" -> {
+                val raw = args.getOrNull(2) ?: run { sender.sendMessage("§c用法:/hanatoki admin restore <instanceId>"); return }
+                val instanceId = runCatching { java.util.UUID.fromString(raw) }.getOrNull()
+                    ?: run { sender.sendMessage("§c" + raw + " 不是合法的 instanceId"); return }
+                core.instanceInventory.restore(instanceId, "admin-restore").thenAccept { ok ->
+                    sender.sendMessage(if (ok) "§a已還原 instance=" + instanceId else "§e尚未還原(玩家不在線或快照有問題),journal 保留")
+                }
             }
             // 測試專用 hook(見 HanaTokiCore.testMutateSlot KDoc),不是 Phase 1 交付的玩法功能。
             "difftest" -> {
@@ -154,7 +170,7 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
                     sender.sendMessage("§7diffrollback 完成:slot=$slotId reverted=$before pending=${core.diffRecorderFor(slotId).pendingCount()}")
                 }
             }
-            else -> sender.sendMessage("§7/hanatoki admin <list|kick <player>|reset <slotId>|debug|poses|difftest <slotId> <count>|diffrollback <slotId>>")
+            else -> sender.sendMessage("§7/hanatoki admin <list|kick <player>|reset <slotId>|debug|poses|journal|restore <instanceId>|difftest <slotId> <count>|diffrollback <slotId>>")
         }
     }
 
@@ -167,13 +183,16 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
         1 -> listOf("enter", "leave", "admin").filter { it.startsWith(args[0].lowercase()) }
         2 -> when (args[0].lowercase()) {
             "enter" -> core.registry.definitions.keys.toList()
-            "admin" -> listOf("list", "kick", "reset", "debug", "poses").filter { it.startsWith(args[1].lowercase()) }
+            "admin" -> listOf("list", "kick", "reset", "debug", "poses", "journal", "restore")
+                .filter { it.startsWith(args[1].lowercase()) }
             else -> emptyList()
         }
         3 -> when {
             args[0].equals("admin", true) && args[1].equals("reset", true) -> core.slotPool.slotIds()
             args[0].equals("admin", true) && args[1].equals("kick", true) ->
                 Bukkit.getOnlinePlayers().map { it.name }
+            args[0].equals("admin", true) && args[1].equals("restore", true) ->
+                core.instanceInventory.snapshotRecords().map { it.instanceId.toString() }
             else -> emptyList()
         }
         else -> emptyList()
