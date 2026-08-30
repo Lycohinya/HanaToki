@@ -175,6 +175,15 @@ interface StageContext {
 
     fun despawnEncounter(encounterId: String)
 
+    /**
+     * encounter/ 模組的第二種形態:**內容層在執行期決定生什麼、生在哪**的動態 encounter
+     * (Roguelike Director 用)。definition id 與 runtime id 分離、同 template 可並存、
+     * 逐座標派工、部分失敗回滾、單一終態——契約與細節見
+     * [com.tinyyana.hanatoki.encounter.DynamicEncounterHandle]。上限由定義的
+     * `dynamic-encounters` 區塊決定。
+     */
+    fun dynamicEncounters(): com.tinyyana.hanatoki.encounter.DynamicEncounterHandle
+
     /** actor/ 模組:取得這個 instance 的演出用 NPC 操作面(ARCH §2「Actor」)。 */
     fun actors(): ActorHandle
 

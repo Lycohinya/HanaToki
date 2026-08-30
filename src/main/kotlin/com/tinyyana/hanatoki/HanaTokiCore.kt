@@ -181,7 +181,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         val now = System.currentTimeMillis()
         val ended = sessionManager.tick(now)
         for (e in ended) {
-            stageEngine.endFor(e.sessionId)
+            stageEngine.endFor(e.sessionId, e.reason.name)
             handleSessionEnded(e.slotId, e.dungeonId, e.reason, e.memberIds)
         }
         stageEngine.tick(now)
@@ -202,7 +202,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
             sendHome(playerId)
         }
         if (ended == null) return
-        stageEngine.endFor(ended.sessionId)
+        stageEngine.endFor(ended.sessionId, ended.reason.name)
         handleSessionEnded(ended.slotId, ended.dungeonId, ended.reason, ended.memberIds)
     }
 
@@ -247,7 +247,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         }
         val members = session.memberIds()
         members.forEach { sessionManager.kick(it) }
-        stageEngine.endFor(session.sessionId)
+        stageEngine.endFor(session.sessionId, EndReason.ADMIN_RESET.name)
         handleSessionEnded(slotId, session.dungeonId, EndReason.ADMIN_RESET, members)
     }
 
@@ -306,7 +306,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
                 ),
             )
         }
-        stageEngine.endFor(sessionId)
+        stageEngine.endFor(sessionId, EndReason.RESOLVED.name)
         handleSessionEnded(ended.slotId, ended.dungeonId, ended.reason, ended.memberIds)
     }
 
@@ -363,7 +363,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
     fun shutdownAll() {
         val ended = sessionManager.endAll(EndReason.ABANDONED)
         for (e in ended) {
-            stageEngine.endFor(e.sessionId)
+            stageEngine.endFor(e.sessionId, e.reason.name)
             handleSessionEnded(e.slotId, e.dungeonId, e.reason, e.memberIds)
         }
         // ⚠ 一定要在最後、而且是同步的:上面那條路徑走的是 AsyncScheduler,插件停用時它會被
@@ -434,6 +434,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
     /** 這個實體是不是副本生出來的(encounter 小怪或 actor)。死亡掉落物清除、debug 用。 */
     fun isDungeonOwnedEntity(entityId: UUID): Boolean =
         stageEngine.encounters.isTracked(entityId) ||
+            stageEngine.dynamicEncounters.isTracked(entityId) ||
             actorController.actorIdOf(entityId) != null ||
             propController.isTracked(entityId)
 

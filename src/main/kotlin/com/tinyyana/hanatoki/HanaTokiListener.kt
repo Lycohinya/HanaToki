@@ -150,7 +150,19 @@ class HanaTokiListener(private val core: HanaTokiCore) : Listener {
             event.droppedExp = 0
         }
         core.stageEngine.encounters.onEntityDeath(entityId)
+        // 死亡座標在這裡(死亡 region)讀好傳進去,控制器不再跨 region 讀實體。
+        core.stageEngine.dynamicEncounters.onEntityDeath(entityId, event.entity.location.clone())
         core.stageEngine.handleActorDeath(entityId)
+    }
+
+    /**
+     * 沒有死亡事件就消失的實體(區塊卸載、別的插件 `remove()`、掉出世界、被撿走的掉落物)。
+     * 死亡之後也會來一次——那時索引已經清了,是 no-op。少了這條,動態 encounter 會有永遠
+     * 清不掉的場(見 DynamicEncounterController 的 KDoc)。
+     */
+    @EventHandler
+    fun onEntityRemoved(event: com.destroystokyo.paper.event.entity.EntityRemoveFromWorldEvent) {
+        core.stageEngine.dynamicEncounters.onEntityRemovedFromWorld(event.entity.uniqueId)
     }
 
     /**

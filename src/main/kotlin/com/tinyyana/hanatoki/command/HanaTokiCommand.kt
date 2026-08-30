@@ -122,6 +122,7 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
                 sender.sendMessage("§7進行中 session 數:${core.sessionManager.snapshot().size}")
                 sender.sendMessage("§7副本世界:${core.registry.dungeonWorldNames}")
                 sender.sendMessage("§7未收斂的局內背包交易:" + core.instanceInventory.snapshotRecords().size + " 筆(明細:/hanatoki admin journal)")
+                sender.sendMessage("§7" + core.stageEngine.dynamicEncounters.debugTotals())
             }
             // 這台核心實際接受哪些 Mannequin 姿勢。`Mannequin.validPoses()` 是 runtime 橋接,
             // API jar 與 JavaDoc 都查不到內容,而且 Lecithin 是 Folia 分支不一定跟 Paper 一致

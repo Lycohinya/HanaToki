@@ -644,3 +644,56 @@ fun interface CheckDescriptor {
 7. 離場、死亡、斷線重連、timeout、admin reset 都能收斂。
 8. session 場地真的回滾，slot 在回滾後才重新可用。
 9. 測試結束後停止伺服器並確認沒有背景 process／port 殘留。
+
+## 21. 動態 Encounter 與 lifecycle hook（0.3.0，2026-08-30）
+
+`ctx.spawnEncounter(encounterId)` 是**定義驅動**的（YAML 裡寫死一種怪、一個座標）。0.3.0 新增第二種形態：內容層在執行期決定生什麼、生在哪，引擎只負責所有權、Folia 派工、終態與 session 結束時的收斂。Roguelike 的 Director、Threat、怪物內容全部住在內容插件；HanaToki 連「怪物」這個詞都不認識。
+
+Package：`com.tinyyana.hanatoki.encounter`
+
+```kotlin
+interface StageContext {
+    fun dynamicEncounters(): DynamicEncounterHandle
+}
+
+class EntitySpawn(location: Location, entityTypeName: String, initializer: Consumer<Entity>?)
+
+interface DynamicEncounterCallbacks {           // 全部在 anchor region 序列化執行
+    fun onEntityKilled(runtimeId: String, entityId: UUID, location: Location) {}
+    fun onEntityRemoved(runtimeId: String, entityId: UUID, reason: String) {}  // killed | despawned | lost
+    fun onCleared(runtimeId: String) {}          // 整場恰好一次；被 despawn 的場沒有
+}
+
+interface DynamicEncounterHandle {
+    fun spawn(templateId: String, spawns: List<EntitySpawn>, callbacks: DynamicEncounterCallbacks): CompletableFuture<DynamicSpawnResult>
+    fun despawn(runtimeId: String): CompletableFuture<Void>
+    fun despawnAll(): CompletableFuture<Void>
+    fun mutate(entityId: UUID, action: Consumer<Entity>): CompletableFuture<Void>   // 該實體的 EntityScheduler
+    fun dropItem(location: Location, stack: ItemStack): CompletableFuture<UUID?>    // 引擎追蹤、session 結束清掉
+    fun entitiesOf(runtimeId: String): List<UUID>; fun remaining(runtimeId: String): Int
+    fun templateOf(runtimeId: String): String?;   fun activeRuntimeIds(): List<String>
+    fun activeEncounterCount(): Int; fun trackedEntityCount(): Int; fun trackedDropCount(): Int
+    fun isTracked(entityId: UUID): Boolean
+}
+```
+
+| 語意 | 保證 |
+|---|---|
+| definition id 與 runtime id 分離 | `templateId` 只是標籤；回傳的 `runtimeId` 是隨機 UUID，同 template 可並存 |
+| 逐座標派工 | 每一筆 `EntitySpawn` 各自派到自己座標的 RegionScheduler；`initializer` 在那個 task 內執行 |
+| partial failure rollback | 任何一筆失敗 → 已生出來的逐一經 EntityScheduler 移除、名額釋放、結果 `FAILED`；只有全部成功才登記 |
+| 單一終態 | ACTIVE → CLEARED（最後一隻被殺死）或 ACTIVE → DESPAWNED；兩條路在鎖內做「還是 ACTIVE 才改」，`onCleared` 恰好一次 |
+| 消失也算離場 | `EntityRemoveFromWorldEvent`（區塊卸載、別的插件 remove、掉出世界）走 `reason=lost`，場不會永遠清不掉；登記完成後對每一隻做 liveness probe 補上生成與登記之間的縫 |
+| 有界 | 每個 instance 的 `dynamic-encounters: { max-active, max-entities, max-drops }`（定義檔，預設 8/48/64）；超過 → `REJECTED`，不會「生到上限為止」 |
+| session 結束 | `StageEngine.endFor` 收掉所有場與追蹤中的掉落物 |
+
+`DynamicSpawnResult.status` 是 `SPAWNED` / `REJECTED`（沒動世界：cap、空批次、不認得的 EntityType）/ `FAILED`（已回滾）。`/hanatoki admin debug` 多一行 `dynamic encounters=… entities=… drops=… refs=… callbacks=… gone[killed=… despawned=… lost=…]`，soak 結束後前五個全部要是 0；`lost` 高代表有實體沒經死亡就消失（區塊卸載、別的插件在清）。
+
+### 新的 `DungeonBehavior` hook
+
+```kotlin
+fun onMemberReady(ctx: StageContext, playerId: UUID) {}   // 進場交易整個完成（局內背包已換好）；起始物品在這裡發
+fun onSessionEnd(ctx: StageContext, reason: String) {}    // 任何原因結束；encounter/actor/prop/排程已收，場地還沒回滾
+```
+
+`onStageEnter` 跑在傳送與局內背包清空**之前**，在那裡往背包放東西會被清掉——這就是 `onMemberReady` 存在的理由。`reason` 是 `EndReason` 的常數名。兩者都是帶 body 的介面方法，增刪要兩邊一起重編。

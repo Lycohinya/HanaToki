@@ -82,6 +82,8 @@ class DungeonEntry(private val core: HanaTokiCore) {
                             rollback(session, players, prepared)
                                 .thenApply { fail(DungeonEntryStatus.INVENTORY_FAILED, "局內背包切換失敗,已回滾") }
                         } else {
+                            // 交易整個做完才通知 behavior:局內背包已經換好,起始物品放進去不會被清掉。
+                            players.forEach { core.stageEngine.notifyMemberReady(session.sessionId, it.uniqueId) }
                             done(
                                 Outcome(
                                     status = statusOnSuccess,
@@ -190,7 +192,7 @@ class DungeonEntry(private val core: HanaTokiCore) {
                 core.sessionManager.kick(player.uniqueId)
                 core.returnPoints.forget(player.uniqueId)
             }
-            core.stageEngine.endFor(session.sessionId)
+            core.stageEngine.endFor(session.sessionId, EndReason.ABANDONED.name)
             // 常駐副本的 instance 不因為一次進場失敗而收掉(它本來就不歸還 slot);
             // session 型副本則要把 slot 放回池子,否則這次失敗會永久吃掉一個場地。
             if (!session.persistent) {

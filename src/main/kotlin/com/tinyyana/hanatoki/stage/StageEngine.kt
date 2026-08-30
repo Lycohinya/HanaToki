@@ -3,6 +3,8 @@ package com.tinyyana.hanatoki.stage
 import com.tinyyana.hanatoki.HanaTokiCore
 import com.tinyyana.hanatoki.actor.ActorHandle
 import com.tinyyana.hanatoki.config.InteractionKind
+import com.tinyyana.hanatoki.encounter.DynamicEncounterController
+import com.tinyyana.hanatoki.encounter.DynamicEncounterHandle
 import com.tinyyana.hanatoki.encounter.EncounterController
 import com.tinyyana.hanatoki.folia.InstanceDispatch
 import com.tinyyana.hanatoki.folia.PlayerOp
@@ -33,6 +35,9 @@ class StageEngine(private val core: HanaTokiCore) {
     private val states = ConcurrentHashMap<UUID, InstanceState>()
     val encounters = EncounterController(core.plugin)
 
+    /** 動態 encounter(Roguelike Director 用)。定義驅動的 [encounters] 原樣保留給刀塚/蒼櫻。 */
+    val dynamicEncounters = DynamicEncounterController(core.plugin)
+
     /**
      * `ctx.submitLater/submitRepeating` 排出來的演出排程,按 session 記帳,在 stage 離開與
      * session 結束時一次取消。behavior 不需要自己記帳——不記帳的下場是場地已經回滾、session 已
@@ -51,6 +56,7 @@ class StageEngine(private val core: HanaTokiCore) {
         val state = InstanceState(graph)
         state.enterStage(graph.startStage, nowMs)
         states[sessionId] = state
+        sessionMeta[sessionId] = SessionMeta(dungeonId, slotId, anchor)
         // enter() 的呼叫端可能是任意執行緒(指令發出者的 region)——behavior callback 一律要求
         // 已在 anchor 所屬 region 的 task 內執行(ARCH §5.1②),這裡補一次 submit。
         InstanceDispatch.submit(core.plugin, anchor) {
@@ -59,16 +65,50 @@ class StageEngine(private val core: HanaTokiCore) {
         }
     }
 
-    fun endFor(sessionId: UUID) {
-        states.remove(sessionId)
+    fun endFor(sessionId: UUID, reason: String) {
+        val state = states.remove(sessionId)
         cancelScheduled(sessionId)
         encounters.despawnAllForSession(sessionId)
+        dynamicEncounters.despawnAllForSession(sessionId)
+        // 內容層的收尾回呼。session 登記表這時可能已經被拿掉(resolveSession 先 endSession 再
+        // 到這裡),所以 dungeon/slot/anchor 不能再從 sessionManager 查,要從 startFor 記的那份拿。
+        val meta = sessionMeta.remove(sessionId)
+        if (state != null && meta != null) {
+            val behavior = behaviorFor(meta.dungeonId)
+            if (behavior != null) {
+                InstanceDispatch.submit(core.plugin, meta.anchor) {
+                    try {
+                        behavior.onSessionEnd(ctxFor(sessionId, meta.dungeonId, meta.slotId, meta.anchor, state), reason)
+                    } catch (t: Throwable) {
+                        core.plugin.logger.warning("[HanaToki] ${meta.dungeonId} 的 onSessionEnd 丟出例外:${t.javaClass.simpleName}: ${t.message}")
+                    }
+                }
+            }
+        }
         core.actorController.despawnAllForSession(sessionId)
         core.propController.despawnAllForSession(sessionId)
         core.bossBars.clear(sessionId)
     }
 
     fun stateOf(sessionId: UUID): InstanceState? = states[sessionId]
+
+    /** [endFor] 時 sessionManager 可能已經查不到,所以 dungeon/slot/anchor 在 [startFor] 就記一份。 */
+    private class SessionMeta(val dungeonId: String, val slotId: String, val anchor: Location)
+    private val sessionMeta = ConcurrentHashMap<UUID, SessionMeta>()
+
+    /**
+     * 進場交易整個完成之後(DungeonEntry 呼叫):通知 behavior 這位成員可以收局內物品了。
+     * 沒有 stage 圖的副本(Phase 1 test-empty)沒有 behavior,直接略過。
+     */
+    fun notifyMemberReady(sessionId: UUID, playerId: UUID) {
+        val state = states[sessionId] ?: return
+        val meta = sessionMeta[sessionId] ?: return
+        val behavior = behaviorFor(meta.dungeonId) ?: return
+        InstanceDispatch.submit(core.plugin, meta.anchor) {
+            if (states[sessionId] !== state) return@submit
+            behavior.onMemberReady(ctxFor(sessionId, meta.dungeonId, meta.slotId, meta.anchor, state), playerId)
+        }
+    }
 
     /** HanaTokiListener 的 PlayerInteractEvent handler 轉呼叫這裡。已在事發玩家 region 觸發。 */
     fun handleInteraction(playerId: UUID, location: Location, action: Action) {
@@ -327,6 +367,12 @@ private class StageContextImpl(
 
     override fun despawnEncounter(encounterId: String) {
         engine.encounters.despawn(sessionId, encounterId)
+    }
+
+    override fun dynamicEncounters(): DynamicEncounterHandle {
+        val limits = core.registry.definitions[dungeonId]?.dynamicEncounters
+            ?: com.tinyyana.hanatoki.config.DynamicEncounterLimits()
+        return engine.dynamicEncounters.handleFor(sessionId, anchor, limits)
     }
 
     override fun actors(): ActorHandle = core.actorController.handleFor(sessionId)

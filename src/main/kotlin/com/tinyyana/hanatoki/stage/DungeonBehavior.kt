@@ -36,6 +36,25 @@ interface DungeonBehavior {
 
     /** encounter/ 模組:全員離場或判定失敗導致的戰鬥失敗(v1 combat-test 用不到,先留 hook)。 */
     fun onEncounterFailed(ctx: StageContext, encounterId: String) {}
+
+    /**
+     * 某位成員的進場交易**整個做完**了(傳送落地、局內背包已換好)。
+     *
+     * 存在理由:`onStageEnter` 在 session 建立的當下就跑,那時人還沒傳送、局內背包也還沒清——
+     * 在那裡發起始武器會被接下來的清空吃掉。要往局內背包放東西(起始武器、內容層自己鑄的
+     * 局內物品)一律等這個回呼。常駐副本每個走進來的人都會各收到一次。
+     */
+    fun onMemberReady(ctx: StageContext, playerId: UUID) {}
+
+    /**
+     * 這一局結束了(任何原因:Resolution、逾時、全員離場、admin reset、關服)。
+     * [reason] 是 [com.tinyyana.hanatoki.instance.EndReason] 的常數名。
+     *
+     * 此時引擎已經收掉 encounter/actor/prop/排程,場地回滾**還沒**開始;內容層在這裡清自己的
+     * 登記表(Director 狀態、怪物表、玩家資源 budget)。不要在這裡再對世界做事。
+     * 常駐副本(永不結束)只會在關服時收到。
+     */
+    fun onSessionEnd(ctx: StageContext, reason: String) {}
 }
 
 object DungeonBehaviorRegistry {

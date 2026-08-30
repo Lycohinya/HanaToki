@@ -140,6 +140,23 @@ data class DungeonDefinition(
     val deathResolution: Boolean = false,
     /** 局內背包隔離設定;null(預設)= 這座副本不做背包隔離,既有副本行為完全不變。 */
     val instanceInventory: InstanceInventoryDef? = null,
+    /** 動態 encounter 的上限(見 [DynamicEncounterLimits])。沒寫就是預設值,既有副本不受影響。 */
+    val dynamicEncounters: DynamicEncounterLimits = DynamicEncounterLimits(),
+)
+
+/**
+ * 動態 encounter 的有界性(ARCH §5「所有 registry bounded」的設定面)。**每個 instance 各自一份**。
+ *
+ * - [maxActive]:同時進行中的場數(含還在生成中的)。
+ * - [maxEntities]:追蹤中的實體總數。超過就拒絕整批 spawn,不會「生到上限為止」——半場怪對
+ *   內容層是最難處理的結果。
+ * - [maxDrops]:引擎追蹤的掉落物數(session 結束會清)。超過時 `dropItem` 回 null,由內容層
+ *   決定改成直接進背包還是不掉。
+ */
+data class DynamicEncounterLimits(
+    val maxActive: Int = 8,
+    val maxEntities: Int = 48,
+    val maxDrops: Int = 64,
 )
 
 /**
@@ -260,6 +277,23 @@ object DungeonDefinitionParser {
             testOnly = (raw["test-only"] as? Boolean) ?: false,
             deathResolution = (raw["death-resolution"] as? Boolean) ?: false,
             instanceInventory = parseInstanceInventory(id, raw["instance-inventory"]),
+            dynamicEncounters = parseDynamicLimits(id, raw["dynamic-encounters"]),
+        )
+    }
+
+    private fun parseDynamicLimits(id: String, raw: Any?): DynamicEncounterLimits {
+        @Suppress("UNCHECKED_CAST")
+        val m = raw as? Map<String, Any?> ?: return DynamicEncounterLimits()
+        val defaults = DynamicEncounterLimits()
+        fun positive(key: String, default: Int): Int {
+            val v = (m[key] as? Number)?.toInt() ?: return default
+            if (v < 1) throw DefinitionError("dungeons.$id.dynamic-encounters.$key 必須 >= 1(目前 $v)")
+            return v
+        }
+        return DynamicEncounterLimits(
+            maxActive = positive("max-active", defaults.maxActive),
+            maxEntities = positive("max-entities", defaults.maxEntities),
+            maxDrops = positive("max-drops", defaults.maxDrops),
         )
     }
 
