@@ -697,3 +697,77 @@ fun onSessionEnd(ctx: StageContext, reason: String) {}    // 任何原因結束�
 ```
 
 `onStageEnter` 跑在傳送與局內背包清空**之前**，在那裡往背包放東西會被清掉——這就是 `onMemberReady` 存在的理由。`reason` 是 `EndReason` 的常數名。兩者都是帶 body 的介面方法，增刪要兩邊一起重編。
+
+## 22. 立體場地與可互動物件（0.4.x，2026-08-30）
+
+Roguelike 的三層回環地圖逼出來的一批原語。全部是 `StageContext` / `PropHandle` 上的方法，
+簽章一律 JDK/Bukkit 型別（跨插件規則見 `StageContext` 的 KDoc）。
+
+### 持久幾何：`mutatePersistentBatch` / `readBlock`
+
+```kotlin
+fun mutatePersistentBatch(locations: List<Location>, action: Consumer<Block>): CompletableFuture<Void>
+fun readBlock(location: Location, reader: Consumer<Block>): CompletableFuture<Void>
+```
+
+| 方法 | 什麼時候用 |
+|---|---|
+| `mutate` | 局內的暈現、可破壞物、事件節點的外觀變化——**該回滾的東西** |
+| `mutatePersistentBatch` | topology 固定、不隨 seed 變、一個 slot 蓋一次就沿用的場地本體 |
+
+`mutatePersistentBatch` **不進 diff log**：整局結束不回滾。兩件事因此變成呼叫端的責任——
+
+1. **冪等**：同一個 slot 第二次開局時場地還在，內容層要自己知道「這一版已經蓋過了」。
+   建議做法是埋一顆版本標記方塊，開局先 `readBlock` 問世界；**不要只靠自己記一張表**——
+   世界資料夾被刪掉時表還在但場地不在，玩家會直接掉進虛空。
+2. **世界要寫回磁碟**：定義檔的 `world-auto-save` 必須是 `true`，否則重開機之後場地不見。
+
+派工依 **chunk** 分組（一個 chunk 完整屬於一個 Folia region，所以同 chunk 的方塊可以在一個 task
+裡寫完）。逐格呼叫 `regionScheduler.execute` 上萬次會把 region 卡住——這是刻意做成批次的理由。
+
+`readBlock` 存在的理由就是上面那個「問世界」：讀方塊一樣要在擁有那個座標的 region 執行緒上做，
+所以它是非同步的。
+
+### 玩家絕對座標：`memberPositions`
+
+```kotlin
+fun memberPositions(): CompletableFuture<Map<UUID, DoubleArray>>   // [x, y, z]
+```
+
+`nearestMemberDirection` 只給水平方向與距離，平面競技場夠用；**立體地圖要知道玩家在哪一層**
+才能把怪生在他那一層的可走地面上，差一個 Y 就是整場怪生在地板底下或半空中。
+
+安全性理由與 `membersWithin` / `nearestMemberDirection` 同一條：座標由**玩家自己的
+EntityScheduler** 讀出來，不從 anchor region 跨 region 讀別人的座標。future 完成時不保證在哪條
+執行緒，要碰 `state`/`transition`/`resolve` 之前一律先 `submit`。
+
+### 可互動物件的標籤：`PropHandle.spawnText`
+
+```kotlin
+fun spawnText(propId: String, location: Location, miniMessage: String,
+              billboardToPlayer: Boolean, backgroundArgb: Int): CompletableFuture<Void>
+```
+
+場地上可以互動的東西如果只是一顆方塊，玩家看不出它是什麼、也不知道要右鍵。內容是 MiniMessage
+**原文**不是 message key（標籤通常要嵌現算出來的東西，例如剩餘次數）；同一個 `propId` 再呼叫一次
+就是換字。跟其他 prop 一樣不進 diff log，session 結束時一起收。
+
+### 具名參數的動作列
+
+```kotlin
+fun actionBar(playerId: UUID, key: String, params: Map<String, String>)
+fun actionBarAll(key: String, params: Map<String, String>)
+```
+
+與 `message` 對稱。加這個多載的理由很單純：動作列要放的常常就是「你現在在哪個區域」這種帶變數的字。
+
+## 23. 副本世界的地形保護（0.4.1，2026-08-30）
+
+`DungeonWorldGuard`：**任何** HanaToki 副本世界裡，玩家不能放/挖方塊、不能倒桶、不能掛畫或放
+盔甲座。放在引擎層而不是每座副本各寫一次——三種 instance 形態（回滾型、持久型、常駐型）壞掉的
+方式不同，但都不該讓玩家動一根手指。內容層自己用 `ctx.mutate` 蓋場地走的是插件路徑，不受影響。
+
+bypass 權限 `hanatoki.build` **預設 false，連 op 都沒有**：管理員平常在副本裡手滑放一顆方塊
+就會留在那裡。要改場地必須明確開權限。
+
+2026-08-30 正式服實測:在此之前引擎完全沒有這道保護,玩家在刀塚裡放的地獄石留了下來。

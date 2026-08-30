@@ -198,6 +198,14 @@ private class StageContextImpl(
     override fun mutate(location: Location, action: java.util.function.Consumer<org.bukkit.block.Block>) =
         core.mutateSlot(slotId, location) { block -> action.accept(block) }
 
+    override fun mutatePersistentBatch(
+        locations: List<Location>,
+        action: java.util.function.Consumer<org.bukkit.block.Block>,
+    ) = core.mutateSlotPersistentBatch(locations) { block -> action.accept(block) }
+
+    override fun readBlock(location: Location, reader: java.util.function.Consumer<org.bukkit.block.Block>) =
+        WorldOp.dispatch(core.plugin, location) { block -> reader.accept(block) }
+
     override fun interactionLocation(interactionId: String): Location? =
         core.registry.interactionLocations[slotId]?.get(interactionId)
 
@@ -235,12 +243,16 @@ private class StageContextImpl(
         activeMembers().forEach { title(it, titleKey, subtitleKey) }
     }
 
-    override fun actionBar(playerId: UUID, key: String) {
-        PlayerOp.actionBar(core.plugin, playerId, core.texts.format(key))
+    override fun actionBar(playerId: UUID, key: String) = actionBar(playerId, key, emptyMap())
+
+    override fun actionBar(playerId: UUID, key: String, params: Map<String, String>) {
+        PlayerOp.actionBar(core.plugin, playerId, core.texts.format(key, params))
     }
 
-    override fun actionBarAll(key: String) {
-        val text = core.texts.format(key)
+    override fun actionBarAll(key: String) = actionBarAll(key, emptyMap())
+
+    override fun actionBarAll(key: String, params: Map<String, String>) {
+        val text = core.texts.format(key, params)
         activeMembers().forEach { PlayerOp.actionBar(core.plugin, it, text) }
     }
 
@@ -324,6 +336,19 @@ private class StageContextImpl(
         }
         return CompletableFuture.allOf(*probes.toTypedArray())
             .thenApply { found.minByOrNull { it[2] } ?: DoubleArray(0) }
+    }
+
+    override fun memberPositions(): CompletableFuture<Map<UUID, DoubleArray>> {
+        val found = java.util.concurrent.ConcurrentHashMap<UUID, DoubleArray>()
+        val world = anchor.world
+        val probes = activeMembers().map { playerId ->
+            PlayerOp.dispatch(core.plugin, playerId) { player ->
+                val here = player.location
+                if (here.world != world) return@dispatch
+                found[playerId] = doubleArrayOf(here.x, here.y, here.z)
+            }
+        }
+        return CompletableFuture.allOf(*probes.toTypedArray()).thenApply { found.toMap() }
     }
 
     override fun transition(stageId: String) {

@@ -20,6 +20,7 @@ import com.tinyyana.hanatoki.instance.EndReason
 import com.tinyyana.hanatoki.instance.EnterResult
 import com.tinyyana.hanatoki.instance.SessionManager
 import com.tinyyana.hanatoki.instance.SlotPool
+import com.tinyyana.hanatoki.inventory.InstanceDropSweeper
 import com.tinyyana.hanatoki.inventory.InstanceInventoryService
 import com.tinyyana.hanatoki.inventory.InstanceItemGuard
 import com.tinyyana.hanatoki.inventory.InstanceJournal
@@ -49,6 +50,9 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
     val worldProvisioner = DungeonWorldProvisioner(plugin)
     val registry = DungeonRegistry(plugin, plugin.logger, worldProvisioner)
     val returnPoints = ReturnPointRegistry { name -> isDungeonWorld(name) }
+
+    /** 副本世界的地形保護:玩家不能放/挖方塊(見 [com.tinyyana.hanatoki.world.DungeonWorldGuard])。 */
+    val dungeonWorldGuard = com.tinyyana.hanatoki.world.DungeonWorldGuard(this)
     val texts = Texts()
     val rewardDispatcher = RewardDispatcher(plugin)
     val actorController = ActorController(plugin)
@@ -80,6 +84,25 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
             recorder.record(location, block.blockData)
             action(block)
         }
+    }
+
+    /**
+     * 同 [mutateSlot] 但不記錄 diff——這一筆改動不會被整局結束的回滾拉掉。
+     * 用途與幂等責任見 [com.tinyyana.hanatoki.stage.StageContext.mutatePersistent]。
+     */
+    fun mutateSlotPersistentBatch(
+        locations: List<Location>,
+        action: (org.bukkit.block.Block) -> Unit,
+    ): CompletableFuture<Void> {
+        if (locations.isEmpty()) return CompletableFuture.completedFuture(null)
+        // 一個 chunk 完整屬於一個 Folia region,所以同 chunk 的方塊可以在同一個 task 裡寫完。
+        val byChunk = locations.groupBy { (it.blockX shr 4) to (it.blockZ shr 4) }
+        val futures = byChunk.values.map { group ->
+            WorldOp.dispatchAt(plugin, group.first()) {
+                group.forEach { loc -> action(loc.block) }
+            }
+        }
+        return CompletableFuture.allOf(*futures.toTypedArray())
     }
 
     /** ARCH §9:CheckResolver 缺席時回傳 `"unavailable"`,由 behavior 的 fail-safe 分支接手(§9 末段)。 */
@@ -122,6 +145,10 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         // ⚠ 只有 Entered(真的開了新 instance)才啟動 stage 狀態機。Joined = 加入一個正在跑的
         //   常駐 instance,重跑 startFor 會把它重置回起始 stage(Boss 打到一半有人進場就消失)。
         if (result is EnterResult.Entered) {
+            // 開局前先掃一次殘骸:上一局收斂時場地的 chunk 可能已經開始卸載,那批帶著舊
+            // instanceId 的掉落物掃不到,會一路留到現在——玩家撿不起來,而且完全看不出為什麼
+            // (2026-08-30 真人回報「有些掉在地上的物品無法被拾取」)。這裡是它們一定載入著的時刻。
+            sweepInstanceDrops(result.session.slotId)
             stageEngine.startFor(result.session.sessionId, dungeonId, result.session.slotId, result.anchor, now)
         }
         return result
@@ -327,7 +354,27 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         CompletableFuture.allOf(*restores.toTypedArray()).whenComplete { _, _ ->
             val sends = memberIds.map { sendHome(it) }
             CompletableFuture.allOf(*sends.toTypedArray())
-                .whenComplete { _, _ -> rollbackAndRelease(slotId, dungeonId) }
+                .whenComplete { _, _ ->
+                    sweepInstanceDrops(slotId)
+                    rollbackAndRelease(slotId, dungeonId)
+                }
+        }
+    }
+
+    /**
+     * 場地上殘留的局內掉落物(ledger 追不到的那些,見 [InstanceDropSweeper])。
+     *
+     * **刻意不掛進上面那條 barrier**:回滾/釋放 slot 的順序是收斂的正確性核心,而掃描走的是
+     * RegionScheduler——關服時那些 task 不保證跑得完,把 `rollbackAndRelease` 串在它後面等於
+     * 讓關服流程停在一個不會來的 future 上。掃描只是清垃圾,失敗的代價是下一局有人撿不起來,
+     * 不值得拿收斂順序去換。
+     */
+    private fun sweepInstanceDrops(slotId: String) {
+        val anchor = slotPool.anchorOf(slotId) ?: return
+        InstanceDropSweeper.sweep(plugin, instanceInventory.items, anchor).whenComplete { count, _ ->
+            if (count != null && count > 0) {
+                plugin.logger.info("[HanaToki] slot=$slotId 收斂時清掉 $count 個殘留的局內掉落物")
+            }
         }
     }
 

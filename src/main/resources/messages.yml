@@ -16,10 +16,15 @@ session:
 instance-item:
   cannot-drop: "<gray>這是這一局的東西,帶不走也丟不掉</gray>"
   cannot-store: "<gray>這是這一局的東西,放不進箱子</gray>"
+  cannot-pick-up: "<gray>這不是你這一局的東西</gray>"
 # 「安全 Run 容器」probe(test-roguelike)的文字。
 roguelike:
   entry: "<gray>試作 Run 開始。這裡沒有時限,身上是這一局的裝備——踩上銅板就撤離。</gray>"
   extracted: "<green>撤離成功,永久背包已經還給你</green>"
+# 副本世界的地形保護(DungeonWorldGuard)。任何副本共用。
+dungeon:
+  no-build: "<gray>這裡的地形動不了</gray>"
+
 puzzle:
   entry: "<gray>一間小祠。三座花燈,一面壁畫——順序藏在畫裡。</gray>"
   mural-hint: "<yellow>壁畫暗示:先中,再左,最後右。</yellow>"

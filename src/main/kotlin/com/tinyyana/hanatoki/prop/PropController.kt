@@ -129,6 +129,42 @@ class PropController(private val plugin: Plugin) {
             }
         }
 
+        override fun spawnText(
+            propId: String,
+            location: Location,
+            miniMessage: String,
+            billboardToPlayer: Boolean,
+            backgroundArgb: Int,
+        ): CompletableFuture<Void> {
+            val component = net.kyori.adventure.text.minimessage.MiniMessage.miniMessage().deserialize(miniMessage)
+            val k = key(sessionId, propId)
+            // 同一塊標籤換字是高頻的(節點冷卻倒數每秒重畫一次),先試著就地改。
+            // remove + respawn 會讓玩家看到閃一下,而且每秒生一顆新實體。
+            // ⚠ 這裡**不讀** existing.isValid:那是從呼叫端的執行緒讀一個掛在別處座標的實體
+            //   (跨 region 讀,ARCH §5.1)。有效性交給 WorldOp.dispatch 的 retired callback 與
+            //   task 內的判斷處理。
+            val existing = props[k]
+            if (existing is org.bukkit.entity.TextDisplay) {
+                return WorldOp.dispatch(plugin, existing) { entity ->
+                    val display = entity as? org.bukkit.entity.TextDisplay ?: return@dispatch
+                    if (display.isValid) display.text(component)
+                }
+            }
+            props.remove(k)?.let { old -> WorldOp.dispatch(plugin, old) { it.remove() } }
+            return WorldOp.dispatchAt(plugin, location) { loc ->
+                val world = loc.world ?: return@dispatchAt
+                val display = world.spawn(loc, org.bukkit.entity.TextDisplay::class.java) { d ->
+                    d.isPersistent = false
+                    d.text(component)
+                    d.billboard = if (billboardToPlayer) Display.Billboard.CENTER else Display.Billboard.FIXED
+                    d.backgroundColor = org.bukkit.Color.fromARGB(backgroundArgb)
+                    d.alignment = org.bukkit.entity.TextDisplay.TextAlignment.CENTER
+                    d.isSeeThrough = false
+                }
+                props[k] = display
+            }
+        }
+
         override fun spawnPart(
             propId: String,
             location: Location,

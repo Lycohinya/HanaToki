@@ -52,6 +52,40 @@ interface StageContext {
     /** ARCH §5.1③:針對世界座標的 mutation,自動記錄 diff(供整局結束時回滾)。 */
     fun mutate(location: Location, action: Consumer<Block>): CompletableFuture<Void>
 
+    /**
+     * 同 [mutate] 的派工路徑,但**不記錄 diff**——這一筆改動整局結束不會被回滾。
+     *
+     * ## 存在理由
+     *
+     * 逆向回滾適合「每局重蓋、每局拆掉」的場地(刀塚就是)。Roguelike 的三層回環地圖
+     * 是相反的東西:topology 固定、不隨 seed 變、一張地圖上萬個方塊。把它走 [mutate] 的話,
+     * 每一局都要重蓋一次、結束再逐格回滾一次——兩邊都是白做的工（而且 diff log 會
+     * 帶著一張上萬筆的表活整局）。
+     *
+     * 用這個方法蓋出來的方塊由**內容層自己負責幂等**:同一個 slot 第二次開局時場地還在,
+     * 內容層要自己記「這個 slot 已經蓋過哪一版」而不是再蓋一次。世界要跨重開機保留這些方塊
+     * 的話,定義檔的 `world-auto-save` 要是 true。
+     *
+     * 局內的暈現、可破壞物、事件節點的外觀變化仍然走 [mutate](那些本來就該回滾)。
+     *
+     * ## 為什麼是批次而不是單格
+     *
+     * 一張三層地圖是上千格。逐格呼叫 = 上千個 `regionScheduler.execute`,它們會落在同一個
+     * tick 裡把 region 卡住。這裡依 **chunk** 分組(一個 chunk 完整屬於一個 region,所以同一組
+     * 裡的方塊可以在同一個 task 裡全部寫完),一個 chunk 一次派工。[action] 會對每一格各呼叫一次,
+     * 實作端應該以方塊座標查自己的計畫表決定要放什麼。
+     */
+    fun mutatePersistentBatch(locations: List<Location>, action: Consumer<Block>): CompletableFuture<Void>
+
+    /**
+     * 讀一格方塊。讀取也要在擁有那個座標的 region 執行線上做(跟寫一樣),所以這是非同步的。
+     *
+     * 存在理由:用 [mutatePersistentBatch] 蓋出來的場地不會回滾,內容層因此需要一個方法問
+     * 「這個 slot 上次蓋的是哪一版」——問世界本人比自己記一張表可靠:世界資料夾被刪掉時,
+     * 表還在但場地不在了,玩家會直接掉進虛空。
+     */
+    fun readBlock(location: Location, reader: Consumer<Block>): CompletableFuture<Void>
+
     /** interaction/encounter 定義的相對偏移已在載入時展開成絕對座標,這裡查表用。 */
     fun interactionLocation(interactionId: String): Location?
     fun encounterLocation(encounterId: String): Location?
@@ -73,7 +107,9 @@ interface StageContext {
 
     /** 演出 cue:動作列——適合戰鬥中的招式預告(不佔聊天欄、重複出現不吵)。 */
     fun actionBar(playerId: UUID, key: String)
+    fun actionBar(playerId: UUID, key: String, params: Map<String, String>)
     fun actionBarAll(key: String)
+    fun actionBarAll(key: String, params: Map<String, String>)
 
     /**
      * 演出 cue:在場地某座標播放音效給**每一位在場成員**(逐人派工到各自的 EntityScheduler,
@@ -153,6 +189,20 @@ interface StageContext {
      * [state]/[transition]/[resolve] 之前一律先 [submit]。
      */
     fun nearestMemberDirection(location: Location): CompletableFuture<DoubleArray>
+
+    /**
+     * 每一位在場成員目前的絕對座標(`[x, y, z]`)。離線/不在副本世界的人不會出現在結果裡。
+     *
+     * ## 為什麼不能用 [nearestMemberDirection] 代替
+     *
+     * 那個方法只給水平方向與距離。平面競技場夠用,但立體地圖的內容層要知道「玩家在哪一層」
+     * 才能把怪生在他那一層的可走地面上——差一個 Y 就是把一整場怪生在地板下面或半空中。
+     *
+     * 跟 [membersWithin]/[nearestMemberDirection] 同一條安全性理由:座標由**玩家自己的
+     * EntityScheduler** 讀出來,不從 anchor region 跨 region 讀別人的座標。future 完成時不保證在哪條
+     * 執行線上,要碰 [state]/[transition]/[resolve] 之前一律先 [submit]。
+     */
+    fun memberPositions(): CompletableFuture<Map<UUID, DoubleArray>>
 
     /** ARCH §5.1②:切換 stage(內部會呼叫舊 stage 的 onExit、新 stage 的 onEnter)。 */
     fun transition(stageId: String)

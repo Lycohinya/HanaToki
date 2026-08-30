@@ -35,3 +35,8 @@ permissions:
   hanatoki.admin:
     description: HanaToki 管理指令(list/kick/reset/debug)
     default: op
+  hanatoki.build:
+    # ⚠ 預設 false,**連 op 都沒有**。副本場地全部是程式化蓋出來的(回滾型/持久型/常駐型都是),
+    #   管理員平常在裡面手滑放一顆方塊就會留在那裡。要改場地就明確開這個權限。
+    description: 在 HanaToki 副本世界裡放/挖方塊(預設沒有人有)
+    default: false

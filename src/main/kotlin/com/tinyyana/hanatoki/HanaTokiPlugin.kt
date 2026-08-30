@@ -50,6 +50,8 @@ class HanaTokiPlugin : JavaPlugin() {
         // 局內物品的洩漏防線(丟棄/拾取/容器/漏斗)。跟主 listener 分開註冊:它只在有副本
         // 開了局內背包時才會真的擋東西,而且規則自成一組,混進主 listener 會讓兩邊都難讀。
         server.pluginManager.registerEvents(core.instanceItemGuard, this)
+        // 副本世界不給玩家改地形(2026-08-30 正式服回報:有人在刀塚裡放了地獄石,而且留著)
+        server.pluginManager.registerEvents(core.dungeonWorldGuard, this)
 
         // ARCH §5.2 規則 5:v1 用 GlobalRegionScheduler 驅動 tick 訊號,訊號本身只做無副作用/
         // 單 session 操作的查表與 session.tick() 呼叫(Phase 1 尚無跨 session 共享狀態需要序列化到

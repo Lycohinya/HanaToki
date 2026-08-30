@@ -129,6 +129,32 @@ interface PropHandle {
     ): CompletableFuture<Void>
 
     /** 把擺設移到新位置(跟隨會動的 actor 用)。找不到就是 no-op。 */
+    /**
+     * 放一塊**懸浮文字**([org.bukkit.entity.TextDisplay])。
+     *
+     * 存在理由:場地上可以互動的東西(事件節點、撤離點、開關)如果只是一顆方塊,玩家看不出
+     * 它是什麼、也不知道要右鍵——2026-08-30 真人回報「我完全看不懂這遊戲在玩什麼」。掛一塊
+     * 短標籤是最省的解法:不佔畫面、不用開介面、走過去就看得到。
+     *
+     * 文字內容是 **MiniMessage 原文**(不是 message key):標籤通常要嵌名字、剩餘次數這類
+     * 現算出來的東西。
+     *
+     * ⚠ 同一個 propId 再呼叫一次是**就地換字**(不移除、也不移動)——標籤每秒重畫一次是常態
+     * (節點冷卻倒數),remove + respawn 會讓玩家看到閃爍、而且每秒生一顆新實體。
+     * 因此**傳進來的 [location] 只在第一次生成時有意義**;要移動請用 [moveTo]。
+     *
+     * @param miniMessage 標籤內容;`\n` 換行
+     * @param billboardToPlayer true = 永遠面向玩家(標籤幾乎都要 true),false = 固定朝向
+     * @param backgroundArgb 背景色(含 alpha);0 = 完全透明,不畫底板
+     */
+    fun spawnText(
+        propId: String,
+        location: Location,
+        miniMessage: String,
+        billboardToPlayer: Boolean,
+        backgroundArgb: Int,
+    ): CompletableFuture<Void>
+
     fun moveTo(propId: String, location: Location): CompletableFuture<Void>
 
     fun despawn(propId: String): CompletableFuture<Void>

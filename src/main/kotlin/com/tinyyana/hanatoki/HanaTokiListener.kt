@@ -64,12 +64,23 @@ class HanaTokiListener(private val core: HanaTokiCore) : Listener {
             core.joinPersistentByWorld(player.uniqueId, player.world.name)
             return
         }
+        // ⚠ 重連判定必須排在局內背包恢復**之前**。
+        //
+        //   `recoverOnJoin` → `restore` → `startRestore` 的第一件事就是
+        //   `activeByPlayer.remove(...)`,也就是把「這位玩家現在在跑哪一局」清掉。原本的順序
+        //   (先恢復、再判定重連)對一個 grace 還沒過、session 還活著的斷線玩家來說,等於
+        //   「人重連回副本裡了,但引擎認為他不在任何一局」——那一局地上的東西、身上的東西
+        //   全部 `isLegalFor` = false,撿不起來也用不了。
+        //
+        //   `reconnect` 只是登記表操作(無 I/O、無派工),移到前面不會延後任何事;而
+        //   **重連不到 session 的人恢復路徑完全不變**——崩潰重啟/grace 逾時/關服殘局的玩家
+        //   `reconnect` 一律回 false,照樣走 `recoverOnJoin` 把欠他的永久背包還回去。
+        val reconnected = core.sessionManager.reconnect(player.uniqueId, System.currentTimeMillis())
         // 局內背包:上次沒收斂完的交易在這裡接手(崩潰重啟、還原途中登出、死亡後直接離線)。
-        // 順序在 session 重連判定之前——玩家的永久背包比他站在哪重要。
-        core.instanceInventory.recoverOnJoin(player.uniqueId)
+        if (!reconnected) core.instanceInventory.recoverOnJoin(player.uniqueId)
+        // 背包掃描兩條路都要跑:重連回來的人身上也可能帶著**更早那一局**的殘留物品。
         core.instanceItemGuard.purgeIllegal(player)
 
-        val reconnected = core.sessionManager.reconnect(player.uniqueId, System.currentTimeMillis())
         if (reconnected) {
             val session = core.sessionManager.sessionOf(player.uniqueId) ?: return
             val anchor = core.slotPool.anchorOf(session.slotId) ?: return

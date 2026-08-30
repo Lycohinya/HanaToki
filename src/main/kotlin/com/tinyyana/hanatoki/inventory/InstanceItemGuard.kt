@@ -68,8 +68,20 @@ class InstanceItemGuard(
             event.isCancelled = true
             return
         }
-        if (!items.isLegalFor(player.uniqueId, stack)) event.isCancelled = true
+        if (items.isLegalFor(player.uniqueId, stack)) return
+        event.isCancelled = true
+        // 沒有提示的話,撿不起來的東西看起來就是卡 bug(玩家會反覆走過去踩、以為是延遲)。
+        // 走動作列而不是聊天:拾取事件是每 tick 觸發的,聊天會被洗版。
+        val now = System.currentTimeMillis()
+        val last = lastPickupNotice[player.uniqueId]
+        if (last != null && now - last < PICKUP_NOTICE_COOLDOWN_MS) return
+        lastPickupNotice[player.uniqueId] = now
+        // 事件在該玩家自己的 region 觸發,可以直接對他送(ARCH §5.2 規則 2 的例外:對象就是事發者)。
+        player.sendActionBar(texts.format("instance-item.cannot-pick-up"))
     }
+
+    /** playerId -> 上次送出撿不起來提示的時間。見 [onPickup]。 */
+    private val lastPickupNotice = java.util.concurrent.ConcurrentHashMap<java.util.UUID, Long>()
 
     // ---- 容器 ---------------------------------------------------------------
 
@@ -134,5 +146,10 @@ class InstanceItemGuard(
         val before = drops.size
         drops.removeIf { items.isInstanceScoped(it) }
         return before - drops.size
+    }
+
+    private companion object {
+        /** 同一位玩家兩次「撿不起來」提示之間的最短間隔。 */
+        const val PICKUP_NOTICE_COOLDOWN_MS = 3000L
     }
 }

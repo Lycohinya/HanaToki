@@ -235,7 +235,14 @@ class InstanceInventoryService(
             val stack = ItemStack(material, entry.amount)
             entry.displayName?.let { name ->
                 stack.editMeta { meta ->
-                    meta.displayName(net.kyori.adventure.text.minimessage.MiniMessage.miniMessage().deserialize(name))
+                    // 客戶端對有自訂名稱的物品預設強制斜體,要明確關掉才會是正體
+                    meta.displayName(
+                        net.kyori.adventure.text.minimessage.MiniMessage.miniMessage().deserialize(name)
+                            .decorationIfAbsent(
+                                net.kyori.adventure.text.format.TextDecoration.ITALIC,
+                                net.kyori.adventure.text.format.TextDecoration.State.FALSE,
+                            ),
+                    )
                 }
             }
             // 局內起始裝備一律蓋 instance 標記——沒蓋的話它就是永久物品,玩家帶得出去。
