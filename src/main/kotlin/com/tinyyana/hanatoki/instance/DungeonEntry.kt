@@ -50,6 +50,12 @@ class DungeonEntry(private val core: HanaTokiCore) {
         if (players.isEmpty()) return done(fail(DungeonEntryStatus.PLAYER_OFFLINE, "沒有可進場的玩家"))
         val def = core.registry.definitions[dungeonId]
             ?: return done(fail(DungeonEntryStatus.NO_DUNGEON, "沒有 id=$dungeonId 的副本定義"))
+        // 一次只能在一座副本裡(2026-09-01):已經有 session 的人再進第二座,prepare 會把
+        // **局內背包**當成永久背包拍快照——那是資料損毀,不是邊界情況。斷線重連不走這條
+        // (rejoin 由 join listener 接手),所以這裡看到既有 session 一律拒絕。
+        players.firstOrNull { core.sessionManager.sessionOf(it.uniqueId) != null }?.let { inside ->
+            return done(fail(DungeonEntryStatus.ALREADY_INSIDE, "${inside.name} 已經在副本裡,先完成或撤離那一局"))
+        }
 
         return rememberReturnPoints(players).thenCompose { returnPoints ->
             val session: Session

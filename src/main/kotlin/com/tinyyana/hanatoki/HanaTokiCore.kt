@@ -566,7 +566,11 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
             }
             if (outcome == null || outcome.succeeded()) return@whenComplete
             plugin.logger.warning("[HanaToki] 進場失敗 status=${outcome.status()} reason=${outcome.failureReason()} rolledBack=${outcome.rolledBack()}")
-            val key = if (outcome.status() == DungeonEntryStatus.NO_SLOT) "session.no-slot" else "session.entry-failed"
+            val key = when (outcome.status()) {
+                DungeonEntryStatus.NO_SLOT -> "session.no-slot"
+                DungeonEntryStatus.ALREADY_INSIDE -> "session.already-inside"
+                else -> "session.entry-failed"
+            }
             playerIds.forEach { PlayerOp.message(plugin, it, texts.format(key, mapOf("dungeon" to ""))) }
         }
     }

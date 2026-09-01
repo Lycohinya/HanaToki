@@ -32,6 +32,7 @@ interface DungeonEntryOutcome {
      * - `TELEPORT_FAILED` — `teleportAsync` 回 false 或 exceptional。
      * - `INVENTORY_FAILED` — 局內背包交易失敗(journal 寫不進去之類)。
      * - `SHUTTING_DOWN` — 引擎正在停用,不再受理新進場。
+     * - `ALREADY_INSIDE` — 已經在某座副本的 session 裡,先完成/撤離才可再進(2026-09-01)。
      */
     fun status(): String
 
@@ -66,4 +67,5 @@ object DungeonEntryStatus {
     const val TELEPORT_FAILED = "TELEPORT_FAILED"
     const val INVENTORY_FAILED = "INVENTORY_FAILED"
     const val SHUTTING_DOWN = "SHUTTING_DOWN"
+    const val ALREADY_INSIDE = "ALREADY_INSIDE"
 }

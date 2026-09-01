@@ -12,10 +12,11 @@ session:
   recovered: "<gray>上一趟花期異常已經結束,先把你送回原本的地方</gray>"
   # 進場交易失敗(傳送沒成功、局內背包沒切成功)。已經完整回滾,玩家什麼都沒少。
   entry-failed: "<red>進場沒有成功,已經把狀態復原了,再試一次</red>"
+  already-inside: "<red>你還在副本裡,先完成或離開這一局再進別座</red>"
 # 局內物品(scope=INSTANCE)的攔截提示。看得到這兩句代表防線有作用,不是錯誤。
 instance-item:
-  cannot-drop: "<gray>這是這一局的東西,帶不走也丟不掉</gray>"
   cannot-store: "<gray>這是這一局的東西,放不進箱子</gray>"
+  no-ender-chest: "<gray>這裡打不開終界箱,身外之物先放著吧</gray>"
   cannot-pick-up: "<gray>這不是你這一局的東西</gray>"
 # 「安全 Run 容器」probe(test-roguelike)的文字。
 roguelike:

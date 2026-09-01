@@ -9,8 +9,8 @@ import org.bukkit.event.entity.EntityPickupItemEvent
 import org.bukkit.event.inventory.InventoryClickEvent
 import org.bukkit.event.inventory.InventoryDragEvent
 import org.bukkit.event.inventory.InventoryMoveItemEvent
+import org.bukkit.event.inventory.InventoryOpenEvent
 import org.bukkit.event.inventory.InventoryType
-import org.bukkit.event.player.PlayerDropItemEvent
 import org.bukkit.inventory.ItemStack
 import org.bukkit.plugin.Plugin
 
@@ -20,21 +20,22 @@ import org.bukkit.plugin.Plugin
  * ## 設計原則:**寧可擋過頭,也不要漏一個**
  *
  * 一個局內物品洩漏到永久世界的成本是不可逆的(玩家拿到了不該有的裝備,而且會傳給別人);
- * 擋過頭的成本只是玩家在 Run 裡不能丟東西。所以這裡的規則刻意寫得很粗:
- * **局內物品一律不准丟、不准被非本局的人撿、不准進任何容器。**
+ * 所以:**局內物品不准被非本局的人撿、不准進任何容器**。
  *
- * 不做「在自己的 Run 裡可以丟在地上」這種細緻版本,因為地上的掉落物會活過 session 結束
- * (場地回滾只還原方塊,不收拾掉落物——這件事 MIGRATION_PLAN 已經記在案),那正好是最典型的
- * 洩漏路徑。等到真的有內容需要「把武器丟在地上」再開這個口,不猜測性先做。
+ * 「不准丟」曾經也在清單上(怕掉落物活過 session 變成洩漏路徑),2026-09-01 Yana 拍板拿掉:
+ * 丟在地上走原版機制(五分鐘自然消失、自己撿得回來),session 收斂時 [InstanceDropSweeper]
+ * 會把場地上殘留的局內掉落物整片掃掉——洩漏路徑由「非本局不能撿 + 收斂掃地」守著,
+ * 不需要犧牲「把不要的東西丟掉」這個基本操作。
  *
  * ## 覆蓋的路徑
  *
  * | 路徑 | 處理 |
  * |---|---|
- * | 手動丟出 (`Q`) | 取消 |
+ * | 手動丟出 (`Q`) | **放行**(原版機制;收斂時掃地) |
  * | 被撿起 | 非本局的人一律取消 |
  * | 放進箱子/終界箱/任何開著的容器 | 取消 |
  * | 漏斗/礦車自動搬運 | 取消 |
+ * | 局內打開終界箱(實體或 /ec) | 取消——進場前先塞終界箱、局內再拿出來就是偷渡(2026-09-01) |
  * | 死亡掉落 | 從 drops 移除(直接消失,不落地) |
  * | 跨世界、登入 | 掃背包,清掉所有不合法的局內物品 |
  *
@@ -49,15 +50,7 @@ class InstanceItemGuard(
 
     private val items get() = service.items
 
-    // ---- 丟棄 / 拾取 ---------------------------------------------------------
-
-    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
-    fun onDrop(event: PlayerDropItemEvent) {
-        val stack = event.itemDrop.itemStack
-        if (!items.isInstanceScoped(stack)) return
-        event.isCancelled = true
-        event.player.sendMessage(texts.format("instance-item.cannot-drop"))
-    }
+    // ---- 拾取 ---------------------------------------------------------------
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     fun onPickup(event: EntityPickupItemEvent) {
@@ -84,6 +77,20 @@ class InstanceItemGuard(
     private val lastPickupNotice = java.util.concurrent.ConcurrentHashMap<java.util.UUID, Long>()
 
     // ---- 容器 ---------------------------------------------------------------
+
+    /**
+     * 局內(有 active instance 背包的人)禁止打開終界箱:終界箱的內容不在局內背包快照裡,
+     * 進場前先 `/ec` 塞滿、局內再開出來就是把外部物資偷渡進 Run(2026-09-01 Yana 抓到)。
+     * 攔 InventoryOpen 一次擋掉實體終界箱與 Essentials `/ec` 兩條路——都是 openInventory。
+     */
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    fun onOpen(event: InventoryOpenEvent) {
+        if (event.inventory.type != InventoryType.ENDER_CHEST) return
+        val player = event.player as? Player ?: return
+        if (service.activeInstanceIdOf(player.uniqueId) == null) return
+        event.isCancelled = true
+        player.sendMessage(texts.format("instance-item.no-ender-chest"))
+    }
 
     /**
      * 有開著的容器時,任何牽涉到局內物品的點擊都擋掉。
