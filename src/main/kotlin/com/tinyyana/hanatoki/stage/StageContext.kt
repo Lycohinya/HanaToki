@@ -103,7 +103,11 @@ interface StageContext {
 
     /** 演出 cue:大字幕。[subtitleKey] 傳空字串代表不顯示副標。 */
     fun title(playerId: UUID, titleKey: String, subtitleKey: String)
+    fun title(playerId: UUID, titleKey: String, subtitleKey: String, params: Map<String, String>)
     fun titleAll(titleKey: String, subtitleKey: String)
+
+    /** 帶佔位符替換的標題(同 [messageAll] 的 params 語意)。文案裡的 `{stage}` 之類才會被換掉。 */
+    fun titleAll(titleKey: String, subtitleKey: String, params: Map<String, String>)
 
     /** 演出 cue:動作列——適合戰鬥中的招式預告(不佔聊天欄、重複出現不吵)。 */
     fun actionBar(playerId: UUID, key: String)

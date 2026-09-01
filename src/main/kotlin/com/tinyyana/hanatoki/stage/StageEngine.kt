@@ -227,20 +227,25 @@ private class StageContextImpl(
         activeMembers().forEach { PlayerOp.message(core.plugin, it, text) }
     }
 
-    override fun title(playerId: UUID, titleKey: String, subtitleKey: String) {
+    override fun title(playerId: UUID, titleKey: String, subtitleKey: String) =
+        title(playerId, titleKey, subtitleKey, emptyMap())
+
+    override fun title(playerId: UUID, titleKey: String, subtitleKey: String, params: Map<String, String>) {
         PlayerOp.title(
             core.plugin,
             playerId,
-            core.texts.format(titleKey),
-            if (subtitleKey.isEmpty()) Component.empty() else core.texts.format(subtitleKey),
+            core.texts.format(titleKey, params),
+            if (subtitleKey.isEmpty()) Component.empty() else core.texts.format(subtitleKey, params),
             300,
             2_000,
             600,
         )
     }
 
-    override fun titleAll(titleKey: String, subtitleKey: String) {
-        activeMembers().forEach { title(it, titleKey, subtitleKey) }
+    override fun titleAll(titleKey: String, subtitleKey: String) = titleAll(titleKey, subtitleKey, emptyMap())
+
+    override fun titleAll(titleKey: String, subtitleKey: String, params: Map<String, String>) {
+        activeMembers().forEach { title(it, titleKey, subtitleKey, params) }
     }
 
     override fun actionBar(playerId: UUID, key: String) = actionBar(playerId, key, emptyMap())
