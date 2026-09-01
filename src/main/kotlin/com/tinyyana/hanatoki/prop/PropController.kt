@@ -25,6 +25,11 @@ class PropController(private val plugin: Plugin) {
 
     private fun key(sessionId: UUID, propId: String) = "$sessionId#$propId"
 
+    private companion object {
+        /** 發光罩比真方塊大的量(整體,不是單邊)。0.08 = 每邊凸出 0.04 格,夠避開 z-fighting 又不顯胖。 */
+        const val GLOW_OVERSCALE = 0.08f
+    }
+
     fun handleFor(sessionId: UUID): PropHandle = SessionPropHandle(sessionId)
 
     fun despawnAllForSession(sessionId: UUID): CompletableFuture<Void> {
@@ -124,6 +129,37 @@ class PropController(private val plugin: Plugin) {
                     d.isPersistent = false
                     d.block = data
                     d.setTeleportDuration(teleportDurationTicks.coerceIn(0, 59))
+                }
+                props[k] = display
+            }
+        }
+
+        override fun spawnGlowBlock(
+            propId: String,
+            location: Location,
+            blockData: String,
+        ): CompletableFuture<Void> {
+            val data = runCatching { org.bukkit.Bukkit.createBlockData(blockData) }.getOrElse {
+                plugin.logger.warning("[HanaToki] prop $propId 的 block-data「$blockData」解析失敗,不生成:${it.message}")
+                return CompletableFuture.completedFuture(null)
+            }
+            val k = key(sessionId, propId)
+            props.remove(k)?.let { old -> WorldOp.dispatch(plugin, old) { it.remove() } }
+            return WorldOp.dispatchAt(plugin, location) { loc ->
+                val world = loc.world ?: return@dispatchAt
+                val display = world.spawn(loc, org.bukkit.entity.BlockDisplay::class.java) { d ->
+                    d.isPersistent = false
+                    d.block = data
+                    // 比真方塊大一點點再置中:同尺寸同位置會跟底下的真方塊 z-fighting 閃爍。
+                    // BlockDisplay 的原點在方塊角落,所以置中要往負方向補一半的放大量。
+                    d.transformation = Transformation(
+                        Vector3f(-GLOW_OVERSCALE / 2f, -GLOW_OVERSCALE / 2f, -GLOW_OVERSCALE / 2f),
+                        AxisAngle4f(),
+                        Vector3f(1f + GLOW_OVERSCALE, 1f + GLOW_OVERSCALE, 1f + GLOW_OVERSCALE),
+                        AxisAngle4f(),
+                    )
+                    d.isGlowing = true
+                    d.brightness = Display.Brightness(13, 15)
                 }
                 props[k] = display
             }

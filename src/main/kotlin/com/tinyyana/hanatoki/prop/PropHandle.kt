@@ -58,6 +58,24 @@ interface PropHandle {
     ): CompletableFuture<Void>
 
     /**
+     * 在一格**真實方塊**上罩一層發光輪廓([org.bukkit.entity.BlockDisplay] + glowing):
+     * 玩家在遠處、甚至隔著牆都看得到輪廓——給「這格可以互動」的東西(節點、開關)用。
+     *
+     * 跟 [spawnBlock] 分開一個方法而不是加參數:跨插件介面加參數是二進位不相容的變更,
+     * 內容插件與引擎不同步部署時會 NoSuchMethodError(跨插件邊界也不用 Kotlin 預設參數)。
+     *
+     * 實作上 display 比真方塊放大一點點再置中,蓋在原方塊外面——同尺寸同位置會 z-fighting
+     * 閃爍。location 傳**方塊格**的整數座標(跟 [spawnBlock] 一樣),置中由實作處理。
+     *
+     * @param blockData 同 [spawnBlock];通常就是被罩的那格方塊自己的類型。
+     */
+    fun spawnGlowBlock(
+        propId: String,
+        location: Location,
+        blockData: String,
+    ): CompletableFuture<Void>
+
+    /**
      * 放一個**骨架部件**:跟 [spawnItem] 同樣是 ItemDisplay,差別在三件事——
      *
      * 1. `itemDisplayTransform` 是 **NONE** 而不是 `GROUND`。`GROUND` 會把模型自己的
