@@ -771,3 +771,35 @@ bypass 權限 `hanatoki.build` **預設 false，連 op 都沒有**：管理員�
 就會留在那裡。要改場地必須明確開權限。
 
 2026-08-30 正式服實測:在此之前引擎完全沒有這道保護,玩家在刀塚裡放的地獄石留了下來。
+
+## 24. 故障窗驗收矩陣（2026-09-01，真 Lecithin 26.2 / Folia）
+
+「安全 Run 容器」的不變式只有一句：**只要快照曾經成功落地，不論 JVM 在哪一行死掉，玩家最後都能
+回到一份合法的永久背包——恰好一份。** 這一節記錄那句話實際被哪些注入驗過，以及每一條的注入手法，
+免得下一輪又從零猜「要怎麼撞到那個視窗」。
+
+三條共同判準，每一個窗都要同時成立：**永久物品未遺失、局內物品未複製、同一 Run 未重複結算。**
+
+| 故障窗 | 注入手法 | 驗收腳本 |
+|---|---|---|
+| 進場交易中斷（傳送/背包切換拿不到線上 Player） | 送出 `enter` 後 150ms 內斷線 | `hanatoki-fault-windows-test.js teleport` |
+| journal 寫不進去 | `instances/` 換成同名檔案 | `hanatoki-roguelike-entry-failure-test.js` |
+| 換背包後崩潰（ACTIVE 落地即斷電） | `hanatoki-rig.ps1 kill` | `hanatoki-fault-restart.ps1 -Window crash` |
+| restore 中途崩潰 | `hanatoki-journal.py setstate … RESTORING` 後 kill | `hanatoki-fault-restart.ps1 -Window restore` |
+| 結算中途崩潰 | `completions.db` 那筆改回 `pending` 後 kill | `hanatoki-fault-restart.ps1 -Window settle` |
+| 斷線超過 `reconnect-grace-seconds` | 斷線後等 grace + 20s | `hanatoki-fault-windows-test.js grace` |
+| Run 進行中 plugin disable/re-enable | `plugman unload/load`（消費端先停、引擎後停） | `hanatoki-fault-windows-test.js plugman` |
+| 死在副本裡且停在死亡畫面 | 不按重生 | `hanatoki-roguelike-death-respawn-test.js` |
+
+### 寫這類驗收時會踩到的四個坑（都實際踩過）
+
+1. **`bot.game.dimension` 不能拿來判「有沒有進到副本世界」。** mineflayer 讀的是**維度型別**，
+   而副本世界是 overworld 型別的自訂世界——有沒有進場都回報 `overworld`。用它當判準會讓整條進場鏈
+   看起來全壞掉。**判進場一律用座標位移**（slot 之間相隔一個 `slot-spacing-blocks`）。
+2. **重啟後的「查不到重複結算」是假斷言。** `settlements` 是記憶體紀錄，重啟就空了，所以那條查詢
+   在重啟後恆真。要證明沒有重複發放只能讀 `completions.db`：被注入的認領應該已被
+   `sweepStalePending` 清掉，而且全表沒有殘留 `pending`。
+3. **硬殺 JVM 之後不能要求背包指紋完全相等。** 玩家 `.dat` 沒有落盤，重啟會退回上一次自動存檔，
+   背包可能比注入前**多**幾樣。要守的是「該有的一件都沒少」與「局內物品沒有殘留」，不是相等。
+4. **難度會被別的測試留下來。** 走背包交易的那幾支刻意把 rig 設成 `peaceful` 且不還原；任何需要
+   真的造成傷害的測試都必須自己宣告難度，否則接在它們後面跑就會看到「打不掉血」的連鎖假失敗。
