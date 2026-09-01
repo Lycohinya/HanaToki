@@ -523,6 +523,15 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         return true
     }
 
+    override fun enterDungeonTrio(playerId: UUID, partner1Id: UUID, partner2Id: UUID, dungeonId: String): Boolean {
+        val ids = listOf(playerId, partner1Id, partner2Id)
+        if (ids.toSet().size != 3) return false
+        val players = ids.map { plugin.server.getPlayer(it) ?: return false }
+        if (!registry.definitions.containsKey(dungeonId)) return false
+        fireAndReport(dungeonEntry.enter(players, dungeonId), ids)
+        return true
+    }
+
     /**
      * 同 repo 內部用的多人進場入口(`/hanatoki enter <id> [player2] ...` 的驗收指令走這條)。
      *
