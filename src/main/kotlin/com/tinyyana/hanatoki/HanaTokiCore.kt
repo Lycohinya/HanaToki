@@ -20,6 +20,7 @@ import com.tinyyana.hanatoki.instance.EndReason
 import com.tinyyana.hanatoki.instance.EnterResult
 import com.tinyyana.hanatoki.instance.SessionManager
 import com.tinyyana.hanatoki.instance.SlotPool
+import com.tinyyana.hanatoki.inventory.ForeignItemWarden
 import com.tinyyana.hanatoki.inventory.InstanceDropSweeper
 import com.tinyyana.hanatoki.inventory.InstanceInventoryService
 import com.tinyyana.hanatoki.inventory.InstanceItemGuard
@@ -69,6 +70,9 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
     val instanceJournal = InstanceJournal(java.io.File(plugin.dataFolder, "instances"), plugin.logger)
     val instanceInventory = InstanceInventoryService(plugin, instanceJournal)
     val instanceItemGuard = InstanceItemGuard(plugin, instanceInventory, texts)
+
+    /** 反向防線:局外物品不准留在局內背包裡(見 [ForeignItemWarden])。 */
+    val foreignItemWarden = ForeignItemWarden(plugin, instanceInventory, texts)
     private val dungeonEntry = DungeonEntry(this)
 
     // 每個 slot 一份 diff recorder(Phase 1 場地重置的最小單位是 slot,不是整個 instance)。
@@ -149,6 +153,10 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
             // instanceId 的掉落物掃不到,會一路留到現在——玩家撿不起來,而且完全看不出為什麼
             // (2026-08-30 真人回報「有些掉在地上的物品無法被拾取」)。這裡是它們一定載入著的時刻。
             sweepInstanceDrops(result.session.slotId)
+            // 再補一次。上面那次跑在玩家傳送**之前**,場地的 chunk 多半還沒載入,而掃描
+            // 遇到沒載入的 chunk 是直接跳過的——等於什麼都沒掃到(2026-09-01 真人回報殘留)。
+            // 玩家落地幾秒後 chunk 一定在,那時候掃才掃得到東西。
+            plugin.server.globalRegionScheduler.runDelayed(plugin, { _ -> sweepInstanceDrops(result.session.slotId) }, ENTRY_SWEEP_DELAY_TICKS)
             stageEngine.startFor(result.session.sessionId, dungeonId, result.session.slotId, result.anchor, now)
         }
         return result
@@ -228,6 +236,27 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
             // diff 回滾會在他腳下發生)。
             sendHome(playerId)
         }
+        if (ended == null) return
+        stageEngine.endFor(ended.sessionId, ended.reason.name)
+        handleSessionEnded(ended.slotId, ended.dungeonId, ended.reason, ended.memberIds)
+    }
+
+    /** 某個 slot 的場地在哪個世界。判斷「玩家還在不在這一局的場地上」用。 */
+    fun slotWorldName(slotId: String): String? = slotPool.anchorOf(slotId)?.world?.name
+
+    /**
+     * 玩家用**別的手段**離開了副本世界(`/home`、`/spawn`、傳送簽名、任何插件的傳送)。
+     *
+     * 2026-09-01 真人回報:非常駐副本的 session 只認進場與離場指令,人走了 session 還在跑
+     * ——Threat 照升、怪照生、slot 照佔著,而場上根本沒有人。常駐副本早就靠
+     * [HanaTokiListener.onWorldChange] 同步成員資格了,session 型的這條路一直是空的。
+     *
+     * 跟 [kick] 的差別只有一個:**不送他回家**。他已經自己到目的地了,再傳一次等於把
+     * 他剛下的 `/home` 撤銷掉。永久背包一樣要還——那條路完全共用。
+     */
+    fun abandon(playerId: UUID, reason: String) {
+        val ended = sessionManager.kick(playerId)
+        instanceInventory.restoreForPlayer(playerId, reason)
         if (ended == null) return
         stageEngine.endFor(ended.sessionId, ended.reason.name)
         handleSessionEnded(ended.slotId, ended.dungeonId, ended.reason, ended.memberIds)
@@ -369,9 +398,12 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
      * 讓關服流程停在一個不會來的 future 上。掃描只是清垃圾,失敗的代價是下一局有人撿不起來,
      * 不值得拿收斂順序去換。
      */
+    /** 落地之後補掃一次的延遲(tick)。見 [enter] 的說明。 */
+    private val ENTRY_SWEEP_DELAY_TICKS = 60L
+
     private fun sweepInstanceDrops(slotId: String) {
         val anchor = slotPool.anchorOf(slotId) ?: return
-        InstanceDropSweeper.sweep(plugin, instanceInventory.items, anchor).whenComplete { count, _ ->
+        InstanceDropSweeper.sweep(plugin, anchor).whenComplete { count, _ ->
             if (count != null && count > 0) {
                 plugin.logger.info("[HanaToki] slot=$slotId 收斂時清掉 $count 個殘留的局內掉落物")
             }

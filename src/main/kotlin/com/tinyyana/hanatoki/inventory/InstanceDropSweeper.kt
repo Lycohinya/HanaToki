@@ -1,7 +1,7 @@
 package com.tinyyana.hanatoki.inventory
 
-import com.tinyyana.hanatoki.api.InstanceItems
 import com.tinyyana.hanatoki.folia.WorldOp
+import org.bukkit.entity.AbstractArrow
 import org.bukkit.Location
 import org.bukkit.entity.Item
 import org.bukkit.plugin.Plugin
@@ -46,7 +46,7 @@ object InstanceDropSweeper {
     const val SWEEP_RADIUS_BLOCKS = 96
 
     /** 回傳這次移除了幾個局內掉落物。 */
-    fun sweep(plugin: Plugin, items: InstanceItems, anchor: Location): CompletableFuture<Int> {
+    fun sweep(plugin: Plugin, anchor: Location): CompletableFuture<Int> {
         val world = anchor.world ?: return CompletableFuture.completedFuture(0)
         val removed = AtomicInteger()
         val chunkRadius = SWEEP_RADIUS_BLOCKS shr 4
@@ -69,10 +69,13 @@ object InstanceDropSweeper {
                         return@dispatchAt
                     }
                     val removals = chunk.entities.mapNotNull { entity ->
-                        val item = entity as? Item ?: return@mapNotNull null
-                        if (!items.isInstanceScoped(item.itemStack)) return@mapNotNull null
+                        // 掉在副本場地上的東西一律清掉,不再只清「帶局內章的」——2026-09-01 真人回報
+                        // 「掉落物清理還是沒做乾淨,看得到殘留」。漏掉的正是沒有章的那些:玩家打掉
+                        // 封板的方塊、射出去插在地上的箭、原版怪自己掉的東西。副本場地上的地面物品
+                        // 不屬於任何人,留著只會變成下一局的視覺垃圾。
+                        if (entity !is Item && entity !is AbstractArrow) return@mapNotNull null
                         removed.incrementAndGet()
-                        WorldOp.dispatch(plugin, item) { it.remove() }
+                        WorldOp.dispatch(plugin, entity) { it.remove() }
                     }
                     CompletableFuture.allOf(*removals.toTypedArray())
                         .whenComplete { _, _ -> done.complete(null) }

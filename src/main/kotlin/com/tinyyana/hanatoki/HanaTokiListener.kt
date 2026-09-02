@@ -48,6 +48,14 @@ class HanaTokiListener(private val core: HanaTokiCore) : Listener {
         ) {
             core.leavePersistent(player.uniqueId)
         }
+        // session 型副本(深域這種)沒有「成員資格跟著世界走」這一條,所以玩家用 /home 走掉
+        // 之後 session 會繼續跑——Threat 照升、怪照生、slot 照佔著(2026-09-01 真人回報)。
+        if (session != null && !session.persistent) {
+            val slotWorld = core.slotWorldName(session.slotId)
+            if (slotWorld != null && player.world.name != slotWorld) {
+                core.abandon(player.uniqueId, "left-world")
+            }
+        }
         core.joinPersistentByWorld(player.uniqueId, player.world.name)
         // 跨世界是局內物品最直接的洩漏路徑(用傳送簽名/`/spawn` 走出去)。到了新世界之後
         // 掃一次背包,不合法的局內物品當場清掉——事件在該玩家自己的 region 觸發,可以直接動背包。

@@ -61,6 +61,9 @@ class HanaTokiPlugin : JavaPlugin() {
             if (acceptingNewSessions) core.tick()
         }, 20L, 20L)
 
+        // 局外物品的巡檢(見 ForeignItemWarden:別的插件直接塞背包不發事件,只有巡檢擋得住)
+        core.foreignItemWarden.start()
+
         // 上次沒收斂完的局內背包交易(崩潰重啟/上次 onDisable 標成 RESTORING 的那些)。
         // 一定要在 listener 註冊之後:在線玩家的還原會經他們自己的 EntityScheduler,
         // 而剛登入的玩家由 `HanaTokiListener.onJoin` 接手。
@@ -114,6 +117,7 @@ class HanaTokiPlugin : JavaPlugin() {
         acceptingNewSessions = false
         tickTaskHandle?.cancel()
         tickTaskHandle = null
+        core.foreignItemWarden.stop()
 
         server.servicesManager.unregisterAll(this)
 

@@ -252,6 +252,34 @@ class InstanceInventoryService(
         }
     }
 
+    // ---- 局外物品的隔離 ------------------------------------------------------
+
+    /**
+     * 把 [ForeignItemWarden] 從局內背包裡拿走的非本局物品,移進那份還沒還給玩家的快照。
+     *
+     * 東西不會消失:它直接進入「離場時要覆蓋回去的那份永久背包」,沿用既有的還原路徑,
+     * 不需要第二套恢復語意。只有 ACTIVE/CLEARING(= 快照已經落地)的交易才收——其他狀態
+     * 依定義沒有快照可以放,那時候應該根本不會有 Run 在跑。
+     */
+    fun quarantine(instanceId: UUID, stacks: List<ItemStack>): CompletableFuture<Boolean> {
+        if (stacks.isEmpty()) return CompletableFuture.completedFuture(true)
+        val record = records[instanceId] ?: return CompletableFuture.completedFuture(false)
+        val snapshot = record.snapshot ?: run {
+            plugin.logger.warning("[HanaToki] instance=$instanceId 沒有快照可以收 ${stacks.size} 件局外物品,那幾件已經遺失")
+            return CompletableFuture.completedFuture(false)
+        }
+        val merged = InventorySnapshot.withAdded(snapshot, stacks) ?: run {
+            plugin.logger.warning("[HanaToki] instance=$instanceId 的永久背包快照放不下 ${stacks.size} 件局外物品(滿了或解不開),那幾件已經遺失")
+            return CompletableFuture.completedFuture(false)
+        }
+        val updated = record.withSnapshot(merged, record.state, System.currentTimeMillis())
+        records[instanceId] = updated
+        return runAsync { journal.writeSync(updated) }.thenApply { ok ->
+            if (!ok) plugin.logger.warning("[HanaToki] instance=$instanceId 隔離物品的快照寫不進 journal(記憶體鏡像已更新,崩潰的話那幾件會遺失)")
+            ok
+        }
+    }
+
     // ---- ④ restore ----------------------------------------------------------
 
     /**

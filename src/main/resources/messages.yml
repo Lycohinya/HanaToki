@@ -18,6 +18,8 @@ instance-item:
   cannot-store: "<gray>這是這一局的東西,放不進箱子</gray>"
   no-ender-chest: "<gray>這裡打不開終界箱,身外之物先放著吧</gray>"
   cannot-pick-up: "<gray>這不是你這一局的東西</gray>"
+  # 巡檢抓到局外物品:東西已經移進離場時會還給你的那份背包,不是被沒收。
+  foreign-held: "<gray>局外的東西留在外面,離場時還給你</gray>"
 # 「安全 Run 容器」probe(test-roguelike)的文字。
 roguelike:
   entry: "<gray>試作 Run 開始。這裡沒有時限,身上是這一局的裝備——踩上銅板就撤離。</gray>"
