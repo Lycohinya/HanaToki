@@ -55,6 +55,22 @@ interface DungeonBehavior {
      * 常駐副本(永不結束)只會在關服時收到。
      */
     fun onSessionEnd(ctx: StageContext, reason: String) {}
+
+    /**
+     * 某位成員**個別**離開了這一局,但 session 本身還活著(還有別的成員在場)。
+     * [reason] 是自由字串(目前用得到的:`"death"` 死亡結算離場、`"kick"` 主動/管理員退出)。
+     *
+     * 存在理由:多人副本裡一人死亡/離開不該連坐結束其他人的 run(見
+     * [com.tinyyana.hanatoki.HanaTokiCore.handlePlayerDeath] 的多人分支)——但引擎已經把這個人
+     * 從 [StageContext.activeMembers] 移除、背包也已還原送回家,內容層要在這裡清自己那份平行的
+     * 成員登記表(Director 狀態、玩家資源 budget),不然它會繼續把一個已經不在場的人算進 HUD/
+     * 事件路由。呼叫時 [ctx] 的 `activeMembers()` 已經**不含** [playerId]。
+     *
+     * 跟 [onSessionEnd] 的差別:那個是「全部人都沒了,session 本身收掉」;這個是「少一個人,
+     * session 繼續」。全員逐一死亡耗盡的情況下,最後一人一樣會走 [onSessionEnd]
+     * (`kick()` 對最後一位成員回傳的是 `EndedSession`,不是 no-op),不會漏收。
+     */
+    fun onMemberLeft(ctx: StageContext, playerId: UUID, reason: String) {}
 }
 
 object DungeonBehaviorRegistry {

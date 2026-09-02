@@ -58,6 +58,8 @@ import java.util.concurrent.ConcurrentHashMap
 class InstanceInventoryService(
     private val plugin: Plugin,
     private val journal: InstanceJournal,
+    /** 見 [InstanceItemsImpl] 的同名參數:多人副本的隊友合法性判定要轉接 `SessionManager`。 */
+    sessionMembersOf: (UUID) -> Collection<UUID> = { emptyList() },
 ) {
 
     /** instanceId -> 目前這筆交易的紀錄(磁碟上那份的記憶體鏡像)。 */
@@ -73,7 +75,7 @@ class InstanceInventoryService(
      */
     private val activeByPlayer = ConcurrentHashMap<UUID, UUID>()
 
-    val items: InstanceItemsImpl = InstanceItemsImpl(plugin) { playerId -> activeByPlayer[playerId] }
+    val items: InstanceItemsImpl = InstanceItemsImpl(plugin, { playerId -> activeByPlayer[playerId] }, sessionMembersOf)
 
     fun activeInstanceIdOf(playerId: UUID): UUID? = activeByPlayer[playerId]
 

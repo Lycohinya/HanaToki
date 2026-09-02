@@ -53,6 +53,9 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
 
     /** 副本世界的地形保護:玩家不能放/挖方塊(見 [com.tinyyana.hanatoki.world.DungeonWorldGuard])。 */
     val dungeonWorldGuard = com.tinyyana.hanatoki.world.DungeonWorldGuard(this)
+
+    /** 副本世界只能走官方入口進去,不能 tpa/warp 跳進去(見 [com.tinyyana.hanatoki.world.DungeonEntryGuard])。 */
+    val dungeonEntryGuard = com.tinyyana.hanatoki.world.DungeonEntryGuard(this)
     val texts = Texts()
     val rewardDispatcher = RewardDispatcher(plugin)
     val actorController = ActorController(plugin)
@@ -67,7 +70,9 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
      * 資料層。這是 HanaToki 第一份持久化狀態,理由與範圍見 [InstanceJournal] 的 KDoc。
      */
     val instanceJournal = InstanceJournal(java.io.File(plugin.dataFolder, "instances"), plugin.logger)
-    val instanceInventory = InstanceInventoryService(plugin, instanceJournal)
+    val instanceInventory = InstanceInventoryService(plugin, instanceJournal) { playerId ->
+        sessionManager.sessionOf(playerId)?.activeMembers() ?: emptyList()
+    }
     val instanceItemGuard = InstanceItemGuard(plugin, instanceInventory, texts)
     private val dungeonEntry = DungeonEntry(this)
 
@@ -206,15 +211,27 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
     /** GlobalRegionScheduler.runAtFixedRate 驅動的 tick 訊號(ARCH §5.2 規則 5)。*/
     fun tick() {
         val now = System.currentTimeMillis()
-        val ended = sessionManager.tick(now)
-        for (e in ended) {
+        val result = sessionManager.tick(now)
+        for (e in result.ended) {
             stageEngine.endFor(e.sessionId, e.reason.name)
             handleSessionEnded(e.slotId, e.dungeonId, e.reason, e.memberIds)
+        }
+        // 2026-09-02 修:grace 逾時個別掉出去的成員(session 對其他人還活著)走跟 [kick] 一樣的
+        // 「個人退場」通知——玩家離線中,`restoreForPlayer` 會安全地把還原排進 journal 等他回來
+        // (見 InstanceInventoryService 的離線分支),不需要 sendHome。少了這一步,內容層
+        // (RoguelikeBehavior)自己那份平行的成員登記表永遠不會知道這個人已經不在了。
+        for (drop in result.memberDrops) {
+            instanceInventory.restoreForPlayer(drop.playerId, "grace-timeout")
+            stageEngine.notifyMemberLeft(drop.sessionId, drop.playerId, "grace-timeout")
         }
         stageEngine.tick(now)
     }
 
-    fun kick(playerId: UUID) {
+    fun kick(playerId: UUID, reason: String = "kick") {
+        // 離開前先記住是哪個 session——`sessionManager.kick` 會把他從成員表拿掉,拿掉之後就
+        // 查不到了。多人局裡其他人還在場的話(下面 `ended == null`)要通知內容層清自己的
+        // 平行登記表(見 [onMemberLeft] KDoc)。
+        val session = sessionManager.sessionOf(playerId)
         val ended = sessionManager.kick(playerId)
         // 這個人的永久背包一定要還,不論整局有沒有跟著結束。多人局裡其他人還在打時
         // `ended` 是 null,下面那條 handleSessionEnded 不會跑到——少了這一句,單獨離場的
@@ -228,7 +245,11 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
             // diff 回滾會在他腳下發生)。
             sendHome(playerId)
         }
-        if (ended == null) return
+        if (ended == null) {
+            // session 還活著(還有別的成員):通知內容層,不要再往下走結束流程。
+            if (session != null) stageEngine.notifyMemberLeft(session.sessionId, playerId, reason)
+            return
+        }
         stageEngine.endFor(ended.sessionId, ended.reason.name)
         handleSessionEnded(ended.slotId, ended.dungeonId, ended.reason, ended.memberIds)
     }
@@ -337,6 +358,34 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         handleSessionEnded(ended.slotId, ended.dungeonId, ended.reason, ended.memberIds)
     }
 
+    /**
+     * 單一成員的個別結算([handlePlayerDeath] 多人分支用):這位玩家自己領一筆帶 [resultKey] 的
+     * [CompletionResult](用結算當下的 session 進度快照,duration 算到這一刻),然後照 [kick] 的
+     * 既有個人退場流程離開(還背包、送回家)。**不**結束 session、**不**回滾場地、**不**歸還
+     * slot——其他仍在場的成員與 world/RunState 完全不受影響,呼叫端要自己先確認過session
+     * 還有別的成員在場(只剩這一位的話該走 [resolveSession] 收掉整局,不是這裡)。
+     *
+     * 沒有 `claimResolution` 那道閘:那道是防「同一個 session 被結算兩次」,這裡結算的是
+     * 「這一位玩家」,冪等靠下面的成員資格檢查——已經不在 `activeMembers` 裡的人(已經被結算/
+     * 已經離開過)直接 no-op,不會重複發獎。
+     */
+    fun resolveMember(sessionId: UUID, playerId: UUID, resultKey: String, state: InstanceState) {
+        val session = sessionManager.sessionById(sessionId) ?: return
+        if (playerId !in session.activeMembers()) return
+        val durationMs = System.currentTimeMillis() - session.startedAtMs
+        rewardDispatcher.dispatch(
+            CompletionResult(
+                completionId = UUID.randomUUID(),
+                playerId = playerId,
+                dungeonId = session.dungeonId,
+                resultKey = resultKey,
+                durationMs = durationMs,
+                stats = state.stats.toMap(),
+            ),
+        )
+        kick(playerId, resultKey)
+    }
+
     private fun handleSessionEnded(slotId: String, dungeonId: String, reason: EndReason, memberIds: List<UUID>) {
         // ⚠ 送人 → **等傳送真的落地** → 才回滾。
         //   專屬副本世界的回滾終點是虛空(void 生成),人還站在場地上就會直接往下掉。
@@ -430,10 +479,12 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
      * 副本內死亡的收斂(`HanaTokiListener.onPlayerDeath` 轉呼叫)。
      *
      * 定義沒開 `death-resolution` 就是既有行為:死亡 = 退出這一局,不結算。
-     * 開了就先走一次 `resultKey=death` 的 Resolution(帶 duration/stats),再由
-     * [resolveSession] 內部走完整的結束流程——`InstanceState.claimResolution` 與
-     * `SessionManager.endSession` 的兩道原子認領保證它跟同一刻的逾時/手動 resolve
-     * 只會有一邊結算成功。
+     * 開了的話分兩種情況:
+     * - **只剩自己一個人**(solo,或隊友已經都不在了):跟以前一樣走 [resolveSession],
+     *   整個 session 結算收掉——`InstanceState.claimResolution` 與 `SessionManager.endSession`
+     *   的兩道原子認領保證它跟同一刻的逾時/手動 resolve 只會有一邊結算成功。
+     * - **還有別的隊友在場**(2026-09-02 修:多人副本一人死亡不該連坐結束其他人的 run):
+     *   走 [resolveMember] 只結算這一位玩家,session 對其他人繼續跑。
      *
      * 回傳 true = 已經由這裡處理掉了(呼叫端不要再 kick)。
      */
@@ -443,7 +494,11 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         val def = registry.definitions[session.dungeonId] ?: return false
         if (!def.deathResolution) return false
         val state = stageEngine.stateOf(session.sessionId) ?: return false
-        resolveSession(session.sessionId, "death", state)
+        if (session.activeMembers().size > 1) {
+            resolveMember(session.sessionId, playerId, "death", state)
+        } else {
+            resolveSession(session.sessionId, "death", state)
+        }
         return true
     }
 

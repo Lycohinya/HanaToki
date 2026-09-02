@@ -72,7 +72,7 @@ class PersistentInstanceTest {
         val p = UUID.randomUUID()
         mgr.enter("d", listOf(p), 0, Long.MAX_VALUE, 30_000, persistent = true)
         assertNull(mgr.kick(p))
-        assertEquals(emptyList(), mgr.tick(999_999))
+        assertEquals(emptyList(), mgr.tick(999_999).ended)
         assertEquals(1, mgr.snapshot().size)
         // slot 仍然被那個常駐 instance 佔著,不會被別人分走。
         assertEquals(EnterResult.NoSlot, mgr.enter("other", listOf(UUID.randomUUID()), 0, 1000, 1000))
@@ -97,7 +97,7 @@ class PersistentInstanceTest {
         val mgr = setup()
         val p = UUID.randomUUID()
         mgr.enter("d", listOf(p), 0, 1_000, 30_000)
-        val ended = mgr.tick(1_000)
+        val ended = mgr.tick(1_000).ended
         assertEquals(1, ended.size)
         assertEquals(EndReason.TIMEOUT, ended[0].reason)
     }
