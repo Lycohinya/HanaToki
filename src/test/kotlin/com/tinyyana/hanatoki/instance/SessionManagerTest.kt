@@ -36,7 +36,7 @@ class SessionManagerTest {
         val mgr = setup()
         val p = UUID.randomUUID()
         mgr.enter("d", listOf(p), 0, 1000, 30_000)
-        val ended = mgr.tick(1000)
+        val ended = mgr.tick(1000).ended
         assertEquals(1, ended.size)
         assertEquals(EndReason.TIMEOUT, ended[0].reason)
         assertNull(mgr.sessionOf(p))
@@ -46,7 +46,37 @@ class SessionManagerTest {
     fun `未逾時前 tick 不會結束 session`() {
         val mgr = setup()
         mgr.enter("d", listOf(UUID.randomUUID()), 0, 1000, 30_000)
-        assertEquals(0, mgr.tick(500).size)
+        assertEquals(0, mgr.tick(500).ended.size)
+    }
+
+    @Test
+    fun `多人局裡一位成員 grace 逾時,session 不結束但回報 MemberDrop`() {
+        // 2026-09-02 修的回歸測試:在這之前 tick() 對「還有別的成員在場」的個別 grace-drop
+        // 完全沒有出口,呼叫端(內容層)永遠不知道那個人已經不在了。
+        val mgr = setup()
+        val p1 = UUID.randomUUID()
+        val p2 = UUID.randomUUID()
+        val entered = mgr.enter("d", listOf(p1, p2), 0, null, 30_000) as EnterResult.Entered
+        mgr.markOffline(p1, 0)
+        val result = mgr.tick(30_001) // 剛好超過 30_000 的 grace
+        assertTrue(result.ended.isEmpty(), "還有 p2 在場,session 不該結束")
+        assertEquals(1, result.memberDrops.size)
+        assertEquals(entered.session.sessionId, result.memberDrops[0].sessionId)
+        assertEquals(p1, result.memberDrops[0].playerId)
+        assertNull(mgr.sessionOf(p1), "p1 應該已經從成員表移除")
+        assertNotNull(mgr.sessionOf(p2), "p2 不受影響")
+    }
+
+    @Test
+    fun `最後一位成員 grace 逾時時整局結束,不算進 memberDrops`() {
+        val mgr = setup()
+        val p = UUID.randomUUID()
+        mgr.enter("d", listOf(p), 0, null, 30_000)
+        mgr.markOffline(p, 0)
+        val result = mgr.tick(30_001)
+        assertEquals(1, result.ended.size)
+        assertEquals(EndReason.ALL_DROPPED, result.ended[0].reason)
+        assertTrue(result.memberDrops.isEmpty(), "全員 drop 導致 session 結束時走 EndedSession,不該重複算進 memberDrops")
     }
 
     @Test
@@ -75,7 +105,7 @@ class SessionManagerTest {
         val mgr = setup(slotCount = 1)
         val p = UUID.randomUUID()
         mgr.enter("d", listOf(p), 0, 1000, 30_000)
-        val ended = mgr.tick(1000)
+        val ended = mgr.tick(1000).ended
         // 回滾「完成前」不能再進場——這是 pool 直接測試過的行為，這裡驗證 SessionManager
         // 沒有在 endSessionBookkeeping 裡提早呼叫 slotPool.free。
         val blocked = mgr.enter("d", listOf(UUID.randomUUID()), 1000, 1000, 30_000)
@@ -145,7 +175,7 @@ class SessionManagerTest {
         val player = UUID.randomUUID()
         val entered = sm.enter("d", listOf(player), 0, null, 30_000) as EnterResult.Entered
 
-        assertTrue(sm.tick(999_999_999L).isEmpty(), "沒有時限就不該因為時間到而結束")
+        assertTrue(sm.tick(999_999_999L).ended.isEmpty(), "沒有時限就不該因為時間到而結束")
         assertNotNull(sm.sessionById(entered.session.sessionId))
 
         assertNotNull(sm.kick(player), "全員退出仍然要收斂")

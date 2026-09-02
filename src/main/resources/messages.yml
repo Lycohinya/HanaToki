@@ -27,6 +27,8 @@ roguelike:
 # 副本世界的地形保護(DungeonWorldGuard)。任何副本共用。
 dungeon:
   no-build: "<gray>這裡的地形動不了</gray>"
+  # 進場保護(DungeonEntryGuard):tpa/warp 等非官方入口跳進副本世界一律被擋。
+  no-entry: "<red>這裡是副本場地,不能用這種方式進來——請走正規的進場入口</red>"
 
 puzzle:
   entry: "<gray>一間小祠。三座花燈,一面壁畫——順序藏在畫裡。</gray>"

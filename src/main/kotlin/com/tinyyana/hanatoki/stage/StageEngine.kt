@@ -110,6 +110,21 @@ class StageEngine(private val core: HanaTokiCore) {
         }
     }
 
+    /**
+     * [HanaTokiCore.kick] 呼叫:某位成員個別離開了,但 session 還活著。轉呼叫
+     * [DungeonBehavior.onMemberLeft]——見它的 KDoc。沒有 stage 圖的副本(Phase 1 test-empty)
+     * 沒有 behavior,直接略過,同 [notifyMemberReady]。
+     */
+    fun notifyMemberLeft(sessionId: UUID, playerId: UUID, reason: String) {
+        val state = states[sessionId] ?: return
+        val meta = sessionMeta[sessionId] ?: return
+        val behavior = behaviorFor(meta.dungeonId) ?: return
+        InstanceDispatch.submit(core.plugin, meta.anchor) {
+            if (states[sessionId] !== state) return@submit
+            behavior.onMemberLeft(ctxFor(sessionId, meta.dungeonId, meta.slotId, meta.anchor, state), playerId, reason)
+        }
+    }
+
     /** HanaTokiListener 的 PlayerInteractEvent handler 轉呼叫這裡。已在事發玩家 region 觸發。 */
     fun handleInteraction(playerId: UUID, location: Location, action: Action) {
         val (slotId, interactionId) = core.registry.findInteraction(location) ?: return
@@ -227,20 +242,25 @@ private class StageContextImpl(
         activeMembers().forEach { PlayerOp.message(core.plugin, it, text) }
     }
 
-    override fun title(playerId: UUID, titleKey: String, subtitleKey: String) {
+    override fun title(playerId: UUID, titleKey: String, subtitleKey: String) =
+        title(playerId, titleKey, subtitleKey, emptyMap())
+
+    override fun title(playerId: UUID, titleKey: String, subtitleKey: String, params: Map<String, String>) {
         PlayerOp.title(
             core.plugin,
             playerId,
-            core.texts.format(titleKey),
-            if (subtitleKey.isEmpty()) Component.empty() else core.texts.format(subtitleKey),
+            core.texts.format(titleKey, params),
+            if (subtitleKey.isEmpty()) Component.empty() else core.texts.format(subtitleKey, params),
             300,
             2_000,
             600,
         )
     }
 
-    override fun titleAll(titleKey: String, subtitleKey: String) {
-        activeMembers().forEach { title(it, titleKey, subtitleKey) }
+    override fun titleAll(titleKey: String, subtitleKey: String) = titleAll(titleKey, subtitleKey, emptyMap())
+
+    override fun titleAll(titleKey: String, subtitleKey: String, params: Map<String, String>) {
+        activeMembers().forEach { title(it, titleKey, subtitleKey, params) }
     }
 
     override fun actionBar(playerId: UUID, key: String) = actionBar(playerId, key, emptyMap())

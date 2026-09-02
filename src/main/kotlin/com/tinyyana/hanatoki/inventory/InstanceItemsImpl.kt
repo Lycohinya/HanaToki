@@ -27,6 +27,15 @@ class InstanceItemsImpl(
     plugin: Plugin,
     /** 查「這位玩家現在在跑哪一局」。由 [InstanceInventoryService] 提供(同插件內,不跨邊界)。 */
     private val activeLookup: (UUID) -> UUID?,
+    /**
+     * 查「這位玩家現在跟誰同一個 session」(含自己)。由 [InstanceInventoryService] 轉接
+     * `SessionManager`(同插件內,不跨邊界)。查不到 session 就回空集合。
+     *
+     * 存在理由見 [isLegalFor]:多人副本(深域)的掉落是地面共享堆,但 `instanceId` 是
+     * per-player 的安全背包交易概念(每位隊員各自一份、值互不相同),兩者語意不同,
+     * 合法性判定要跨隊友查,不能只認自己那一份。
+     */
+    private val sessionMembersOf: (UUID) -> Collection<UUID> = { emptyList() },
 ) : InstanceItems {
 
     private val scopeKey = NamespacedKey(plugin, "instance_scope")
@@ -58,7 +67,10 @@ class InstanceItemsImpl(
     override fun isLegalFor(playerId: UUID, item: ItemStack): Boolean {
         if (!isInstanceScoped(item)) return true // 永久物品,永遠合法
         val itemInstance = instanceIdOf(item) ?: return false // 標記半殘 → 不合法
-        return itemInstance == activeLookup(playerId)?.toString()
+        if (itemInstance == activeLookup(playerId)?.toString()) return true
+        // 隊友的掉落物一樣合法(2026-09-02 修:深域組隊掉落是地面共享堆,誰走過去撿都行——
+        // 但物品身上只蓋得了一位隊員的 instanceId,不能只認跟自己完全相同的那一份)。
+        return sessionMembersOf(playerId).any { it != playerId && activeLookup(it)?.toString() == itemInstance }
     }
 
     private companion object {

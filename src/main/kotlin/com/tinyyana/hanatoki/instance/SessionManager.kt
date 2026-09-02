@@ -32,6 +32,22 @@ data class EndedSession(
 )
 
 /**
+ * 個別成員因為離線 grace 逾時被 drop,但 session 本身還活著(還有別的成員在場)。
+ *
+ * 2026-09-02 新增:在這之前,[SessionManager.tick] 只回報「整局結束」——多人局裡一位成員
+ * grace 逾時掉出去、其他人還在打時,這件事完全沒有出口通知呼叫端。後果:那位玩家的局內背包
+ * journal 沒有進入還原流程(下次登入才會補救,但期間不合法)、內容層(RoguelikeBehavior)
+ * 自己那份平行的成員登記表(RunState.memberIds/instanceId)沒有跟著清,side effect 是
+ * 「隊長離線後隊友撿不到掉落物、怪物不再生成」與「側邊欄卡在副本描述直到整局結束」兩個
+ * 回報症狀共同的根因。[HanaTokiCore.tick] 現在會對每一筆走跟 [HanaTokiCore.kick] 同一條
+ * 「個人退場」通知([com.tinyyana.hanatoki.stage.StageEngine.notifyMemberLeft])。
+ */
+data class MemberDrop(val sessionId: UUID, val dungeonId: String, val playerId: UUID)
+
+/** [SessionManager.tick] 的回傳:這次 tick 整局結束的 session,以及還活著但個別掉出去的成員。 */
+data class TickResult(val ended: List<EndedSession>, val memberDrops: List<MemberDrop> = emptyList())
+
+/**
  * 串起 [SlotPool] 分配與 [Session] lifecycle 的登記表(ARCH §5.1①「全域註冊表」)。
  * 純邏輯,不碰 Bukkit;呼叫端(HanaTokiPlugin)負責把這裡的操作包進 `instance.submit()`
  * 或直接呼叫無副作用的查詢方法(如 `sessionOf`)。
@@ -144,9 +160,14 @@ class SessionManager<A>(private val slotPool: SlotPool<A>) {
         return null
     }
 
-    /** 每次 tick 呼叫:處理逾時 grace、逾時計時器。回傳這次因此結束的 session(呼叫端接手世界回滾 + 之後呼叫 [releaseSlotAfterRollback])。*/
-    fun tick(nowMs: Long): List<EndedSession> {
+    /**
+     * 每次 tick 呼叫:處理逾時 grace、逾時計時器。
+     * @return 這次因此整局結束的 session(呼叫端接手世界回滾 + 之後呼叫 [releaseSlotAfterRollback]),
+     *   以及這次因為 grace 逾時個別掉出去、但 session 還活著的成員(見 [MemberDrop])。
+     */
+    fun tick(nowMs: Long): TickResult {
         val ended = mutableListOf<EndedSession>()
+        val memberDrops = mutableListOf<MemberDrop>()
         for (session in sessions.values.toList()) {
             val droppedThisTick = session.sweepExpiredGrace(nowMs)
             droppedThisTick.forEach { byPlayer.remove(it) }
@@ -155,9 +176,12 @@ class SessionManager<A>(private val slotPool: SlotPool<A>) {
             if (timedOut || allGone) {
                 endSessionBookkeeping(session, if (timedOut) EndReason.TIMEOUT else EndReason.ALL_DROPPED)
                     ?.let { ended += it }
+            } else {
+                // session 還活著:這次 grace 逾時掉出去的人個別走「個人退場」通知,不是整局結束。
+                droppedThisTick.forEach { memberDrops += MemberDrop(session.sessionId, session.dungeonId, it) }
             }
         }
-        return ended
+        return TickResult(ended, memberDrops)
     }
 
     /** Stage 引擎的 Resolution 用:直接以 sessionId 結束(不論成員 online/offline 狀態)。 */

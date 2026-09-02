@@ -39,6 +39,16 @@ interface DungeonAccess {
      */
     fun enterDungeonDuo(playerId: UUID, partnerId: UUID, dungeonId: String): Boolean
 
+    /**
+     * 把三個玩家一起送進副本(2026-09-02 新增:深域 `party-cap: 3` 的組隊入口)。
+     * 任一人不在線 / 副本不存在 / 沒有空位都回 false,呼叫端自己決定訊息。
+     *
+     * 同 [enterDungeonDuo] 的理由:不做泛型 `List<UUID>` party API(那會破 primitive-only 紅線),
+     * 有 party-cap 3 的實際案例(深域)就加一支 3 人簽章。1 人走 [enterDungeon]、2 人走
+     * [enterDungeonDuo]、3 人走這支。
+     */
+    fun enterDungeonTrio(playerId: UUID, partner1Id: UUID, partner2Id: UUID, dungeonId: String): Boolean
+
     /** 把玩家送出他所在的副本(回進場前的位置,沒登記就回重生點/第一個非副本世界)。 */
     fun leaveDungeon(playerId: UUID): Boolean
 

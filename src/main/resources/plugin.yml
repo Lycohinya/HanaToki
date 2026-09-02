@@ -40,3 +40,10 @@ permissions:
     #   管理員平常在裡面手滑放一顆方塊就會留在那裡。要改場地就明確開這個權限。
     description: 在 HanaToki 副本世界裡放/挖方塊(預設沒有人有)
     default: false
+  hanatoki.dungeon.bypass:
+    # 2026-09-03 改 op(Yana:「有管理員權限就可以過去副本看玩家」)。這條跟 hanatoki.build
+    # 風險不對稱:build 擋的是「手滑改掉程式化場地」這種不可逆的意外破壞,這條只是放行「進場
+    # 旁觀」,危害小得多,矛盾也不大——跟 hanatoki.admin(list/kick/reset/debug)同一個風險
+    # 等級,理應同樣預設 op,不需要另外手動 LuckPerms 授權。
+    description: 不受限地用 tpa/warp 等傳送手段進入 HanaToki 副本世界(旁觀用)
+    default: op

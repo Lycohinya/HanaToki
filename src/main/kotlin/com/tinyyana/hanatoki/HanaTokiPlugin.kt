@@ -52,6 +52,9 @@ class HanaTokiPlugin : JavaPlugin() {
         server.pluginManager.registerEvents(core.instanceItemGuard, this)
         // 副本世界不給玩家改地形(2026-08-30 正式服回報:有人在刀塚裡放了地獄石,而且留著)
         server.pluginManager.registerEvents(core.dungeonWorldGuard, this)
+        // 副本世界只能走官方入口進去,不能用 tpa/warp 等傳送手段跳進正在跑的 session
+        // (2026-09-02 回報:在外面 tpa 進副本可以繞過人數上限/背包隔離/花蜜額度)
+        server.pluginManager.registerEvents(core.dungeonEntryGuard, this)
 
         // ARCH §5.2 規則 5:v1 用 GlobalRegionScheduler 驅動 tick 訊號,訊號本身只做無副作用/
         // 單 session 操作的查表與 session.tick() 呼叫(Phase 1 尚無跨 session 共享狀態需要序列化到
