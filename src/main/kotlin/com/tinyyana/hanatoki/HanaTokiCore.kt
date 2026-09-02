@@ -602,8 +602,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         // 客滿的同步預檢:留住舊呼叫端「false 就顯示客滿訊息」的路徑。這裡跟真正的配置之間
         // 有理論上的競態(預檢過了、配置時被別人搶走),那條路會走非同步的 NO_SLOT 分支並
         // 通知玩家,不會留下髒狀態。
-        val persistent = registry.definitions[dungeonId]?.mode == ExecutionMode.PERSISTENT
-        if (!persistent && !slotPool.hasFree(dungeonId) && sessionManager.sessionOf(playerId) == null) return false
+        if (!hasRoomFor(dungeonId, listOf(playerId))) return false
         fireAndReport(dungeonEntry.enter(listOf(player), dungeonId), listOf(playerId))
         return true
     }
@@ -612,6 +611,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         val player = plugin.server.getPlayer(playerId) ?: return false
         val partner = plugin.server.getPlayer(partnerId) ?: return false
         if (!registry.definitions.containsKey(dungeonId)) return false
+        if (!hasRoomFor(dungeonId, listOf(playerId, partnerId))) return false
         fireAndReport(dungeonEntry.enter(listOf(player, partner), dungeonId), listOf(playerId, partnerId))
         return true
     }
@@ -621,8 +621,26 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         if (ids.toSet().size != 3) return false
         val players = ids.map { plugin.server.getPlayer(it) ?: return false }
         if (!registry.definitions.containsKey(dungeonId)) return false
+        if (!hasRoomFor(dungeonId, ids)) return false
         fireAndReport(dungeonEntry.enter(players, dungeonId), ids)
         return true
+    }
+
+    /**
+     * 客滿的同步預檢:false = 現在沒有 slot 收這一隊,呼叫端該顯示「這座副本目前無法進入」。
+     *
+     * 三支 boolean 版進場入口共用。少了它,組隊入口在客滿時會回 true,呼叫端於是把隊伍
+     * 拆掉、把介面關掉,然後三個人什麼事都沒發生——非同步的 NO_SLOT 要晚一步才到,那時候
+     * 組隊狀態早就沒了(2026-09-03 稽核發現 duo/trio 漏了這一關,solo 本來就有)。
+     *
+     * 跟真正的配置之間有理論上的競態(預檢過了、配置時被別人搶走),那條路會走非同步的
+     * NO_SLOT 分支並通知玩家,不會留下髒狀態。常駐副本沒有 slot 的概念,一律放行。
+     * 已經在局裡的人不算佔用新 slot——那是「回到自己那一局」,solo 版本就是這個語意。
+     */
+    private fun hasRoomFor(dungeonId: String, memberIds: List<UUID>): Boolean {
+        if (registry.definitions[dungeonId]?.mode == ExecutionMode.PERSISTENT) return true
+        if (slotPool.hasFree(dungeonId)) return true
+        return memberIds.any { sessionManager.sessionOf(it) != null }
     }
 
     /**
