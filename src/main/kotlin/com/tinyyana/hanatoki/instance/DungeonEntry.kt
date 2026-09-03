@@ -26,12 +26,18 @@ import java.util.concurrent.CompletableFuture
  * ```
  * 1  記返回點            ← 在玩家自己的 region 讀他的座標(ARCH §5.1④)
  * 2  分配 session/slot   ← 純記憶體查表,失敗就是「客滿」,什麼都還沒動
- * 3  啟動 stage          ← ⚠ 必須在傳送之前(見下方)
+ * 3  啟動 stage(prepare)← ⚠ 必須在傳送之前(見下方)
  * 4  局內背包 prepare    ← 持久化 journal(PREPARED),背包還沒動
- * 5  teleportAsync       ← 只有這一步真的成功,才算進場
- * 6  局內背包 activate   ← 拍快照 → 清空 → 發局內裝
- * 7  ACTIVE
+ * 5  等 prepareStage 就緒 ← 場地與必要 chunk 都到位;逾時/失敗整筆回滾
+ * 6  teleportAsync       ← 只有這一步真的成功,才算進場
+ * 7  局內背包 activate   ← 拍快照 → 清空 → 發局內裝
+ * 8  enterStage          ← behavior 的 onStageEnter(開打)在人已經站在場地上之後才跑
+ * 9  ACTIVE
  * ```
+ *
+ * 2026-09-03 之前「蓋場地在前」只是呼叫順序,沒有任何等待:`startFor` 一回來就傳送,而場地是
+ * 非同步蓋的(正式服量到 2~5 秒)。現在步驟 5 真的等 behavior 的 `prepareStage` 完成
+ * (上限 [STAGE_READY_TIMEOUT_SECONDS] 秒),玩家落地時地板一定在。
  *
  * ⚠ **步驟 3 刻意在傳送之前**,雖然「真正傳送成功前不算 ACTIVE Run」。理由是物理性的:
  * 專屬副本世界是虛空,場地是 entry stage 的 behavior 用程式碼蓋出來的——傳送先發生的話,
@@ -78,6 +84,11 @@ class DungeonEntry(private val core: HanaTokiCore) {
                         .thenApply { fail(DungeonEntryStatus.INVENTORY_FAILED, "局內背包 journal 寫入失敗,已回滾") }
                 }
                 val destination = core.entryLocationFor(def, anchor)
+                awaitStageReady(session, players).thenCompose { readyError ->
+                if (readyError != null) {
+                    return@thenCompose rollback(session, players, prepared)
+                        .thenApply { fail(DungeonEntryStatus.STAGE_NOT_READY, "場地沒有準備好($readyError),已回滾") }
+                }
                 teleportAll(players, destination).thenCompose { teleported ->
                     if (!teleported) {
                         return@thenCompose rollback(session, players, prepared)
@@ -88,7 +99,9 @@ class DungeonEntry(private val core: HanaTokiCore) {
                             rollback(session, players, prepared)
                                 .thenApply { fail(DungeonEntryStatus.INVENTORY_FAILED, "局內背包切換失敗,已回滾") }
                         } else {
-                            // 交易整個做完才通知 behavior:局內背包已經換好,起始物品放進去不會被清掉。
+                            // 人已經站在場地上、局內背包已經換好:這時才開打(onStageEnter),
+                            // 接著通知 behavior 每位成員可以收起始物品。
+                            core.stageEngine.enterStage(session.sessionId)
                             players.forEach { core.stageEngine.notifyMemberReady(session.sessionId, it.uniqueId) }
                             done(
                                 Outcome(
@@ -103,11 +116,35 @@ class DungeonEntry(private val core: HanaTokiCore) {
                         }
                     }
                 }
+                }
             }
         }
     }
 
     // ---- 各步驟 -------------------------------------------------------------
+
+    /**
+     * 等 behavior 的 `prepareStage`(場地、chunk)完成。回傳 null = 就緒;字串 = 失敗原因。
+     * 等超過 [PREPARING_NOTICE_MILLIS] 才對玩家顯示動作列提示——多數情況(場地沿用、只需巡檢)
+     * 一秒內就結束,閃一下提示只是雜訊。
+     */
+    private fun awaitStageReady(session: Session, players: List<Player>): CompletableFuture<String?> {
+        val ready = core.stageEngine.awaitReady(session.sessionId)
+        CompletableFuture.delayedExecutor(PREPARING_NOTICE_MILLIS, java.util.concurrent.TimeUnit.MILLISECONDS).execute {
+            if (ready.isDone) return@execute
+            val text = core.texts.format("session.preparing")
+            players.forEach { PlayerOp.actionBar(core.plugin, it.uniqueId, text) }
+        }
+        return ready
+            .orTimeout(STAGE_READY_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+            .handle { _, error ->
+                when (error) {
+                    null -> null
+                    is java.util.concurrent.TimeoutException -> "prepareStage 超過 $STAGE_READY_TIMEOUT_SECONDS 秒"
+                    else -> (error.cause ?: error).let { "${it.javaClass.simpleName}: ${it.message}" }
+                }
+            }
+    }
 
     /**
      * 在每位玩家自己的 region 上讀他現在的座標(ARCH §5.1④),同時寫進記憶體登記表與交給
@@ -212,6 +249,12 @@ class DungeonEntry(private val core: HanaTokiCore) {
     // ---- 結果物件 -----------------------------------------------------------
 
     private fun done(outcome: DungeonEntryOutcome) = CompletableFuture.completedFuture(outcome)
+
+    companion object {
+        /** 場地準備的硬上限。深域整套重蓋在正式服量到 2~5 秒;超過這個數字幾乎一定是出事了。 */
+        const val STAGE_READY_TIMEOUT_SECONDS = 30L
+        const val PREPARING_NOTICE_MILLIS = 700L
+    }
 
     private fun fail(status: String, reason: String) =
         Outcome(status, succeeded = false, sessionId = null, instanceId = null, failureReason = reason, rolledBack = true)

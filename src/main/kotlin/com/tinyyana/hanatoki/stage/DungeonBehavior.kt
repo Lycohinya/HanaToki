@@ -13,6 +13,18 @@ import java.util.UUID
  * Bukkit 的 `setBlock`/`spawnEntity`/entity API。
  */
 interface DungeonBehavior {
+    /**
+     * 進入 stage **之前**要先準備好的東西(場地、必要的 chunk)。引擎在把玩家傳進來之前會等
+     * 這個 future 完成(見 [com.tinyyana.hanatoki.instance.DungeonEntry]);完成後才呼叫
+     * [onStageEnter]。失敗(exceptional)= 這一局進不了,進場交易整筆回滾。
+     *
+     * 2026-09-03 正式服:深域開場重蓋場地要 2~5 秒,而玩家在 `onStageEnter` 一發出去就被傳進
+     * 還沒有地板的虛空——自由落體等場地生成。把「蓋場地」放在這裡、傳送放在它之後,就是修法。
+     * 預設立即完成:既有副本(刀塚、蒼櫻)不需要改。
+     */
+    fun prepareStage(ctx: StageContext, stageId: String): java.util.concurrent.CompletableFuture<Void> =
+        java.util.concurrent.CompletableFuture.completedFuture(null)
+
     fun onStageEnter(ctx: StageContext, stageId: String) {}
     fun onStageExit(ctx: StageContext, stageId: String) {}
     fun onStageTimeout(ctx: StageContext, stageId: String) {

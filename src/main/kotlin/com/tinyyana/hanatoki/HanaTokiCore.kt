@@ -162,7 +162,9 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
             // 遇到沒載入的 chunk 是直接跳過的——等於什麼都沒掃到(2026-09-01 真人回報殘留)。
             // 玩家落地幾秒後 chunk 一定在,那時候掃才掃得到東西。
             plugin.server.globalRegionScheduler.runDelayed(plugin, { _ -> sweepInstanceDrops(result.session.slotId) }, ENTRY_SWEEP_DELAY_TICKS)
-            stageEngine.startFor(result.session.sessionId, dungeonId, result.session.slotId, result.anchor, now)
+            // deferEnter:場地由 behavior 的 prepareStage 先蓋好,DungeonEntry 等它就緒、把人傳進去之後
+            // 才 enterStage(2026-09-03:先傳送再蓋場地 = 玩家在虛空裡自由落體等地板)。
+            stageEngine.startFor(result.session.sessionId, dungeonId, result.session.slotId, result.anchor, now, deferEnter = true)
         }
         return result
     }

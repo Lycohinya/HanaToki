@@ -45,7 +45,15 @@ class StageEngine(private val core: HanaTokiCore) {
      */
     private val scheduled = ConcurrentHashMap<UUID, CopyOnWriteArrayList<ScheduledTask>>()
 
-    fun startFor(sessionId: UUID, dungeonId: String, slotId: String, anchor: Location, nowMs: Long) {
+    /**
+     * 啟動一個 session 的 stage 狀態機。流程:`prepareStage`(蓋場地)→ `onStageEnter`。
+     *
+     * [deferEnter] = true 時(進場交易 [com.tinyyana.hanatoki.instance.DungeonEntry] 用)只跑到
+     * prepare 完成,`onStageEnter` 要由呼叫端在玩家真的傳進來之後呼叫 [enterStage];
+     * prepare 的 future 由 [awaitReady] 取得。false = 舊行為(常駐副本從世界走進來那條路),
+     * prepare 完成後自動接 `onStageEnter`。
+     */
+    fun startFor(sessionId: UUID, dungeonId: String, slotId: String, anchor: Location, nowMs: Long, deferEnter: Boolean = false) {
         val graph = core.registry.definitions[dungeonId]?.stageGraph ?: return
         val behavior = behaviorFor(dungeonId) ?: run {
             // stageGraph 有定義但沒有對應 behavior 註冊——這是設定/接線錯誤,值得警告
@@ -57,16 +65,54 @@ class StageEngine(private val core: HanaTokiCore) {
         state.enterStage(graph.startStage, nowMs)
         states[sessionId] = state
         sessionMeta[sessionId] = SessionMeta(dungeonId, slotId, anchor)
+        val ready = CompletableFuture<Void>()
+        readiness[sessionId] = ready
         // enter() 的呼叫端可能是任意執行緒(指令發出者的 region)——behavior callback 一律要求
         // 已在 anchor 所屬 region 的 task 內執行(ARCH §5.1②),這裡補一次 submit。
         InstanceDispatch.submit(core.plugin, anchor) {
+            if (states[sessionId] !== state) {
+                ready.completeExceptionally(IllegalStateException("session 在準備前就結束了"))
+                return@submit
+            }
             val ctx = ctxFor(sessionId, dungeonId, slotId, anchor, state)
-            behavior.onStageEnter(ctx, state.currentStageId)
+            val prepared = try {
+                behavior.prepareStage(ctx, state.currentStageId)
+            } catch (t: Throwable) {
+                CompletableFuture.failedFuture(t)
+            }
+            prepared.whenComplete { _, error ->
+                if (error != null) {
+                    ready.completeExceptionally(error)
+                    return@whenComplete
+                }
+                if (!deferEnter) enterStage(sessionId)
+                ready.complete(null)
+            }
         }
     }
 
+    /** [startFor] 的 prepare 結果。沒有 stage 圖 / 沒有 behavior 的副本沒有這一項,視為立即就緒。 */
+    fun awaitReady(sessionId: UUID): CompletableFuture<Void> =
+        readiness[sessionId] ?: CompletableFuture.completedFuture(null)
+
+    /** prepare 完成、玩家已在場地上之後才呼叫 behavior 的 `onStageEnter`(在 anchor region 上)。 */
+    fun enterStage(sessionId: UUID) {
+        readiness.remove(sessionId)
+        val state = states[sessionId] ?: return
+        val meta = sessionMeta[sessionId] ?: return
+        val behavior = behaviorFor(meta.dungeonId) ?: return
+        InstanceDispatch.submit(core.plugin, meta.anchor) {
+            if (states[sessionId] !== state) return@submit
+            behavior.onStageEnter(ctxFor(sessionId, meta.dungeonId, meta.slotId, meta.anchor, state), state.currentStageId)
+        }
+    }
+
+    /** prepare 進行中/已完成但還沒 enterStage 的 session。endFor 會一併清掉。 */
+    private val readiness = ConcurrentHashMap<UUID, CompletableFuture<Void>>()
+
     fun endFor(sessionId: UUID, reason: String) {
         val state = states.remove(sessionId)
+        readiness.remove(sessionId)?.completeExceptionally(IllegalStateException("session 已結束:$reason"))
         cancelScheduled(sessionId)
         encounters.despawnAllForSession(sessionId)
         dynamicEncounters.despawnAllForSession(sessionId)
@@ -217,6 +263,12 @@ private class StageContextImpl(
         locations: List<Location>,
         action: java.util.function.Consumer<org.bukkit.block.Block>,
     ) = core.mutateSlotPersistentBatch(locations) { block -> action.accept(block) }
+
+    override fun mutatePersistentChunks(
+        world: org.bukkit.World,
+        chunks: List<com.tinyyana.hanatoki.folia.ChunkCoord>,
+        action: java.util.function.Consumer<org.bukkit.Chunk>,
+    ) = com.tinyyana.hanatoki.folia.ChunkWaveRunner(core.plugin, world, chunks, { chunk -> action.accept(chunk) }).start()
 
     override fun readBlock(location: Location, reader: java.util.function.Consumer<org.bukkit.block.Block>) =
         WorldOp.dispatch(core.plugin, location) { block -> reader.accept(block) }

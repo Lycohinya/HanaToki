@@ -68,4 +68,6 @@ object DungeonEntryStatus {
     const val INVENTORY_FAILED = "INVENTORY_FAILED"
     const val SHUTTING_DOWN = "SHUTTING_DOWN"
     const val ALREADY_INSIDE = "ALREADY_INSIDE"
+    /** behavior 的 prepareStage 失敗或逾時(場地沒蓋出來),已回滾。 */
+    const val STAGE_NOT_READY = "STAGE_NOT_READY"
 }

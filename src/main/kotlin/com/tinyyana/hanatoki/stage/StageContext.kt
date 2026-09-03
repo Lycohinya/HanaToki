@@ -78,6 +78,19 @@ interface StageContext {
     fun mutatePersistentBatch(locations: List<Location>, action: Consumer<Block>): CompletableFuture<Void>
 
     /**
+     * 同 [mutatePersistentBatch] 的語意(不進 diff log、不回滾、內容層自負幂等),但派工單位是
+     * **chunk**,而且一波一波派、依實測時間調整每波大小——見 [com.tinyyana.hanatoki.folia.ChunkWaveRunner]。
+     * 整套場地幾百萬格一口氣派出去會把 region 停幾秒(2026-09-03 正式服的深域開場),這條路
+     * 是讓「蓋場地」對同 region 的其他人隱形的辦法。[action] 在該 chunk 所屬 region 的執行緒上
+     * 被呼叫,拿到已載入的 [org.bukkit.Chunk],自己決定要讀寫哪些方塊。
+     */
+    fun mutatePersistentChunks(
+        world: org.bukkit.World,
+        chunks: List<com.tinyyana.hanatoki.folia.ChunkCoord>,
+        action: Consumer<org.bukkit.Chunk>,
+    ): CompletableFuture<com.tinyyana.hanatoki.folia.ChunkWorkReport>
+
+    /**
      * 讀一格方塊。讀取也要在擁有那個座標的 region 執行線上做(跟寫一樣),所以這是非同步的。
      *
      * 存在理由:用 [mutatePersistentBatch] 蓋出來的場地不會回滾,內容層因此需要一個方法問
