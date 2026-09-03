@@ -319,7 +319,11 @@ hanaToki.core.texts.merge(
 
 `DungeonAccess` 的 true 只代表請求已受理。核心沒有把 `teleportAsync` 的最終結果回傳給呼叫端，傳送失敗時也不會自動把玩家從新 session 移除；他可能留在原地，卻仍被 `PresenceBridge`、callback 與結算視為成員。
 
-玩家入口應在短暫逾時後，從該玩家的 EntityScheduler 檢查他是否真的到達預期副本世界／位置。若仍未到達但 `PresenceBridge.isInside` 是 true，呼叫 `leaveDungeon` 收回 session membership，再顯示可重試的失敗訊息。接著查目的世界與 Folia log，不要只重送另一筆 enter。
+玩家入口應在短暫逾時後，從該玩家的 EntityScheduler 檢查他是否真的到達預期副本世界／位置（預期世界名問 `PresenceBridge.worldNameOf`）。若仍未到達但 `PresenceBridge.isInside` 是 true，呼叫 `leaveDungeon` 收回 session membership，再顯示可重試的失敗訊息。接著查目的世界與 Folia log，不要只重送另一筆 enter。
+
+### 進場前就被當成「人已經在副本裡」
+
+`PresenceBridge.isInside` 從 session 建立那一刻就是 true，而傳送是進場交易的第 6 步（第 5 步還要等 `prepareStage` 蓋完場地）。那幾秒裡玩家人還在原本的世界。任何「人在副本裡才該發生」的效果（背景音樂、HUD、環境效果）要拿 `worldNameOf` 跟玩家當下的世界名比對，不能只問 `isInside`。
 
 ### 改了 YAML 但行為沒變
 

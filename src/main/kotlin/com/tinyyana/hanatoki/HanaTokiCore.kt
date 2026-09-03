@@ -583,6 +583,8 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
     // ---- PresenceBridge(ARCH §4,HanaToki 是 provider)----
     override fun isInside(playerId: UUID): Boolean = sessionManager.sessionOf(playerId) != null
     override fun dungeonIdOf(playerId: UUID): String? = sessionManager.sessionOf(playerId)?.dungeonId
+    override fun worldNameOf(playerId: UUID): String? =
+        sessionManager.sessionOf(playerId)?.let { registry.definitions[it.dungeonId]?.worldName }
 
     // ---- DungeonAccess(外部 UI 的進出入口,見 api/DungeonAccess)----
 

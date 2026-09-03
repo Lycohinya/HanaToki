@@ -238,12 +238,19 @@ val items = server.servicesManager.getRegistration(InstanceItems::class.java)?.p
 interface PresenceBridge {
     fun isInside(playerId: UUID): Boolean
     fun dungeonIdOf(playerId: UUID): String?
+    fun worldNameOf(playerId: UUID): String?
 }
 ```
 
 - `isInside` 只看 session registry，不讀玩家所在世界。
 - `dungeonIdOf` 找不到 session 時回 `null`。
+- `worldNameOf` 回該 session 所屬副本定義的 `world`，沒有 session 時回 `null`。
 - 這是唯讀查詢面，不應拿來改玩家狀態。
+
+⚠ **`isInside` 為 true 不代表人已經到了。** session 在進場交易的第 2 步就建立，`teleportAsync`
+是第 6 步（第 5 步還要等 `prepareStage` 蓋完場地，關卡型副本實測數秒）。要判斷「人真的站在副本裡」
+的消費端必須拿 `worldNameOf` 跟玩家當下的世界名比對——只問 `isInside` 會在等待窗口裡誤判。
+2026-09-03 玩家回報「深域進入前就放音樂、傳送過去反而被中斷」的根因就是這個。
 
 ## 7. 定義與 behavior bootstrap
 
