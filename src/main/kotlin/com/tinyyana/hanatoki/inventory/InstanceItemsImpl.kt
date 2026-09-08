@@ -31,9 +31,9 @@ class InstanceItemsImpl(
      * 查「這位玩家現在跟誰同一個 session」(含自己)。由 [InstanceInventoryService] 轉接
      * `SessionManager`(同插件內,不跨邊界)。查不到 session 就回空集合。
      *
-     * 存在理由見 [isLegalFor]:多人副本(深域)的掉落是地面共享堆,但 `instanceId` 是
-     * per-player 的安全背包交易概念(每位隊員各自一份、值互不相同),兩者語意不同,
-     * 合法性判定要跨隊友查,不能只認自己那一份。
+     * 存在理由見 [InstanceItemLegality]:多人副本(深域)的掉落/起始裝是共享堆,但 `instanceId`
+     * 是 per-player 的安全背包交易概念(每位隊員各自一份、值互不相同),物品身上只蓋得了
+     * 一位隊員的章,合法性判定要跨隊友查,不能只認自己那一份。
      */
     private val sessionMembersOf: (UUID) -> Collection<UUID> = { emptyList() },
 ) : InstanceItems {
@@ -64,14 +64,29 @@ class InstanceItemsImpl(
 
     override fun activeInstanceIdOf(playerId: UUID): String? = activeLookup(playerId)?.toString()
 
-    override fun isLegalFor(playerId: UUID, item: ItemStack): Boolean {
-        if (!isInstanceScoped(item)) return true // 永久物品,永遠合法
-        val itemInstance = instanceIdOf(item) ?: return false // 標記半殘 → 不合法
-        if (itemInstance == activeLookup(playerId)?.toString()) return true
-        // 隊友的掉落物一樣合法(2026-09-02 修:深域組隊掉落是地面共享堆,誰走過去撿都行——
-        // 但物品身上只蓋得了一位隊員的 instanceId,不能只認跟自己完全相同的那一份)。
-        return sessionMembersOf(playerId).any { it != playerId && activeLookup(it)?.toString() == itemInstance }
-    }
+    override fun isLegalFor(playerId: UUID, item: ItemStack): Boolean =
+        InstanceItemLegality.isLegalFor(
+            scoped = isInstanceScoped(item),
+            itemInstanceId = instanceIdOf(item),
+            holderActiveInstanceId = activeLookup(playerId)?.toString(),
+            memberActiveInstanceIds = memberActiveInstanceIds(playerId),
+        )
+
+    /**
+     * [ForeignItemWarden] 用的反向白名單:這件物品是不是「這一局的局內物品」(可以留在背包裡)。
+     * 與 [isLegalFor] 共用同一份 instanceId 比對,只差「非局內物品在這裡回 false」。
+     */
+    fun heldLegallyInRun(playerId: UUID, item: ItemStack): Boolean =
+        InstanceItemLegality.heldLegallyInRun(
+            scoped = isInstanceScoped(item),
+            itemInstanceId = instanceIdOf(item),
+            holderActiveInstanceId = activeLookup(playerId)?.toString(),
+            memberActiveInstanceIds = memberActiveInstanceIds(playerId),
+        )
+
+    /** 這位玩家所在 session 每一位在場成員(含自己)現在握著的 per-player instanceId。 */
+    private fun memberActiveInstanceIds(playerId: UUID): List<String> =
+        sessionMembersOf(playerId).mapNotNull { activeLookup(it)?.toString() }
 
     private companion object {
         const val SCOPE_INSTANCE = "INSTANCE"

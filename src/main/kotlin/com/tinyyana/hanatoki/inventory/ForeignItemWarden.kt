@@ -79,11 +79,18 @@ class ForeignItemWarden(
             for (slot in contents.indices) {
                 val stack = contents[slot] ?: continue
                 if (stack.type == Material.AIR) continue
-                // ⚠ 不能用 `isLegalFor`:那一支守的是**外流**方向,對沒有局內章的永久物品
-                //   一律回 true(「永久物品,永遠合法」)。這裡要的是反向白名單——
-                //   在 Run 裡只有「這一局的局內物品」算合法,其他一律收走。
-                val instanceOfStack = service.items.instanceIdOf(stack)
-                if (service.items.isInstanceScoped(stack) && instanceOfStack == instanceId.toString()) continue
+                // 反向白名單:只有「這一局的局內物品」留得住,其他一律收走。
+                //
+                // ⚠ 不能用 `isLegalFor`:那一支守的是**外流**方向,對沒有局內章的永久物品一律回
+                //   true(「永久物品,永遠合法」)。用 `heldLegallyInRun`——同一份 instanceId 比對,
+                //   但非局內物品在那裡回 false。
+                //
+                // ⚠ 也不能只比「== 持有者自己的 instanceId」:深域組隊的起始裝/掉落身上只蓋得了
+                //   一位隊員(state.instanceId,通常是隊長)的 per-player instanceId,非隊長手上的
+                //   東西身上是別人的章。只認自己的話,非隊長的起始裝每 2 秒被沒收一次
+                //   ——「感覺又變回只有隊長能玩」(2026-09-09 正式服)。`heldLegallyInRun` 會跨
+                //   同 session 在場隊員查,跟 `isLegalFor` 的隊友分支同一條規則。
+                if (service.items.heldLegallyInRun(playerId, stack)) continue
                 seized += stack.clone()
                 inventory.setItem(slot, null)
             }

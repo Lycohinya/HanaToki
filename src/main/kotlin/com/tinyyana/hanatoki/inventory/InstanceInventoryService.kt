@@ -75,7 +75,8 @@ class InstanceInventoryService(
      */
     private val activeByPlayer = ConcurrentHashMap<UUID, UUID>()
 
-    val items: InstanceItemsImpl = InstanceItemsImpl(plugin, { playerId -> activeByPlayer[playerId] }, sessionMembersOf)
+    val items: InstanceItemsImpl =
+        InstanceItemsImpl(plugin, { playerId -> activeByPlayer[playerId] }, sessionMembersOf)
 
     fun activeInstanceIdOf(playerId: UUID): UUID? = activeByPlayer[playerId]
 
