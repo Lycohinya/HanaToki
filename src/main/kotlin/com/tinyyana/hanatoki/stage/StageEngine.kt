@@ -33,7 +33,7 @@ import java.util.concurrent.CopyOnWriteArrayList
  */
 class StageEngine(private val core: HanaTokiCore) {
     private val states = ConcurrentHashMap<UUID, InstanceState>()
-    val encounters = EncounterController(core.plugin)
+    val encounters = EncounterController(core.plugin) { core.sessionManager.sessionById(it) != null }
 
     /** 動態 encounter(Roguelike Director 用)。定義驅動的 [encounters] 原樣保留給刀塚/蒼櫻。 */
     val dynamicEncounters = DynamicEncounterController(core.plugin)
@@ -44,6 +44,11 @@ class StageEngine(private val core: HanaTokiCore) {
      * 結束之後,招式排程還在對著空場地放粒子/傷害(ARCH §5.2 規則 6 的收斂順序)。
      */
     private val scheduled = ConcurrentHashMap<UUID, CopyOnWriteArrayList<ScheduledTask>>()
+    private val preparations = ConcurrentHashMap<UUID, CompletableFuture<Void>>()
+    private val ending = ConcurrentHashMap<UUID, Pair<String, CompletableFuture<Void>>>()
+
+    internal fun pendingEnds(ids: Set<String>): List<CompletableFuture<Void>> =
+        ending.values.filter { it.first in ids }.map { it.second }
 
     /**
      * 啟動一個 session 的 stage 狀態機。流程:`prepareStage`(蓋場地)→ `onStageEnter`。
@@ -67,11 +72,14 @@ class StageEngine(private val core: HanaTokiCore) {
         sessionMeta[sessionId] = SessionMeta(dungeonId, slotId, anchor)
         val ready = CompletableFuture<Void>()
         readiness[sessionId] = ready
+        val preparation = CompletableFuture<Void>()
+        preparations[sessionId] = preparation
         // enter() 的呼叫端可能是任意執行緒(指令發出者的 region)——behavior callback 一律要求
         // 已在 anchor 所屬 region 的 task 內執行(ARCH §5.1②),這裡補一次 submit。
         InstanceDispatch.submit(core.plugin, anchor) {
             if (states[sessionId] !== state) {
                 ready.completeExceptionally(IllegalStateException("session 在準備前就結束了"))
+                preparation.complete(null)
                 return@submit
             }
             val ctx = ctxFor(sessionId, dungeonId, slotId, anchor, state)
@@ -81,6 +89,8 @@ class StageEngine(private val core: HanaTokiCore) {
                 CompletableFuture.failedFuture(t)
             }
             prepared.whenComplete { _, error ->
+                preparations.remove(sessionId, preparation)
+                preparation.complete(null)
                 if (error != null) {
                     ready.completeExceptionally(error)
                     return@whenComplete
@@ -110,30 +120,45 @@ class StageEngine(private val core: HanaTokiCore) {
     /** prepare 進行中/已完成但還沒 enterStage 的 session。endFor 會一併清掉。 */
     private val readiness = ConcurrentHashMap<UUID, CompletableFuture<Void>>()
 
-    fun endFor(sessionId: UUID, reason: String) {
+    fun endFor(sessionId: UUID, reason: String): CompletableFuture<Void> {
+        ending[sessionId]?.let { return it.second }
         val state = states.remove(sessionId)
-        readiness.remove(sessionId)?.completeExceptionally(IllegalStateException("session 已結束:$reason"))
         cancelScheduled(sessionId)
-        encounters.despawnAllForSession(sessionId)
-        dynamicEncounters.despawnAllForSession(sessionId)
         // 內容層的收尾回呼。session 登記表這時可能已經被拿掉(resolveSession 先 endSession 再
         // 到這裡),所以 dungeon/slot/anchor 不能再從 sessionManager 查,要從 startFor 記的那份拿。
         val meta = sessionMeta.remove(sessionId)
-        if (state != null && meta != null) {
-            val behavior = behaviorFor(meta.dungeonId)
-            if (behavior != null) {
+        val finished = CompletableFuture<Void>()
+        if (meta != null) {
+            val entry = meta.dungeonId to finished
+            ending[sessionId] = entry
+            finished.whenComplete { _, _ -> ending.remove(sessionId, entry) }
+        }
+        val behavior = meta?.let { behaviorFor(it.dungeonId) }
+        val preparation = preparations.remove(sessionId) ?: CompletableFuture.completedFuture(null)
+        readiness.remove(sessionId)?.completeExceptionally(IllegalStateException("session 已結束:$reason"))
+        preparation.whenComplete { _, _ ->
+            if (meta != null) {
                 InstanceDispatch.submit(core.plugin, meta.anchor) {
                     try {
-                        behavior.onSessionEnd(ctxFor(sessionId, meta.dungeonId, meta.slotId, meta.anchor, state), reason)
+                        if (state != null) behavior?.onSessionEnd(ctxFor(sessionId, meta.dungeonId, meta.slotId, meta.anchor, state), reason)
                     } catch (t: Throwable) {
                         core.plugin.logger.warning("[HanaToki] ${meta.dungeonId} 的 onSessionEnd 丟出例外:${t.javaClass.simpleName}: ${t.message}")
+                    } finally {
+                        val cleanup = listOf(encounters.despawnAllForSession(sessionId),
+                            dynamicEncounters.despawnAllForSession(sessionId),
+                            core.actorController.despawnAllForSession(sessionId),
+                            core.propController.despawnAllForSession(sessionId))
+                        core.bossBars.clear(sessionId)
+                        CompletableFuture.allOf(*cleanup.toTypedArray()).whenComplete { _, error ->
+                            if (error == null) finished.complete(null) else finished.completeExceptionally(error)
+                        }
                     }
                 }
+            } else {
+                finished.complete(null)
             }
         }
-        core.actorController.despawnAllForSession(sessionId)
-        core.propController.despawnAllForSession(sessionId)
-        core.bossBars.clear(sessionId)
+        return finished
     }
 
     fun stateOf(sessionId: UUID): InstanceState? = states[sessionId]
@@ -217,6 +242,7 @@ class StageEngine(private val core: HanaTokiCore) {
             val behavior = behaviorFor(session.dungeonId) ?: continue
             val stageIdAtCheck = state.currentStageId
             InstanceDispatch.submit(core.plugin, anchor) {
+                if (states[sessionId] !== state) return@submit
                 // 派工到執行時可能已經因為別的事件轉了 stage——重查一次避免對錯的 stage 觸發逾時。
                 if (state.currentStageId != stageIdAtCheck || !state.isStageTimedOut(System.currentTimeMillis())) return@submit
                 val ctx = ctxFor(sessionId, session.dungeonId, session.slotId, anchor, state)
@@ -230,7 +256,9 @@ class StageEngine(private val core: HanaTokiCore) {
 
     internal fun trackScheduled(sessionId: UUID, task: ScheduledTask?) {
         if (task == null) return
+        if (!states.containsKey(sessionId)) { task.cancel(); return }
         scheduled.computeIfAbsent(sessionId) { CopyOnWriteArrayList() } += task
+        if (!states.containsKey(sessionId)) cancelScheduled(sessionId)
     }
 
     /** stage 轉換與 session 結束都會呼叫:把上一段演出排的所有任務清掉。 */
@@ -510,7 +538,7 @@ private class StageContextImpl(
     }
 
     override fun submit(action: Runnable) {
-        InstanceDispatch.submit(core.plugin, anchor) { action.run() }
+        InstanceDispatch.submit(core.plugin, anchor) { if (engine.stateOf(sessionId) === state) action.run() }
     }
 
     override fun submitLater(delayTicks: Long, action: Runnable) {

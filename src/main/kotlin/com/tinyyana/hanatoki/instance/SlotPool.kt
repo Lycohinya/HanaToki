@@ -28,6 +28,10 @@ class SlotPool<A> {
 
     fun unregisterAll() = slots.clear()
 
+    fun unregisterDungeon(dungeonId: String) {
+        slots.entries.removeIf { it.value.dungeonId == dungeonId }
+    }
+
     /** 無副作用查詢:目前這個副本是否有空 slot。*/
     fun hasFree(dungeonId: String): Boolean =
         slots.values.any { it.dungeonId == dungeonId && !it.occupied.get() }

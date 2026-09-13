@@ -8,6 +8,14 @@ HanaToki 是給 Paper／Folia 插件使用的微型副本引擎。
 
 簡單講：**YAML 描述場地，Kotlin 決定玩法，HanaToki 顧生命週期。**
 
+## 獨立內容與大型持久場地
+
+內容插件使用 `HanaTokiCore.registerContent(owner, definitions, textEntries, behaviors)` 取得 `ContentRegistration`。卸載前非同步等待 `closeAsync()`：先停止該內容 admission，再收回 target sessions／inventory／location，最後解除 owner 的 definitions、behaviors、texts 與 slots。內容自行釋放 listener、service、cache 與額外 registration handles；舊 handle 不得解除 replacement。
+
+`/hanatoki admin content-disable <plugin>` 先 drain 再 disable；`content-reload` 使用同一已載入 plugin 重新 enable，只適合設定／同 JAR lifecycle。替換新 JAR 仍需真正 unload／replace／load 或停服，不能把 Bukkit disable 當成 classloader 已卸載。
+
+`arena.ArenaPlan` 保存 compact planned blocks 與 chunk reconcile；`PersistentArenaBuilder` 做非同步計畫、cache／invalidation 與既有 chunk-paced mutation。內容提供 geometry 與 cache key，不把 maze／atlas／怪物設定放引擎。`inventory.RunDelivery` 提供局內物品交付最後一步的 membership guard；`runtime.RunPerf` 量測 scheduled tick 自身成本與延遲。跨插件 callback 使用 Java SAM，無 Kotlin lambda／default-argument ABI。
+
 ## 先看它適不適合你
 
 | 你的需求 | HanaToki 的答案 |
@@ -28,7 +36,7 @@ HanaToki 是給 Paper／Folia 插件使用的微型副本引擎。
 
 第一次接觸建議先讀使用手冊。API 文件是查契約用的，不需要從第一行背到最後一行。
 
-Lycohinya 正式使用的內容層 `LycoHanaToki` 是閉源專案，不提供公開閱讀連結；這個 repo 只維護通用引擎、probe 與整合契約。
+Lycohinya 的 integration 與獨立 dungeon content 是閉源專案；這個 repo 只維護通用引擎、probe 與整合契約。
 
 ## 五分鐘接進內容插件
 
@@ -58,17 +66,27 @@ depend: [HanaToki]
 ### 3. 載入定義並註冊玩法
 
 ```kotlin
-override fun onEnable() {
-    saveResource("dungeons.yml", false)
+private var content: ContentRegistration? = null
 
+override fun onEnable() {
+    if (!File(dataFolder, "dungeons.yml").exists()) saveResource("dungeons.yml", false)
     val hanaToki = server.pluginManager.getPlugin("HanaToki") as? HanaTokiPlugin
         ?: error("HanaToki 未載入")
-
-    hanaToki.core.texts.merge(
+    hanaToki.core.registerContent(
+        this,
+        File(dataFolder, "dungeons.yml"),
         mapOf("goblin-den.enter" to "<gray>洞裡傳來腳步聲……</gray>"),
-    )
-    hanaToki.core.loadContentDefinitions(File(dataFolder, "dungeons.yml"))
-    DungeonBehaviorRegistry.register("goblin-den", GoblinDenBehavior())
+        mapOf("goblin-den" to GoblinDenBehavior()),
+    ).whenComplete { handle, error ->
+        if (error != null) logger.severe("註冊失敗: ${error.message}")
+        else if (!isEnabled) handle.closeAsync()
+        else content = handle
+    }
+}
+
+override fun onDisable() {
+    content?.closeAsync() // 正常更新應在 disable 前先 await drain；此處是清理 fallback。
+    content = null
 }
 ```
 
@@ -120,7 +138,7 @@ Paper／Folia 的 region、entity 與 global scheduler
 
 - 內建 `test-*` 副本預設關閉，不會建立世界或註冊 slot；只在本地驗收時開 `enable-test-dungeons: true`。
 - `solo-cap` 與 `party-cap` 目前會被解析，但核心尚未用它們驗證隊伍人數。公開入口只有單人與雙人 API；內容插件仍要在自己的入口先做資格檢查。
-- 沒有設定熱重載指令。改完 YAML 請重啟伺服器；只重載單一內容插件也可能留下舊的 behavior 註冊。
+- 使用 managed content registration 的內容可用 `content-reload` 重讀同一 JAR 的設定；舊手動 register／merge 呼叫者需先遷移 owner lifecycle。引擎設定與新 bytecode 更新仍按各自部署流程。
 - `RewardSink` 缺席時，待發資料只暫存在目前 JVM 的記憶體裡，不是跨重啟的持久佇列。
 - 正式內容不放在這個 repo。HanaToki 只保留預設關閉的 architecture probe。
 - 方塊回滾只涵蓋 `ctx.mutate` 寫入。玩家自行破壞／放置，或內容插件直接呼叫 Bukkit 改方塊，都不會被 diff recorder 自動還原；需要另外的保護或回滾邏輯。

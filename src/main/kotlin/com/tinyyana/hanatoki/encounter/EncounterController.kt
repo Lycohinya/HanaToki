@@ -30,7 +30,7 @@ import java.util.concurrent.ConcurrentHashMap
  * 序列化執行,再加上 `active.remove(key)` 這個原子認領當第二道保險。死亡事件本身仍在原 region
  * 觸發,handler 只做無鎖查表 + 派工(§5.2 規則 1)。
  */
-class EncounterController(private val plugin: Plugin) {
+class EncounterController(private val plugin: Plugin, private val sessionActive: java.util.function.Predicate<UUID>) {
     private class Tracked(
         val anchor: Location,
         val remaining: MutableSet<UUID>,
@@ -65,6 +65,7 @@ class EncounterController(private val plugin: Plugin) {
         val future = CompletableFuture<Void>()
         val k = key(sessionId, encounterId)
         WorldOp.dispatchAt(plugin, center) { loc ->
+            if (!sessionActive.test(sessionId)) { future.complete(null); return@dispatchAt }
             val world = loc.world
             if (world == null) {
                 future.complete(null)
@@ -83,8 +84,12 @@ class EncounterController(private val plugin: Plugin) {
             }
             // 先公佈 Tracked 再建索引:反過來的話,一隻剛生出來就死掉的怪會查到索引卻找不到
             // Tracked(這一整段都在同一個 region task 內,實際上不會發生,但順序寫對比較不用推理)。
-            active[k] = Tracked(anchor, remaining, entities, onCleared)
-            remaining.forEach { entityIndex[it] = k }
+            synchronized(active) {
+                if (sessionActive.test(sessionId)) {
+                    active[k] = Tracked(anchor, remaining, entities, onCleared)
+                    remaining.forEach { entityIndex[it] = k }
+                } else entities.forEach { it.remove() }
+            }
             future.complete(null)
         }
         return future
@@ -111,16 +116,16 @@ class EncounterController(private val plugin: Plugin) {
     }
 
     /** session 結束時呼叫,清掉這個 session 底下所有還在追蹤的 encounter(不論 id)。 */
-    fun despawnAllForSession(sessionId: UUID) {
+    fun despawnAllForSession(sessionId: UUID): CompletableFuture<Void> = synchronized(active) {
         val prefix = "$sessionId#"
-        active.keys.filter { it.startsWith(prefix) }.forEach { removeTracked(it) }
+        CompletableFuture.allOf(*active.keys.filter { it.startsWith(prefix) }.map { removeTracked(it) }.toTypedArray())
     }
 
-    private fun removeTracked(k: String) {
-        val tracked = active.remove(k) ?: return
+    private fun removeTracked(k: String): CompletableFuture<Void> {
+        val tracked = active.remove(k) ?: return CompletableFuture.completedFuture(null)
         // entityIndex 一併清掉,免得清場後才送達的死亡事件又去查一個已經不存在的 encounter。
         tracked.entities.forEach { entityIndex.remove(it.uniqueId) }
-        tracked.entities.forEach { entity -> WorldOp.dispatch(plugin, entity) { it.remove() } }
+        return CompletableFuture.allOf(*tracked.entities.map { entity -> WorldOp.dispatch(plugin, entity) { it.remove() } }.toTypedArray())
     }
 
     /** 這個實體是不是某個進行中 encounter 生出來的(死亡掉落物清除用的無鎖查表)。 */

@@ -30,7 +30,7 @@ import java.util.concurrent.ConcurrentHashMap
  *   ([WorldOp.dispatch] 的 entity 多載),實體 retired 時視為立即完成。
  * - 登記表本身是 [ConcurrentHashMap],任何執行緒可安全查表(無副作用)。
  */
-class ActorController(private val plugin: Plugin) {
+class ActorController(private val plugin: Plugin, private val sessionActive: java.util.function.Predicate<UUID>) {
 
     /** key = "<sessionId>#<actorId>" -> 實體。實體可能已死/已移除,查用時一律再驗 [Entity.isValid]。 */
     private val actors = ConcurrentHashMap<String, Entity>()
@@ -40,12 +40,12 @@ class ActorController(private val plugin: Plugin) {
     fun handleFor(sessionId: UUID): ActorHandle = SessionActorHandle(sessionId)
 
     /** session 結束時的清場路徑(admin reset/timeout/resolve 共用)。 */
-    fun despawnAllForSession(sessionId: UUID): CompletableFuture<Void> {
+    fun despawnAllForSession(sessionId: UUID): CompletableFuture<Void> = synchronized(actors) {
         val prefix = "$sessionId#"
         val futures = actors.keys.filter { it.startsWith(prefix) }.mapNotNull { k ->
             actors.remove(k)?.let { entity -> WorldOp.dispatch(plugin, entity) { it.remove() } }
         }
-        return CompletableFuture.allOf(*futures.toTypedArray())
+        CompletableFuture.allOf(*futures.toTypedArray())
     }
 
     /** 實體是否是某個 session 的 actor(EntityDeathEvent/EntityDamageEvent handler 反查用)。 */
@@ -67,6 +67,7 @@ class ActorController(private val plugin: Plugin) {
             // 同 id 重複 spawn:先移除舊的(不等它完成——移除與生成在不同 region 各自獨立)。
             actors.remove(k)?.let { old -> WorldOp.dispatch(plugin, old) { it.remove() } }
             return WorldOp.dispatchAt(plugin, location) { loc ->
+                if (!sessionActive.test(sessionId)) return@dispatchAt
                 val world = loc.world ?: return@dispatchAt
                 val type = runCatching { EntityType.valueOf(spec.entityType) }.getOrElse {
                     plugin.logger.warning("[HanaToki] actor $actorId 的 entity-type=${spec.entityType} 不是已知的 EntityType,略過生成")
@@ -78,7 +79,7 @@ class ActorController(private val plugin: Plugin) {
                     return@dispatchAt
                 }) as Class<Entity>
                 val entity = world.spawn(loc, entityClass) { e: Entity -> applySpec(e, spec) }
-                actors[k] = entity
+                synchronized(actors) { if (sessionActive.test(sessionId)) actors[k] = entity else entity.remove() }
             }
         }
 

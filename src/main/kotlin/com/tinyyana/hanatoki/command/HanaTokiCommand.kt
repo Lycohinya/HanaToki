@@ -95,6 +95,24 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
         if (!sender.hasPermission("hanatoki.admin")) { sender.sendMessage("§c沒有權限"); return }
         val sub = args.getOrNull(1)?.lowercase()
         when (sub) {
+            "content-disable", "content-reload" -> {
+                val name = args.getOrNull(2) ?: run { sender.sendMessage("§c用法:/hanatoki admin $sub <plugin>"); return }
+                val target = Bukkit.getPluginManager().getPlugin(name) ?: run { sender.sendMessage("§c找不到插件 $name"); return }
+                if (!core.isContentOwner(target.name)) { sender.sendMessage("§c$name 沒有註冊副本內容"); return }
+                if (target === core.plugin) { sender.sendMessage("§c不能用內容指令停用引擎"); return }
+                sender.sendMessage("§7正在停止 $name 的入口並收回玩家與場地…")
+                core.closeContentOwner(name).whenComplete { _, error ->
+                    com.tinyyana.hanatoki.world.DungeonWorldProvisioner.runOnGlobalRegion(core.plugin, Runnable {
+                        if (error != null) {
+                            sender.sendMessage("§c收回失敗，未停用 $name: ${error.message}")
+                        } else {
+                            Bukkit.getPluginManager().disablePlugin(target)
+                            if (sub == "content-reload") Bukkit.getPluginManager().enablePlugin(target)
+                            sender.sendMessage("§a$name ${if (sub == "content-reload") "已重新啟用" else "已停用；替換 JAR 請依卸載／停服流程"}")
+                        }
+                    })
+                }
+            }
             "list" -> {
                 val sessions = core.sessionManager.snapshot()
                 if (sessions.isEmpty()) { sender.sendMessage("§7目前沒有進行中的 session"); return }
@@ -184,7 +202,7 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
         1 -> listOf("enter", "leave", "admin").filter { it.startsWith(args[0].lowercase()) }
         2 -> when (args[0].lowercase()) {
             "enter" -> core.registry.definitions.keys.toList()
-            "admin" -> listOf("list", "kick", "reset", "debug", "poses", "journal", "restore")
+            "admin" -> listOf("list", "kick", "reset", "debug", "poses", "journal", "restore", "content-disable", "content-reload")
                 .filter { it.startsWith(args[1].lowercase()) }
             else -> emptyList()
         }

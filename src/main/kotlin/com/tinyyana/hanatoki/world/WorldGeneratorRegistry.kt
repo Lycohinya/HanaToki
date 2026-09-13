@@ -31,8 +31,9 @@ object WorldGeneratorRegistry {
     private val suppliers = ConcurrentHashMap<String, Supplier<ChunkGenerator>>()
 
     /** 註冊(或覆蓋)一個生成器 id。內容插件在 onEnable、載入自己的副本定義**之前**呼叫。 */
-    fun register(id: String, supplier: Supplier<ChunkGenerator>) {
+    fun register(id: String, supplier: Supplier<ChunkGenerator>): AutoCloseable {
         suppliers[id] = supplier
+        return AutoCloseable { suppliers.remove(id, supplier) }
     }
 
     /** 內容插件 onDisable 時收回(PlugMan 熱插拔硬規則:交乾淨)。 */

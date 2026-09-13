@@ -27,6 +27,14 @@ import com.destroystokyo.paper.event.player.PlayerPostRespawnEvent
 class HanaTokiListener(private val core: HanaTokiCore) : Listener {
 
     @EventHandler
+    fun onContentDisabled(event: org.bukkit.event.server.PluginDisableEvent) {
+        if (event.plugin === core.plugin) return
+        core.closeContentOwner(event.plugin.name).whenComplete { _, error ->
+            if (error != null) core.plugin.logger.severe("Content drain failed for ${event.plugin.name}: ${error.message}")
+        }
+    }
+
+    @EventHandler
     fun onQuit(event: PlayerQuitEvent) {
         core.sessionManager.markOffline(event.player.uniqueId, System.currentTimeMillis())
     }

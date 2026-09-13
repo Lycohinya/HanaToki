@@ -44,6 +44,10 @@ class Texts {
         overlay.keys.removeIf { it.startsWith(prefix) }
     }
 
+    fun removeEntries(entries: Map<String, String>) {
+        entries.forEach { (key, value) -> overlay.remove(key, value) }
+    }
+
     fun rawOrNull(key: String): String? = overlay[key] ?: config.getString(key)
 
     /**

@@ -53,6 +53,17 @@ class DungeonEntry(private val core: HanaTokiCore) {
      * 兩個人都留在原地。分別處理會產生「一個人在裡面打、一個人在外面看」的狀態,那比失敗更糟。
      */
     fun enter(players: List<Player>, dungeonId: String): CompletableFuture<DungeonEntryOutcome> {
+        val result = CompletableFuture<DungeonEntryOutcome>()
+        if (!core.trackEntry(dungeonId, result)) return done(fail(DungeonEntryStatus.NO_DUNGEON, "副本正在停用"))
+        try {
+            enterTracked(players, dungeonId).whenComplete { outcome, error ->
+                if (error != null) result.completeExceptionally(error) else result.complete(outcome)
+            }
+        } catch (error: Throwable) { result.completeExceptionally(error) }
+        return result
+    }
+
+    private fun enterTracked(players: List<Player>, dungeonId: String): CompletableFuture<DungeonEntryOutcome> {
         if (players.isEmpty()) return done(fail(DungeonEntryStatus.PLAYER_OFFLINE, "沒有可進場的玩家"))
         val def = core.registry.definitions[dungeonId]
             ?: return done(fail(DungeonEntryStatus.NO_DUNGEON, "沒有 id=$dungeonId 的副本定義"))
@@ -229,19 +240,21 @@ class DungeonEntry(private val core: HanaTokiCore) {
         players: List<Player>,
         prepared: Map<UUID, UUID>,
     ): CompletableFuture<Void> {
-        val invOps = prepared.values.map { core.instanceInventory.restore(it, "entry-rollback") }
-        return CompletableFuture.allOf(*invOps.toTypedArray()).thenAccept {
-            for (player in players) {
-                core.sessionManager.kick(player.uniqueId)
-                core.returnPoints.forget(player.uniqueId)
-            }
-            core.stageEngine.endFor(session.sessionId, EndReason.ABANDONED.name)
-            // 常駐副本的 instance 不因為一次進場失敗而收掉(它本來就不歸還 slot);
-            // session 型副本則要把 slot 放回池子,否則這次失敗會永久吃掉一個場地。
-            if (!session.persistent) {
-                core.sessionManager.endSession(session.sessionId, EndReason.ABANDONED)
-                core.sessionManager.releaseSlotAfterRollback(session.slotId)
-            }
+        players.forEach { core.sessionManager.kick(it.uniqueId) }
+        // A failed join must not terminate a persistent instance's other members.
+        if (!session.persistent) core.sessionManager.endSession(session.sessionId, EndReason.ABANDONED)
+        val stageEnd = if (session.persistent) CompletableFuture.completedFuture(null)
+            else core.stageEngine.endFor(session.sessionId, EndReason.ABANDONED.name)
+        return stageEnd.thenCompose {
+            val invOps = prepared.values.map { core.instanceInventory.restore(it, "entry-rollback") }
+            CompletableFuture.allOf(*invOps.toTypedArray())
+        }.thenCompose {
+            CompletableFuture.allOf(*players.map { core.sendHome(it.uniqueId) }.toTypedArray())
+        }.thenCompose {
+            if (session.persistent) CompletableFuture.completedFuture(null)
+            else core.rollbackAndRelease(session.slotId, session.dungeonId)
+        }.thenAccept {
+            players.forEach { core.returnPoints.forget(it.uniqueId) }
             core.plugin.logger.info("[HanaToki] 進場失敗已回滾:dungeon=${session.dungeonId} slot=${session.slotId}")
         }
     }

@@ -46,6 +46,35 @@ import java.util.concurrent.ConcurrentHashMap
  * 只做 Bukkit lifecycle 接線,狀態機邏輯都在這裡(方便 Phase 2+ 擴充,不塞進 plugin 主類別)。
  */
 class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
+    private val contentLifecycle = ContentLifecycle(this)
+    private val entries = ConcurrentHashMap<CompletableFuture<*>, String>()
+    private val cleanups = ConcurrentHashMap<CompletableFuture<Void>, String>()
+
+    fun registerContent(owner: Plugin, definitions: java.io.File, textEntries: Map<String, String>, behaviors: Map<String, com.tinyyana.hanatoki.stage.DungeonBehavior>): CompletableFuture<com.tinyyana.hanatoki.api.ContentRegistration> =
+        contentLifecycle.register(owner, definitions, textEntries, behaviors)
+
+    fun closeContentOwner(ownerName: String): CompletableFuture<Void> = contentLifecycle.closeOwner(ownerName)
+    fun isContentOwner(ownerName: String): Boolean = contentLifecycle.isKnownOwner(ownerName)
+    fun isContentAccepting(dungeonId: String): Boolean = contentLifecycle.accepting(dungeonId)
+
+    internal fun trackEntry(dungeonId: String, result: CompletableFuture<*>): Boolean = synchronized(contentLifecycle.lock) {
+        if (!isContentAccepting(dungeonId)) return@synchronized false
+        entries[result] = dungeonId
+        result.whenComplete { _, _ -> entries.remove(result) }
+        true
+    }
+
+    internal fun drainContent(ids: Set<String>): CompletableFuture<Void> {
+        // Close admission first, then settle in-flight entry transactions before inventory recovery.
+        val pending = entries.filterValues { it in ids }.keys.map { it.handle { _, _ -> null } }
+        return CompletableFuture.allOf(*pending.toTypedArray()).thenCompose {
+            val endings = sessionManager.snapshot().filter { it.dungeonId in ids }.mapNotNull { session ->
+                val ended = sessionManager.endSession(session.sessionId, EndReason.ABANDONED) ?: return@mapNotNull null
+                finishSession(ended, registry.definitions[ended.dungeonId]?.worldName)
+            }
+            CompletableFuture.allOf(*(endings + stageEngine.pendingEnds(ids) + cleanups.filterValues { it in ids }.keys).toTypedArray())
+        }
+    }
     val slotPool = SlotPool<Location>()
     val sessionManager = SessionManager<Location>(slotPool)
     val worldProvisioner = DungeonWorldProvisioner(plugin)
@@ -59,8 +88,8 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
     val dungeonEntryGuard = com.tinyyana.hanatoki.world.DungeonEntryGuard(this)
     val texts = Texts()
     val rewardDispatcher = RewardDispatcher(plugin)
-    val actorController = ActorController(plugin)
-    val propController = PropController(plugin)
+    val actorController = ActorController(plugin) { sessionManager.sessionById(it) != null }
+    val propController = PropController(plugin) { sessionManager.sessionById(it) != null }
     val bossBars = SessionBossBars(plugin)
     val stageEngine = StageEngine(this)
 
@@ -135,7 +164,12 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         PlayerOp.dispatch(plugin, playerId) { cue.cue(playerId, cueId) }
     }
 
-    fun enter(dungeonId: String, players: List<Player>): EnterResult<Location> {
+    fun enter(dungeonId: String, players: List<Player>): EnterResult<Location> = synchronized(contentLifecycle.lock) {
+        enterInternal(dungeonId, players)
+    }
+
+    private fun enterInternal(dungeonId: String, players: List<Player>): EnterResult<Location> {
+        if (!isContentAccepting(dungeonId)) return EnterResult.NoSlot
         val def = registry.definitions[dungeonId]
             ?: return EnterResult.NoSlot
         val now = System.currentTimeMillis()
@@ -188,8 +222,13 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
      * 蒼櫻現況「沒有隊伍系統,誰站在場地裡就算誰」的直譯:進場、跨世界走進來、在裡面登入、
      * 在裡面死掉重生,全部走同一條路。回傳 true = 現在是(或本來就是)那座副本的成員。
      */
-    fun joinPersistentByWorld(playerId: UUID, worldName: String): Boolean {
+    fun joinPersistentByWorld(playerId: UUID, worldName: String): Boolean = synchronized(contentLifecycle.lock) {
+        joinPersistentInternal(playerId, worldName)
+    }
+
+    private fun joinPersistentInternal(playerId: UUID, worldName: String): Boolean {
         val dungeonId = persistentDungeonIdForWorld(worldName) ?: return false
+        if (!isContentAccepting(dungeonId)) return false
         val current = sessionManager.sessionOf(playerId)
         if (current != null) return current.dungeonId == dungeonId
         val def = registry.definitions[dungeonId] ?: return false
@@ -223,8 +262,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         val now = System.currentTimeMillis()
         val result = sessionManager.tick(now)
         for (e in result.ended) {
-            stageEngine.endFor(e.sessionId, e.reason.name)
-            handleSessionEnded(e.slotId, e.dungeonId, e.reason, e.memberIds)
+            finishSession(e)
         }
         // 2026-09-02 修:grace 逾時個別掉出去的成員(session 對其他人還活著)走跟 [kick] 一樣的
         // 「個人退場」通知——玩家離線中,`restoreForPlayer` 會安全地把還原排進 journal 等他回來
@@ -249,19 +287,13 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         //
         // ⚠ 送人回家一定要**等還原完成**才做(同 handleSessionEnded 的說明:跨世界傳送會
         //   讓還原派工撞上 retired,實測會讓玩家拿到空背包)。
-        instanceInventory.restoreForPlayer(playerId, "leave").whenComplete { _, _ ->
-            // 這個人一定要送出去,不論整局有沒有跟著結束——多人局裡其他人還在打,離開的那位
-            // 如果留在副本世界,他會站在一個沒有 session 綁定的場地裡看別人打(而且整局結束的
-            // diff 回滾會在他腳下發生)。
-            sendHome(playerId)
-        }
         if (ended == null) {
+            instanceInventory.restoreForPlayer(playerId, "leave").thenCompose { sendHome(playerId) }
             // session 還活著(還有別的成員):通知內容層,不要再往下走結束流程。
             if (session != null) stageEngine.notifyMemberLeft(session.sessionId, playerId, reason)
             return
         }
-        stageEngine.endFor(ended.sessionId, ended.reason.name)
-        handleSessionEnded(ended.slotId, ended.dungeonId, ended.reason, ended.memberIds)
+        finishSession(ended)
     }
 
     /** 某個 slot 的場地在哪個世界。判斷「玩家還在不在這一局的場地上」用。 */
@@ -281,14 +313,13 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         // 同 [kick]:成員表拿掉之後就查不到 session 了,先記著。
         val session = sessionManager.sessionOf(playerId)
         val ended = sessionManager.kick(playerId)
-        instanceInventory.restoreForPlayer(playerId, reason)
         if (ended == null) {
+            instanceInventory.restoreForPlayer(playerId, reason)
             // 多人局裡其他人還在打:內容層那份平行的成員登記表要跟著清(見 [kick])。
             if (session != null) stageEngine.notifyMemberLeft(session.sessionId, playerId, reason)
             return
         }
-        stageEngine.endFor(ended.sessionId, ended.reason.name)
-        handleSessionEnded(ended.slotId, ended.dungeonId, ended.reason, ended.memberIds)
+        finishSession(ended)
     }
 
     /** 這個世界是不是 HanaToki 自己的副本世界(定義裡 `world-create: true` 的那些)。 */
@@ -301,21 +332,32 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
      * 回傳的 future 在**傳送真的完成**之後才 complete,不是「派工完成」——場地回滾要等它
      * (見 [handleSessionEnded])。
      */
-    fun sendHome(playerId: UUID): CompletableFuture<Void> {
+    fun sendHome(playerId: UUID): CompletableFuture<Void> = sendHome(playerId, null)
+
+    private fun sendHome(playerId: UUID, drainingWorld: String?): CompletableFuture<Void> {
         val done = CompletableFuture<Void>()
         PlayerOp.dispatch(plugin, playerId) { player ->
-            if (!isDungeonWorld(player.world.name)) {
+            if (!isDungeonWorld(player.world.name) && player.world.name != drainingWorld) {
                 returnPoints.forget(playerId)
                 done.complete(null)
                 return@dispatch
             }
-            val destination = returnPoints.destinationFor(player)
+            val destination = if (drainingWorld == null) returnPoints.destinationFor(player) else {
+                returnPoints.take(playerId)?.takeIf { it.world.name != drainingWorld && !isDungeonWorld(it.world.name) }
+                    ?: player.respawnLocation?.takeIf { it.world.name != drainingWorld && !isDungeonWorld(it.world.name) }
+                    ?: plugin.server.worlds.firstOrNull { it.name != drainingWorld && !isDungeonWorld(it.name) }?.spawnLocation
+            }
             if (destination == null) {
                 plugin.logger.warning("[HanaToki] 找不到 ${player.name} 的返回點,也沒有任何非副本世界可送")
-                done.complete(null)
+                if (drainingWorld != null) done.completeExceptionally(IllegalStateException("No safe return world for $playerId"))
+                else done.complete(null)
                 return@dispatch
             }
-            player.teleportAsync(destination).whenComplete { _, _ -> done.complete(null) }
+            player.teleportAsync(destination).whenComplete { ok, error ->
+                if (error != null) done.completeExceptionally(error)
+                else if (ok != true) done.completeExceptionally(IllegalStateException("Return teleport failed: $playerId"))
+                else done.complete(null)
+            }
         }.whenComplete { _, _ ->
             // 玩家離線時 dispatch 立刻完成而 action 根本沒跑,上面的 done 不會有人 complete。
             if (plugin.server.getPlayer(playerId) == null) done.complete(null)
@@ -330,10 +372,8 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
             slotPool.free(slotId)
             return
         }
-        val members = session.memberIds()
-        members.forEach { sessionManager.kick(it) }
-        stageEngine.endFor(session.sessionId, EndReason.ADMIN_RESET.name)
-        handleSessionEnded(slotId, session.dungeonId, EndReason.ADMIN_RESET, members)
+        val ended = sessionManager.endSession(session.sessionId, EndReason.ADMIN_RESET) ?: return
+        finishSession(ended)
     }
 
     /**
@@ -391,8 +431,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
                 ),
             )
         }
-        stageEngine.endFor(sessionId, EndReason.RESOLVED.name)
-        handleSessionEnded(ended.slotId, ended.dungeonId, ended.reason, ended.memberIds)
+        finishSession(ended)
     }
 
     /**
@@ -423,7 +462,13 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         kick(playerId, resultKey)
     }
 
-    private fun handleSessionEnded(slotId: String, dungeonId: String, reason: EndReason, memberIds: List<UUID>) {
+    private fun finishSession(ended: com.tinyyana.hanatoki.instance.EndedSession, drainingWorld: String? = null): CompletableFuture<Void> =
+        handleSessionEnded(ended.slotId, ended.dungeonId, ended.reason, ended.memberIds,
+            stageEngine.endFor(ended.sessionId, ended.reason.name), drainingWorld)
+
+    private fun handleSessionEnded(slotId: String, dungeonId: String, reason: EndReason, memberIds: List<UUID>, stageEnd: CompletableFuture<Void>, drainingWorld: String?): CompletableFuture<Void> {
+        val cleanup = CompletableFuture<Void>()
+        cleanups[cleanup] = dungeonId
         // ⚠ 送人 → **等傳送真的落地** → 才回滾。
         //   專屬副本世界的回滾終點是虛空(void 生成),人還站在場地上就會直接往下掉。
         //   `sendHome` 的 future 綁的是 `teleportAsync` 的完成,不是「派工完成」,所以這個
@@ -436,15 +481,22 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         // 一個空背包。「先把東西還完再送人走」讓這個競態不存在。
         //
         // 回滾仍然排在最後:專屬副本世界回滾的終點是虛空,人還站在上面就會往下掉。
-        val restores = memberIds.map { instanceInventory.restoreForPlayer(it, "session-end-${reason.name.lowercase()}") }
-        CompletableFuture.allOf(*restores.toTypedArray()).whenComplete { _, _ ->
-            val sends = memberIds.map { sendHome(it) }
+        stageEnd.thenCompose {
+            val restores = memberIds.map { instanceInventory.restoreForPlayer(it, "session-end-${reason.name.lowercase()}") }
+            CompletableFuture.allOf(*restores.toTypedArray())
+        }.thenCompose {
+            val sends = memberIds.map { sendHome(it, drainingWorld) }
             CompletableFuture.allOf(*sends.toTypedArray())
-                .whenComplete { _, _ ->
+                .thenCompose {
                     sweepInstanceDrops(slotId)
                     rollbackAndRelease(slotId, dungeonId)
                 }
         }
+            .whenComplete { _, error ->
+                if (error == null) { cleanups.remove(cleanup); cleanup.complete(null) }
+                else cleanup.completeExceptionally(error)
+            }
+        return cleanup
     }
 
     /**
@@ -467,7 +519,8 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         }
     }
 
-    private fun rollbackAndRelease(slotId: String, dungeonId: String) {
+    internal fun rollbackAndRelease(slotId: String, dungeonId: String): CompletableFuture<Void> {
+        val done = CompletableFuture<Void>()
         val world = registry.definitions[dungeonId]?.let { plugin.server.getWorld(it.worldName) }
         val anchor = slotPool.anchorOf(slotId)
         // recorder 只在真的發生過 mutation 時才會被建立(diffRecorderFor 是 lazy)——沒有 recorder
@@ -480,27 +533,30 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
                 InstanceDispatch.submit(plugin, anchor) {
                     recorder.rollback(world).whenComplete { _, _ ->
                         sessionManager.releaseSlotAfterRollback(slotId)
+                        done.complete(null)
                     }
                 }
             }
             world != null && anchor != null -> {
                 // 没有 recorder = 這局沒有任何 mutation,沒有東西要回滾,直接釋放。
                 sessionManager.releaseSlotAfterRollback(slotId)
+                done.complete(null)
             }
             else -> {
                 // 真的找不到世界或 anchor(例如世界已卸載)——不阻塞收斂,直接釋放並記警告。
                 plugin.logger.warning("[HanaToki] slot=$slotId 結束時找不到世界或 anchor,略過回滾直接釋放")
                 sessionManager.releaseSlotAfterRollback(slotId)
+                done.complete(null)
             }
         }
+        return done
     }
 
     /** onDisable 收斂:凍結新進場已由呼叫端(HanaTokiPlugin)控制;這裡把所有 session 結為 abandoned。*/
     fun shutdownAll() {
         val ended = sessionManager.endAll(EndReason.ABANDONED)
         for (e in ended) {
-            stageEngine.endFor(e.sessionId, e.reason.name)
-            handleSessionEnded(e.slotId, e.dungeonId, e.reason, e.memberIds)
+            finishSession(e)
         }
         // ⚠ 一定要在最後、而且是同步的:上面那條路徑走的是 AsyncScheduler,插件停用時它會被
         //   取消,不保證跑得完。這一句把所有還沒收斂的 journal 同步標成 RESTORING,
@@ -588,7 +644,16 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
 
     // ---- DungeonAccess(外部 UI 的進出入口,見 api/DungeonAccess)----
 
-    override fun hasDungeon(dungeonId: String): Boolean = registry.definitions.containsKey(dungeonId)
+    override fun hasDungeon(dungeonId: String): Boolean = isContentAccepting(dungeonId) && registry.definitions.containsKey(dungeonId)
+
+    override fun listDungeons(): List<Map<String, String>> = synchronized(contentLifecycle.lock) { registry.definitions.values
+        .filter { !it.testOnly && isContentAccepting(it.id) }
+        .map { def -> java.util.HashMap<String, String>().apply {
+            put("id", def.id)
+            put("display", def.display)
+            put("description", def.description)
+            put("world", def.worldName)
+        } } }
 
     /**
      * 舊的布林進場入口。**語意沒有改**:回傳 true 仍然只代表「請求受理」,不代表傳送成功。
@@ -602,7 +667,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
      */
     override fun enterDungeon(playerId: UUID, dungeonId: String): Boolean {
         val player = plugin.server.getPlayer(playerId) ?: return false
-        if (!registry.definitions.containsKey(dungeonId)) return false
+        if (!hasDungeon(dungeonId)) return false
         // 客滿的同步預檢:留住舊呼叫端「false 就顯示客滿訊息」的路徑。這裡跟真正的配置之間
         // 有理論上的競態(預檢過了、配置時被別人搶走),那條路會走非同步的 NO_SLOT 分支並
         // 通知玩家,不會留下髒狀態。
@@ -614,7 +679,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
     override fun enterDungeonDuo(playerId: UUID, partnerId: UUID, dungeonId: String): Boolean {
         val player = plugin.server.getPlayer(playerId) ?: return false
         val partner = plugin.server.getPlayer(partnerId) ?: return false
-        if (!registry.definitions.containsKey(dungeonId)) return false
+        if (!hasDungeon(dungeonId)) return false
         if (!hasRoomFor(dungeonId, listOf(playerId, partnerId))) return false
         fireAndReport(dungeonEntry.enter(listOf(player, partner), dungeonId), listOf(playerId, partnerId))
         return true
@@ -624,7 +689,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         val ids = listOf(playerId, partner1Id, partner2Id)
         if (ids.toSet().size != 3) return false
         val players = ids.map { plugin.server.getPlayer(it) ?: return false }
-        if (!registry.definitions.containsKey(dungeonId)) return false
+        if (!hasDungeon(dungeonId)) return false
         if (!hasRoomFor(dungeonId, ids)) return false
         fireAndReport(dungeonEntry.enter(players, dungeonId), ids)
         return true

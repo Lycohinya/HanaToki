@@ -19,7 +19,7 @@ import java.util.concurrent.ConcurrentHashMap
  * (整個 HanaToki 一份、按 `"<sessionId>#<propId>"` 分鍵、spawn 派到目標座標所屬 region、
  * 之後的操作走實體自己的 EntityScheduler)——同一類問題用同一種寫法,不另發明第二套。
  */
-class PropController(private val plugin: Plugin) {
+class PropController(private val plugin: Plugin, private val sessionActive: java.util.function.Predicate<UUID>) {
 
     private val props = ConcurrentHashMap<String, Entity>()
 
@@ -32,12 +32,12 @@ class PropController(private val plugin: Plugin) {
 
     fun handleFor(sessionId: UUID): PropHandle = SessionPropHandle(sessionId)
 
-    fun despawnAllForSession(sessionId: UUID): CompletableFuture<Void> {
+    fun despawnAllForSession(sessionId: UUID): CompletableFuture<Void> = synchronized(props) {
         val prefix = "$sessionId#"
         val futures = props.keys.filter { it.startsWith(prefix) }.mapNotNull { k ->
             props.remove(k)?.let { entity -> WorldOp.dispatch(plugin, entity) { it.remove() } }
         }
-        return CompletableFuture.allOf(*futures.toTypedArray())
+        CompletableFuture.allOf(*futures.toTypedArray())
     }
 
     /** 擺設是不是副本生出來的(死亡掉落清除/debug 反查用,同 actor/encounter)。 */
@@ -88,6 +88,7 @@ class PropController(private val plugin: Plugin) {
             val k = key(sessionId, propId)
             props.remove(k)?.let { old -> WorldOp.dispatch(plugin, old) { it.remove() } }
             return WorldOp.dispatchAt(plugin, location) { loc ->
+                if (!sessionActive.test(sessionId)) return@dispatchAt
                 val world = loc.world ?: return@dispatchAt
                 val display = world.spawn(loc, ItemDisplay::class.java) { d ->
                     d.isPersistent = false
@@ -107,7 +108,7 @@ class PropController(private val plugin: Plugin) {
                     d.brightness = Display.Brightness(11, 15)
                     d.viewRange = 2.0f
                 }
-                props[k] = display
+                synchronized(props) { if (sessionActive.test(sessionId)) props[k] = display else display.remove() }
             }
         }
 
@@ -124,13 +125,14 @@ class PropController(private val plugin: Plugin) {
             val k = key(sessionId, propId)
             props.remove(k)?.let { old -> WorldOp.dispatch(plugin, old) { it.remove() } }
             return WorldOp.dispatchAt(plugin, location) { loc ->
+                if (!sessionActive.test(sessionId)) return@dispatchAt
                 val world = loc.world ?: return@dispatchAt
                 val display = world.spawn(loc, org.bukkit.entity.BlockDisplay::class.java) { d ->
                     d.isPersistent = false
                     d.block = data
                     d.setTeleportDuration(teleportDurationTicks.coerceIn(0, 59))
                 }
-                props[k] = display
+                synchronized(props) { if (sessionActive.test(sessionId)) props[k] = display else display.remove() }
             }
         }
 
@@ -146,6 +148,7 @@ class PropController(private val plugin: Plugin) {
             val k = key(sessionId, propId)
             props.remove(k)?.let { old -> WorldOp.dispatch(plugin, old) { it.remove() } }
             return WorldOp.dispatchAt(plugin, location) { loc ->
+                if (!sessionActive.test(sessionId)) return@dispatchAt
                 val world = loc.world ?: return@dispatchAt
                 val display = world.spawn(loc, org.bukkit.entity.BlockDisplay::class.java) { d ->
                     d.isPersistent = false
@@ -161,7 +164,7 @@ class PropController(private val plugin: Plugin) {
                     d.isGlowing = true
                     d.brightness = Display.Brightness(13, 15)
                 }
-                props[k] = display
+                synchronized(props) { if (sessionActive.test(sessionId)) props[k] = display else display.remove() }
             }
         }
 
@@ -188,6 +191,7 @@ class PropController(private val plugin: Plugin) {
             }
             props.remove(k)?.let { old -> WorldOp.dispatch(plugin, old) { it.remove() } }
             return WorldOp.dispatchAt(plugin, location) { loc ->
+                if (!sessionActive.test(sessionId)) return@dispatchAt
                 val world = loc.world ?: return@dispatchAt
                 val display = world.spawn(loc, org.bukkit.entity.TextDisplay::class.java) { d ->
                     d.isPersistent = false
@@ -197,7 +201,7 @@ class PropController(private val plugin: Plugin) {
                     d.alignment = org.bukkit.entity.TextDisplay.TextAlignment.CENTER
                     d.isSeeThrough = false
                 }
-                props[k] = display
+                synchronized(props) { if (sessionActive.test(sessionId)) props[k] = display else display.remove() }
             }
         }
 
@@ -210,6 +214,7 @@ class PropController(private val plugin: Plugin) {
             val k = key(sessionId, propId)
             props.remove(k)?.let { old -> WorldOp.dispatch(plugin, old) { it.remove() } }
             return WorldOp.dispatchAt(plugin, location) { loc ->
+                if (!sessionActive.test(sessionId)) return@dispatchAt
                 val world = loc.world ?: return@dispatchAt
                 val display = world.spawn(loc, ItemDisplay::class.java) { d ->
                     d.isPersistent = false
@@ -224,7 +229,7 @@ class PropController(private val plugin: Plugin) {
                     // 重開之後認得回來的唯一憑據,見 PropHandle.PART_TAG
                     d.addScoreboardTag(PropHandle.PART_TAG)
                 }
-                props[k] = display
+                synchronized(props) { if (sessionActive.test(sessionId)) props[k] = display else display.remove() }
             }
         }
 

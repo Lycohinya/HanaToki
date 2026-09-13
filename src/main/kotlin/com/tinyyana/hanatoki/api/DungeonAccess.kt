@@ -19,6 +19,9 @@ import java.util.concurrent.CompletableFuture
  */
 interface DungeonAccess {
 
+    /** Current content catalog. JDK values only; callers may overlay their own menu presentation. */
+    fun listDungeons(): List<Map<String, String>>
+
     /** 這個 id 有沒有對應的副本定義(選單要不要顯示「目前無法進入」)。 */
     fun hasDungeon(dungeonId: String): Boolean
 

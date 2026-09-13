@@ -86,11 +86,14 @@ interface DungeonBehavior {
 }
 
 object DungeonBehaviorRegistry {
-    private val behaviors = mutableMapOf<String, DungeonBehavior>()
+    private val behaviors = java.util.concurrent.ConcurrentHashMap<String, DungeonBehavior>()
 
     fun register(dungeonId: String, behavior: DungeonBehavior) {
         behaviors[dungeonId] = behavior
     }
 
     fun get(dungeonId: String): DungeonBehavior? = behaviors[dungeonId]
+
+    /** An old registration must never remove its replacement. */
+    fun unregister(dungeonId: String, expected: DungeonBehavior): Boolean = behaviors.remove(dungeonId, expected)
 }

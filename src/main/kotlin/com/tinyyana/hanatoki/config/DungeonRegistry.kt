@@ -68,6 +68,17 @@ class DungeonRegistry(
         loadFile(file, slotPool)
     }
 
+    fun unregister(dungeonId: String, expected: DungeonDefinition, slotPool: SlotPool<Location>) {
+        if (!definitions.remove(dungeonId, expected)) return
+        slotPool.slotIds(dungeonId).forEach {
+            interactionLocations.remove(it)
+            encounterLocations.remove(it)
+        }
+        slotPool.unregisterDungeon(dungeonId)
+        persistentDungeonIdByWorld.remove(expected.worldName, dungeonId)
+        // Keep session-world recovery protection after content unload: offline players still return home.
+    }
+
     private fun loadFile(file: File, slotPool: SlotPool<Location>) {
         if (!file.exists()) {
             logger.warning("[HanaToki] 副本定義檔不存在,略過:${file.path}")
