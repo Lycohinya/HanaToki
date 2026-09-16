@@ -14,6 +14,7 @@
 | Actor、Prop 與自訂世界生成器 | [§11–13](#11-actor-api) |
 | Check、Reward、Music 與額度 service | [§14–18](#14-check-api) |
 | 失敗語意與驗證清單 | [§19–20](#19-失敗與執行緒速查) |
+| Structure/Jigsaw 地圖資產、marker 與 generation 回收 | [§25](#25-map-asset-layer060) |
 
 ## 1. API 範圍與相容性
 
@@ -327,6 +328,7 @@ interface DungeonBehavior {
 | 方法 | 語意 |
 |---|---|
 | `mutate(location, Consumer<Block>)` | 到該座標 region 執行變更，先記錄原 block data，回傳完成 future |
+| `maps()` | Map Asset layer：放置 `MapLayout`、回傳 typed marker；見 [§25](#25-map-asset-layer060) |
 | `interactionLocation(id)` | 查已展開的絕對座標；未知 id 回 null |
 | `encounterLocation(id)` | 查已展開的絕對座標；未知 id 回 null |
 | `particles(location, particle, count, spreadX, spreadY, spreadZ, extra)` | 在座標 region 生成粒子 |
@@ -810,3 +812,63 @@ bypass 權限 `hanatoki.build` **預設 false，連 op 都沒有**：管理員�
    背包可能比注入前**多**幾樣。要守的是「該有的一件都沒少」與「局內物品沒有殘留」，不是相等。
 4. **難度會被別的測試留下來。** 走背包交易的那幾支刻意把 rig 設成 `peaceful` 且不還原；任何需要
    真的造成傷害的測試都必須自己宣告難度，否則接在它們後面跑就會看到「打不掉血」的連鎖假失敗。
+
+## 25. Map Asset layer（0.6.0）
+
+地圖來自外部資產，玩法 Kotlin 只拿 marker。固定地圖與 Jigsaw 組裝是同一個 `MapLayout`，放置、ownership 與回收走同一條路。
+
+### 資產
+
+| 型別 | 語意 |
+|---|---|
+| `MapAssetSource` | 只提供 bytes：`structure(ref)`、`templatePool(ref)`。官方資料夾、jar、未來玩家 Snapshot 都實作它；IO 不得在 tick thread 呼叫 |
+| `DirectoryMapAssetSource(root)` / `ClassLoaderMapAssetSource(loader, prefix)` | datapack `data/` 結構：`<ns>/structure/<path>.nbt`、`<ns>/worldgen/template_pool/<path>.json` |
+| `MapAssetLibrary(source)` | `template(ref)`、`pool(ref)`；不快取，換檔下一次讀即生效 |
+| `StructureTemplate` | 原版 Structure Block `.nbt`（單一 palette，DataVersion ≤ 4903）；身分 `MapAssetId(namespace, path, revision)`，revision 是內容 sha-256 前 16 hex |
+
+不放置：方塊實體內容（箱子物品、告示牌文字）與 `entities`，數量記在 `ignoredBlockEntities`／`ignoredEntities`。
+
+### Marker
+
+Structure Block 設 **Data** 模式，metadata 寫 `<kind> [key=value]...`，例如 `mob_spawn id=guard group=wave1 facing=south`。
+
+- kind：`player_spawn`、`mob_spawn`、`loot`、`door`、`trigger`；拼錯直接載入失敗，`#` 開頭是註解。
+- `facing` 隨模組旋轉；其他鍵原樣進 `MapMarker.properties`，`id` 另有捷徑 `MapMarker.id`。
+- marker 方塊放置時換成空氣。Marker 不含副本規則，生怪、loot、開門由內容插件決定。
+
+### Jigsaw 組裝
+
+`JigsawPlanner(library).plan(startRef, rotation, seed, maxPieces)` 照原版 jigsaw 欄位：父 `target` = 子 `name`、正面相對、`pool` 指 template pool（`minecraft:empty` 不外長）、jigsaw 放置時換成 `final_state`。模組不得重疊，所有可延伸接口都要接上，`maxPieces` 內組不出來就丟例外。同 seed + 同資產 revision 得到同一張圖。Template pool 只接受 `single_pool_element`／`legacy_single_pool_element`／`empty_pool_element`，`processors`／`projection` 暫不處理。
+
+沒有使用 NMS 原版 jigsaw：Paper/Lecithin 沒有公開 API，而且它無法接 per-chunk 派工與 ownership。
+
+### 放置與回收
+
+```kotlin
+override fun prepareStage(ctx: StageContext, stageId: String): CompletableFuture<Void> {
+    val a = ctx.anchor
+    return CompletableFuture.supplyAsync {
+        JigsawPlanner(library).plan(MapAssetRef("my_ns", "entrance"), StructureRotation.NONE, seed, 12)
+            .alignMarker(MarkerKind.PLAYER_SPAWN, MapPos(a.blockX, a.blockY, a.blockZ))
+    }.thenCompose { ctx.maps().place(it) }
+        .thenAccept { placed -> markers[ctx.sessionId] = placed.markers }
+}
+```
+
+| 方法 | 語意 |
+|---|---|
+| `MapLayout.single(template, origin, rotation)` | 固定地圖；旋轉以模組原點為軸，mirror 未支援 |
+| `layout.alignMarker(kind, pos)` / `translate(delta)` | 平移到世界座標 |
+| `ctx.maps().place(layout)` | 非 tick thread 先編好 per-chunk 格子與 `BlockData`，再經 `ChunkWaveRunner` 分波派到擁有各 chunk 的 region 寫入。回傳 `PlacedMap`（`generationId`、`markers`、`written`） |
+| `ctx.maps().release(generationId)` | 提前回收；常駐副本必須自己呼叫 |
+
+每次 place 是一個 generation，ledger 只記「放置前後不同」的格子。回收時現況**完整等於**當初放下的 `BlockData` 才還原，否則視為陌生修改保留（同 Material 不同狀態也算陌生）。
+
+- placement 失敗（方塊名錯、例外）：future exceptional 之前已回收已寫入的格子。
+- session 結束：`StageEngine.endFor` 立刻取消進行中的 placement 並拒收新的；送人回家與 diff 回滾之後、slot 釋放之前逆序回收所有 generation。
+- 已知限制：ledger 只在記憶體。關服或崩潰時回收 task 不保證跑完（與 diff 回滾相同），地圖會留在世界裡，而下一局 placement 不會認領與計畫相同的既有方塊。
+
+### Executable contract
+
+`test-structure`（`test-only`）與 `/hanatoki admin mapprobe <slotId> <fixed|jigsaw|foreign|fail|cancel> [seed]` 使用 jar 內 `map-assets/hanatoki_probe`，第一次使用時複製到 `plugins/HanaToki/map-assets/`。2026-09-16 真 Lecithin 26.2 驗收：固定模組 245/245 格讀回符合、3 模組組裝 900/900、跨 2 個 region section；陌生修改保留 2 格；注入失敗與取消後場地回到放置前；bot 走完 session 後回收 573/573 格並釋放 slot，log 無 region ownership 違規。
+

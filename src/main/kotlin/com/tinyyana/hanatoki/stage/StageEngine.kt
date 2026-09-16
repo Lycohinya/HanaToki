@@ -127,6 +127,9 @@ class StageEngine(private val core: HanaTokiCore) {
         // 內容層的收尾回呼。session 登記表這時可能已經被拿掉(resolveSession 先 endSession 再
         // 到這裡),所以 dungeon/slot/anchor 不能再從 sessionManager 查,要從 startFor 記的那份拿。
         val meta = sessionMeta.remove(sessionId)
+        // 進行中的地圖 placement 立刻取消(prepare 才會早點結束),之後這個 session 的 place 一律拒收。
+        // 真正的方塊回收在 slot 釋放前(HanaTokiCore.rollbackAndRelease)。
+        meta?.let { core.mapPlacements.closeSession(it.slotId, sessionId) }
         val finished = CompletableFuture<Void>()
         if (meta != null) {
             val entry = meta.dungeonId to finished
@@ -297,6 +300,20 @@ private class StageContextImpl(
         chunks: List<com.tinyyana.hanatoki.folia.ChunkCoord>,
         action: java.util.function.Consumer<org.bukkit.Chunk>,
     ) = com.tinyyana.hanatoki.folia.ChunkWaveRunner(core.plugin, world, chunks, { chunk -> action.accept(chunk) }).start()
+
+    override fun maps(): com.tinyyana.hanatoki.map.MapHandle = object : com.tinyyana.hanatoki.map.MapHandle {
+        override fun place(layout: com.tinyyana.hanatoki.map.MapLayout): CompletableFuture<com.tinyyana.hanatoki.map.PlacedMap> {
+            val world = anchor.world
+                ?: return CompletableFuture.failedFuture(IllegalStateException("anchor 沒有世界"))
+            if (engine.stateOf(sessionId) !== state) {
+                return CompletableFuture.failedFuture(java.util.concurrent.CancellationException("session 已結束"))
+            }
+            return core.mapPlacements.place(slotId, sessionId, world, layout)
+        }
+
+        override fun release(generationId: UUID): CompletableFuture<com.tinyyana.hanatoki.map.MapCleanupReport> =
+            core.mapPlacements.release(slotId, generationId)
+    }
 
     override fun readBlock(location: Location, reader: java.util.function.Consumer<org.bukkit.block.Block>) =
         WorldOp.dispatch(core.plugin, location) { block -> reader.accept(block) }

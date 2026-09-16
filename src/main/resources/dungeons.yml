@@ -127,3 +127,29 @@ dungeons:
     interactions:
       # 撤離板。刻意不在 (0,0,0):那是 anchor 本身,也是進場落點。
       extract: { x: 3, y: 0, z: 3, kind: physical }
+
+  # Map Asset layer 的 executable contract(2026-09-16)。不是正式內容:
+  # prepare 時用 plugins/HanaToki/map-assets/hanatoki_probe 的 Structure 資產做 Jigsaw 組裝
+  # (入口 → 走廊 → 終點),入口的 player_spawn 對齊 anchor;走到終點的 trigger marker = 結束,
+  # session 收斂時引擎自動回收這次 generation。
+  test-structure:
+    test-only: true
+    display: "試作地圖(測試)"
+    description: "Structure/Jigsaw 地圖資產 probe,不是正式內容"
+    world: hanatoki_probe
+    slot-count: 2
+    slot-spacing-blocks: 1024
+    anchor-offset-z: 20000
+    # 落點放在方塊中心,對齊入口 player_spawn marker(門洞只有一格寬,站在方塊角落會卡門框)
+    spawn-offset-x: 0.5
+    spawn-offset-z: 0.5
+    session-time-limit-seconds: 180
+    solo-cap: 1
+    party-cap: 2
+    reconnect-grace-seconds: 30
+    tags: [probe]
+    expected-minutes: "1"
+    stages:
+      start: run
+      list:
+        run: {}

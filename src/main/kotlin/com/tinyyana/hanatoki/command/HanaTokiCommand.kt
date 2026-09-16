@@ -189,7 +189,14 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
                     sender.sendMessage("§7diffrollback 完成:slot=$slotId reverted=$before pending=${core.diffRecorderFor(slotId).pendingCount()}")
                 }
             }
-            else -> sender.sendMessage("§7/hanatoki admin <list|kick <player>|reset <slotId>|debug|poses|journal|restore <instanceId>|difftest <slotId> <count>|diffrollback <slotId>>")
+            // Map Asset layer 的 executable contract(見 testcontent/StructureProbe),只在隔離測試環境用。
+            "mapprobe" -> {
+                val slotId = args.getOrNull(2)
+                val mode = args.getOrNull(3)?.lowercase()
+                if (slotId == null || mode == null) { sender.sendMessage("§c用法:/hanatoki admin mapprobe <slotId> <fixed|jigsaw|foreign|fail|cancel> [seed]"); return }
+                com.tinyyana.hanatoki.testcontent.StructureProbe.run(core, sender, slotId, mode, args.getOrNull(4)?.toLongOrNull() ?: 0L)
+            }
+            else -> sender.sendMessage("§7/hanatoki admin <list|kick <player>|reset <slotId>|debug|poses|journal|restore <instanceId>|difftest <slotId> <count>|diffrollback <slotId>|mapprobe <slotId> <mode>>")
         }
     }
 
@@ -202,7 +209,7 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
         1 -> listOf("enter", "leave", "admin").filter { it.startsWith(args[0].lowercase()) }
         2 -> when (args[0].lowercase()) {
             "enter" -> core.registry.definitions.keys.toList()
-            "admin" -> listOf("list", "kick", "reset", "debug", "poses", "journal", "restore", "content-disable", "content-reload")
+            "admin" -> listOf("list", "kick", "reset", "debug", "poses", "journal", "restore", "content-disable", "content-reload", "mapprobe")
                 .filter { it.startsWith(args[1].lowercase()) }
             else -> emptyList()
         }

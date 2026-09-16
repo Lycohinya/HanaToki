@@ -41,6 +41,7 @@ class HanaTokiPlugin : JavaPlugin() {
         DungeonBehaviorRegistry.register("test-puzzle", PuzzleTestBehavior())
         DungeonBehaviorRegistry.register("test-combat", CombatTestBehavior())
         DungeonBehaviorRegistry.register("test-roguelike", RoguelikeShellBehavior())
+        DungeonBehaviorRegistry.register("test-structure", com.tinyyana.hanatoki.testcontent.StructureProbeBehavior(this))
 
         val command = HanaTokiCommand(core)
         getCommand("hanatoki")?.setExecutor(command)

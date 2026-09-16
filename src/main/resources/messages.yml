@@ -26,6 +26,9 @@ instance-item:
 roguelike:
   entry: "<gray>試作 Run 開始。這裡沒有時限,身上是這一局的裝備——踩上銅板就撤離。</gray>"
   extracted: "<green>撤離成功,永久背包已經還給你</green>"
+# Map Asset layer probe(test-structure)的文字。
+map-probe:
+  ready: "<gray>試作地圖:{pieces} 個模組、{markers} 個標記。走到終點房的標記上結束</gray>"
 # 副本世界的地形保護(DungeonWorldGuard)。任何副本共用。
 dungeon:
   no-build: "<gray>這裡的地形動不了</gray>"

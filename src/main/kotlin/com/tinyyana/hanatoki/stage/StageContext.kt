@@ -99,6 +99,17 @@ interface StageContext {
      */
     fun readBlock(location: Location, reader: Consumer<Block>): CompletableFuture<Void>
 
+    /**
+     * Map Asset layer:把 Structure 資產(固定地圖或 Jigsaw 組裝出來的 [com.tinyyana.hanatoki.map.MapLayout])
+     * 放進這一局的世界,回傳 typed marker。
+     *
+     * 典型用法:`prepareStage` 裡在非 tick thread 讀資產/排版 → `maps().place(layout)` → 把回傳的
+     * marker 記在內容層 → `onStageEnter` 開始用。每次 place 是一個 generation,session 結束時引擎在
+     * diff 回滾之後、slot 釋放之前自動回收(只還原仍屬於該 generation 的格子)。
+     * 常駐副本(不走 slot 釋放)要自己在不需要時 [com.tinyyana.hanatoki.map.MapHandle.release]。
+     */
+    fun maps(): com.tinyyana.hanatoki.map.MapHandle
+
     /** interaction/encounter 定義的相對偏移已在載入時展開成絕對座標,這裡查表用。 */
     fun interactionLocation(interactionId: String): Location?
     fun encounterLocation(encounterId: String): Location?

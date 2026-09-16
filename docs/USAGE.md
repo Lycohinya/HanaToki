@@ -296,8 +296,9 @@ hanaToki.core.texts.merge(
 | `/hanatoki admin poses` | 查目前核心接受的 Mannequin pose 名稱 |
 | `/hanatoki admin difftest <slotId> [count]` | 測試方塊 diff 記錄；預設 500，僅限隔離環境 |
 | `/hanatoki admin diffrollback <slotId>` | 回滾 difftest 留下的變更；僅限隔離環境 |
+| `/hanatoki admin mapprobe <slotId> <fixed\|jigsaw\|foreign\|fail\|cancel> [seed]` | Map Asset layer 放置／回收 probe；slot 必須空著，結果以 `HT-MAP-PROBE ... PASS/FAIL` 寫進 console；僅限隔離環境 |
 
-`reset`、`difftest` 與 `diffrollback` 會修改 runtime 世界狀態。先確認 slot id 與測試環境，不要在正式玩家正在使用的場地上試。
+`reset`、`difftest`、`diffrollback` 與 `mapprobe` 會修改 runtime 世界狀態。先確認 slot id 與測試環境，不要在正式玩家正在使用的場地上試。
 
 ## 8. 日常檢查與故障排除
 

@@ -109,6 +109,9 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
     val foreignItemWarden = ForeignItemWarden(plugin, instanceInventory, texts)
     private val dungeonEntry = DungeonEntry(this)
 
+    /** Map Asset layer 的 generation 登記處(見 [com.tinyyana.hanatoki.map.MapPlacements])。 */
+    val mapPlacements = com.tinyyana.hanatoki.map.MapPlacements(plugin)
+
     // 每個 slot 一份 diff recorder(Phase 1 場地重置的最小單位是 slot,不是整個 instance)。
     private val diffRecorders = ConcurrentHashMap<String, WorldDiffRecorder>()
 
@@ -532,24 +535,33 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
             world != null && anchor != null && recorder != null -> {
                 InstanceDispatch.submit(plugin, anchor) {
                     recorder.rollback(world).whenComplete { _, _ ->
-                        sessionManager.releaseSlotAfterRollback(slotId)
-                        done.complete(null)
+                        releaseAfterMapCleanup(slotId, done)
                     }
                 }
             }
             world != null && anchor != null -> {
                 // 没有 recorder = 這局沒有任何 mutation,沒有東西要回滾,直接釋放。
-                sessionManager.releaseSlotAfterRollback(slotId)
-                done.complete(null)
+                releaseAfterMapCleanup(slotId, done)
             }
             else -> {
                 // 真的找不到世界或 anchor(例如世界已卸載)——不阻塞收斂,直接釋放並記警告。
                 plugin.logger.warning("[HanaToki] slot=$slotId 結束時找不到世界或 anchor,略過回滾直接釋放")
-                sessionManager.releaseSlotAfterRollback(slotId)
-                done.complete(null)
+                releaseAfterMapCleanup(slotId, done)
             }
         }
         return done
+    }
+
+    /**
+     * 地圖 generation 排在 diff 回滾**之後**回收:diff 記的是蓋在地圖上面的局內變化,先還原它們,
+     * 地圖格子才會回到「仍屬於 generation」的狀態。回收失敗只記錄(MapPlacements 已寫 severe log),
+     * 不把 slot 永久卡住——與 diff 回滾失敗的既有處理一致。
+     */
+    private fun releaseAfterMapCleanup(slotId: String, done: CompletableFuture<Void>) {
+        mapPlacements.cleanupSlot(slotId).whenComplete { _, _ ->
+            sessionManager.releaseSlotAfterRollback(slotId)
+            done.complete(null)
+        }
     }
 
     /** onDisable 收斂:凍結新進場已由呼叫端(HanaTokiPlugin)控制;這裡把所有 session 結為 abandoned。*/
