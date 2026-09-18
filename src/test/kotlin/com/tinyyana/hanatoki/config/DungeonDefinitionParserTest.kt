@@ -305,4 +305,73 @@ class DungeonDefinitionParserTest {
             )
         }
     }
+
+    @Test
+    fun `沒寫 carry-in 就是空清單,既有副本行為不變`() {
+        val inv = assertNotNull(minimal(mapOf("instance-inventory" to mapOf("enabled" to true))).instanceInventory)
+        assertTrue(inv.carryIn.isEmpty())
+    }
+
+    @Test
+    fun `carry-in 解析出 namespace key 與 max`() {
+        val inv = assertNotNull(
+            minimal(
+                mapOf(
+                    "instance-inventory" to mapOf(
+                        "enabled" to true,
+                        "carry-in" to listOf(mapOf("pdc" to "lophinya:kit", "max" to 1)),
+                    ),
+                ),
+            ).instanceInventory,
+        )
+        assertEquals(1, inv.carryIn.size)
+        assertEquals("lophinya", inv.carryIn[0].pdcNamespace)
+        assertEquals("kit", inv.carryIn[0].pdcKey)
+        assertEquals(1, inv.carryIn[0].max)
+    }
+
+    @Test
+    fun `carry-in 沒寫 max 預設 1`() {
+        val inv = assertNotNull(
+            minimal(
+                mapOf(
+                    "instance-inventory" to mapOf(
+                        "enabled" to true,
+                        "carry-in" to listOf(mapOf("pdc" to "lophinya:kit")),
+                    ),
+                ),
+            ).instanceInventory,
+        )
+        assertEquals(1, inv.carryIn[0].max)
+    }
+
+    @Test
+    fun `carry-in 缺 pdc 是設定錯誤`() {
+        assertFailsWith<DungeonDefinitionParser.DefinitionError> {
+            minimal(mapOf("instance-inventory" to mapOf("carry-in" to listOf(mapOf("max" to 1)))))
+        }
+    }
+
+    @Test
+    fun `carry-in 的 pdc 不是 namespace colon key 格式是設定錯誤`() {
+        assertFailsWith<DungeonDefinitionParser.DefinitionError> {
+            minimal(mapOf("instance-inventory" to mapOf("carry-in" to listOf(mapOf("pdc" to "kit")))))
+        }
+        assertFailsWith<DungeonDefinitionParser.DefinitionError> {
+            minimal(mapOf("instance-inventory" to mapOf("carry-in" to listOf(mapOf("pdc" to "lophinya:")))))
+        }
+    }
+
+    @Test
+    fun `carry-in 的 max 小於 1 是設定錯誤`() {
+        assertFailsWith<DungeonDefinitionParser.DefinitionError> {
+            minimal(
+                mapOf(
+                    "instance-inventory" to mapOf(
+                        "carry-in" to listOf(mapOf("pdc" to "lophinya:kit", "max" to 0)),
+                    ),
+                ),
+            )
+        }
+    }
 }

@@ -169,7 +169,24 @@ data class DynamicEncounterLimits(
 data class InstanceInventoryDef(
     /** 進場時發給玩家的局內起始物品。空 = 進場後就是一個空背包(Roguelike 從零開始)。 */
     val loadout: List<LoadoutEntry> = emptyList(),
+    /** 可帶入物規則(見 [CarryInDef])。空 = 不做任何攜入,既有副本行為完全不變。 */
+    val carryIn: List<CarryInDef> = emptyList(),
 )
+
+/**
+ * 可帶入物(2026-09):`activate()` 拍快照清空時,符合這條規則的 [org.bukkit.inventory.ItemStack]
+ * **不進永久背包快照**,留在 run 背包裡並蓋上 instance 章,不會被 [com.tinyyana.hanatoki.inventory.ForeignItemWarden]
+ * 當成局外物品收走。`restore()` 時,沒有被 `ExpeditionCustody.deploy` 消耗掉的那些會原樣回到
+ * 玩家的永久背包(不重複、不消失);消耗掉的則不會再出現。
+ *
+ * 判定只看 [pdcNamespace]:[pdcKey] 這一個 PDC(`PersistentDataType.STRING`)key **存不存在**,
+ * 值本身被當成這件物品的識別 id(必須能解析成 UUID,否則這一件不算數)——這是
+ * `com.tinyyana.hanatoki.expedition.ExpeditionCustody` 的識別依據,見該套件的 KDoc。
+ *
+ * @param max 同一條規則同時可攜入的件數上限。超過上限的候選物品**照舊進快照**(不特殊處理,
+ *   不報錯——寫多少都合法,只是超過的那些沒有攜入資格)。
+ */
+data class CarryInDef(val pdcNamespace: String, val pdcKey: String, val max: Int = 1)
 
 /**
  * 一格局內起始物品。**只有 material/amount/slot/顯示名**——這是引擎層的最小表達能力,
@@ -343,7 +360,22 @@ object DungeonDefinitionParser {
             }
             LoadoutEntry(material, amount, slot, (e["name"] as? String)?.takeIf { it.isNotBlank() })
         }
-        return InstanceInventoryDef(loadout)
+        val carryInRaw = m["carry-in"] as? List<*> ?: emptyList<Any?>()
+        val carryIn = carryInRaw.mapIndexed { index, entry ->
+            @Suppress("UNCHECKED_CAST")
+            val e = entry as? Map<String, Any?>
+                ?: throw DefinitionError("dungeons.$id.instance-inventory.carry-in[$index] 格式錯誤")
+            val pdc = (e["pdc"] as? String)?.takeIf { it.isNotBlank() }
+                ?: throw DefinitionError("dungeons.$id.instance-inventory.carry-in[$index].pdc 缺少必要欄位")
+            val parts = pdc.split(":", limit = 2)
+            if (parts.size != 2 || parts[0].isBlank() || parts[1].isBlank()) {
+                throw DefinitionError("dungeons.$id.instance-inventory.carry-in[$index].pdc=$pdc 必須是 namespace:key 格式")
+            }
+            val max = (e["max"] as? Number)?.toInt() ?: 1
+            if (max < 1) throw DefinitionError("dungeons.$id.instance-inventory.carry-in[$index].max 必須 >= 1")
+            CarryInDef(parts[0], parts[1], max)
+        }
+        return InstanceInventoryDef(loadout, carryIn)
     }
 
     private fun parseStageGraph(dungeonId: String, raw: Map<String, Any?>): StageGraph {

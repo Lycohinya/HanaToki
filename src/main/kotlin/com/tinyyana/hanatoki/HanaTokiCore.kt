@@ -11,6 +11,8 @@ import com.tinyyana.hanatoki.check.CheckResolver
 import com.tinyyana.hanatoki.config.DungeonDefinition
 import com.tinyyana.hanatoki.config.DungeonRegistry
 import com.tinyyana.hanatoki.config.ExecutionMode
+import com.tinyyana.hanatoki.expedition.ExpeditionCustody
+import com.tinyyana.hanatoki.expedition.ExpeditionCustodyImpl
 import com.tinyyana.hanatoki.folia.InstanceDispatch
 import com.tinyyana.hanatoki.folia.PlayerOp
 import com.tinyyana.hanatoki.folia.WorldOp
@@ -100,10 +102,15 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
      * 資料層。這是 HanaToki 第一份持久化狀態,理由與範圍見 [InstanceJournal] 的 KDoc。
      */
     val instanceJournal = InstanceJournal(java.io.File(plugin.dataFolder, "instances"), plugin.logger)
-    val instanceInventory = InstanceInventoryService(plugin, instanceJournal) { playerId ->
-        sessionManager.sessionOf(playerId)?.activeMembers() ?: emptyList()
-    }
+    val instanceInventory = InstanceInventoryService(
+        plugin,
+        instanceJournal,
+        sessionMembersOf = { playerId -> sessionManager.sessionOf(playerId)?.activeMembers() ?: emptyList() },
+    )
     val instanceItemGuard = InstanceItemGuard(plugin, instanceInventory, texts)
+
+    /** 整備包的托管與首次有效部署,見 `com.tinyyana.hanatoki.expedition.ExpeditionCustody`。 */
+    val expeditionCustody: ExpeditionCustody = ExpeditionCustodyImpl(instanceInventory)
 
     /** 反向防線:局外物品不准留在局內背包裡(見 [ForeignItemWarden])。 */
     val foreignItemWarden = ForeignItemWarden(plugin, instanceInventory, texts)

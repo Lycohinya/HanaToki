@@ -77,9 +77,36 @@ object JournalRecovery {
 }
 
 /**
+ * 一件被 `instance-inventory.carry-in` 帶進 run 的物品(見 [com.tinyyana.hanatoki.config.CarryInDef]、
+ * `com.tinyyana.hanatoki.expedition.ExpeditionCustody`)。
+ *
+ * [itemBytes] 是 extraction 當下(還沒蓋 instance 章)的原始物品——用來:
+ * ① 沒被消耗時,restore() 原樣還給玩家永久背包;
+ * ② 若剛好符合整備包契約(namespace=`lophinya`/key=`kit`),`startRestore` 用它重讀六個
+ *    PDC key 組見證(不需要玩家還在線、也不需要重新掃背包)。
+ *
+ * [consumed] 由 `ExpeditionCustody.deploy` 成功時翻成 true(冪等的第一次)；[deployEncounterId]
+ * 只有那時才會有值,用來組見證的 `encounterId`。
+ */
+class CarryInEscrow(
+    val kitId: UUID,
+    val pdcNamespace: String,
+    val pdcKey: String,
+    val itemBytes: ByteArray,
+    val consumed: Boolean = false,
+    val deployEncounterId: String? = null,
+) {
+    fun withConsumed(encounterId: String): CarryInEscrow =
+        CarryInEscrow(kitId, pdcNamespace, pdcKey, itemBytes, consumed = true, deployEncounterId = encounterId)
+}
+
+/**
  * 一筆進場交易的持久化紀錄。
  *
  * @param snapshot 進場前的永久背包(見 [InventorySnapshot]);[JournalState.PREPARED] 時是 null。
+ *   有 [carryIn] 規則的副本,這份快照**不含**已經被帶進 run 的那幾格(見 [CarryInEscrow])。
+ * @param carryIn 這筆交易攜入 run、由引擎托管的物品(見 [CarryInEscrow])。空 = 這座副本沒有
+ *   `carry-in` 規則,或這一格都沒有符合的物品——既有副本行為完全不變。
  */
 class JournalRecord(
     val instanceId: UUID,
@@ -92,15 +119,19 @@ class JournalRecord(
     val updatedAtMs: Long,
     val returnPoint: ReturnPointData?,
     val snapshot: InventorySnapshot?,
+    val carryIn: List<CarryInEscrow> = emptyList(),
 ) {
     fun withState(state: JournalState, nowMs: Long): JournalRecord =
-        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, nowMs, returnPoint, snapshot)
+        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, nowMs, returnPoint, snapshot, carryIn)
 
     fun withSnapshot(snapshot: InventorySnapshot, state: JournalState, nowMs: Long): JournalRecord =
-        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, nowMs, returnPoint, snapshot)
+        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, nowMs, returnPoint, snapshot, carryIn)
 
     fun withSession(sessionId: UUID?, nowMs: Long): JournalRecord =
-        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, nowMs, returnPoint, snapshot)
+        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, nowMs, returnPoint, snapshot, carryIn)
+
+    fun withCarryIn(carryIn: List<CarryInEscrow>): JournalRecord =
+        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, updatedAtMs, returnPoint, snapshot, carryIn)
 }
 
 /** 返回點:純資料,重啟後也還在(記憶體版的 `ReturnPointRegistry` 重啟就空了)。 */
@@ -259,6 +290,17 @@ class InstanceJournal(private val dir: File, private val logger: Logger) {
             out.writeInt(s.itemBytes.size)
             out.write(s.itemBytes)
         }
+        out.writeInt(r.carryIn.size)
+        for (c in r.carryIn) {
+            writeUuid(out, c.kitId)
+            out.writeUTF(c.pdcNamespace)
+            out.writeUTF(c.pdcKey)
+            out.writeInt(c.itemBytes.size)
+            out.write(c.itemBytes)
+            out.writeBoolean(c.consumed)
+            out.writeBoolean(c.deployEncounterId != null)
+            c.deployEncounterId?.let { out.writeUTF(it) }
+        }
     }
 
     private fun decode(input: DataInputStream): JournalRecord? {
@@ -295,9 +337,21 @@ class InstanceJournal(private val dir: File, private val logger: Logger) {
         } else {
             null
         }
+        val carryInCount = input.readInt()
+        val carryIn = (0 until carryInCount).map {
+            val kitId = readUuid(input)
+            val pdcNamespace = input.readUTF()
+            val pdcKey = input.readUTF()
+            val len = input.readInt()
+            val bytes = ByteArray(len)
+            input.readFully(bytes)
+            val consumed = input.readBoolean()
+            val deployEncounterId = if (input.readBoolean()) input.readUTF() else null
+            CarryInEscrow(kitId, pdcNamespace, pdcKey, bytes, consumed, deployEncounterId)
+        }
         return JournalRecord(
             instanceId, playerId, dungeonId, slotId, sessionId, state,
-            createdAt, updatedAt, returnPoint, snapshot,
+            createdAt, updatedAt, returnPoint, snapshot, carryIn,
         )
     }
 
@@ -310,6 +364,8 @@ class InstanceJournal(private val dir: File, private val logger: Logger) {
 
     private companion object {
         const val MAGIC = 0x48544A31 // "HTJ1"
-        const val FORMAT_VERSION = 1
+
+        /** 2(2026-09):新增 [JournalRecord.carryIn]。舊版檔案版本不符會被 [decode] 拒絕並隔離,見類別 KDoc。 */
+        const val FORMAT_VERSION = 2
     }
 }

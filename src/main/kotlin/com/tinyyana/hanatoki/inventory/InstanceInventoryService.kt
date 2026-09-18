@@ -1,12 +1,21 @@
 package com.tinyyana.hanatoki.inventory
 
+import com.tinyyana.hanatoki.config.CarryInDef
 import com.tinyyana.hanatoki.config.InstanceInventoryDef
+import com.tinyyana.hanatoki.expedition.ExpeditionCustodyDecision
+import com.tinyyana.hanatoki.expedition.ExpeditionDispatcher
+import com.tinyyana.hanatoki.expedition.ExpeditionEvidence
+import com.tinyyana.hanatoki.expedition.ExpeditionKitPdc
+import com.tinyyana.hanatoki.expedition.ExpeditionKitReader
+import com.tinyyana.hanatoki.expedition.KitStatus
 import com.tinyyana.hanatoki.folia.PlayerOp
 import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.Material
+import org.bukkit.NamespacedKey
 import org.bukkit.entity.Player
 import org.bukkit.inventory.ItemStack
+import org.bukkit.persistence.PersistentDataType
 import org.bukkit.plugin.Plugin
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
@@ -60,6 +69,8 @@ class InstanceInventoryService(
     private val journal: InstanceJournal,
     /** 見 [InstanceItemsImpl] 的同名參數:多人副本的隊友合法性判定要轉接 `SessionManager`。 */
     sessionMembersOf: (UUID) -> Collection<UUID> = { emptyList() },
+    /** 整備包見證出口(見 `com.tinyyana.hanatoki.expedition.ExpeditionSink`)。 */
+    private val expeditionDispatcher: ExpeditionDispatcher = ExpeditionDispatcher(plugin),
 ) {
 
     /** instanceId -> 目前這筆交易的紀錄(磁碟上那份的記憶體鏡像)。 */
@@ -172,12 +183,77 @@ class InstanceInventoryService(
 
         return captured.thenCompose { snapshot ->
             if (snapshot == null) return@thenCompose CompletableFuture.completedFuture(false)
-            val clearing = base.withSnapshot(snapshot, JournalState.CLEARING, System.currentTimeMillis())
+            // 可帶入物(見 CarryInDef):從**這次捕捉到的**永久背包快照裡挑出符合規則的格位——
+            // 一定要用剛拍到的這份而不是上一次 attempt 的舊快照,重拍代表背包在這期間變過。
+            val extraction = extractCarryIn(snapshot, def.carryIn)
+            val clearing = base.withSnapshot(extraction.strippedSnapshot, JournalState.CLEARING, System.currentTimeMillis())
+                .withCarryIn(extraction.escrow)
             runAsync { journal.writeSync(clearing) }.thenCompose { written ->
                 if (!written) return@thenCompose CompletableFuture.completedFuture(false)
+                // `matches()` 仍然要對**完整**快照比對(見下方 applyInstanceInventory):清空之前
+                // 玩家背包裡還躺著那件即將被攜入的物品,拿 stripped 版本去比對永遠對不上。
                 applyInstanceInventory(clearing, snapshot, def, attempt)
             }
         }
+    }
+
+    /** [extractCarryIn] 的結果:寫進 journal 的那份(已挖空攜入格位)快照 + 攜入清單。 */
+    private class CarryExtraction(val strippedSnapshot: InventorySnapshot, val escrow: List<CarryInEscrow>)
+
+    /**
+     * 純選取邏輯([CarryInSelection])包一層 Bukkit PDC 讀取:把快照解回 [ItemStack] 陣列,
+     * 用規則挑出要攜入的格位,回傳「已挖空那些格位的快照」+ 每一件的 [CarryInEscrow]。
+     *
+     * `itemBytes` 存的是**這一刻、還沒蓋 instance 章**的物品——之後不論是 restore 時原樣還給
+     * 玩家,還是 startRestore 重讀六個 `lophinya:*` key 組見證,都不需要玩家在線或重新掃背包。
+     */
+    private fun extractCarryIn(snapshot: InventorySnapshot, rules: List<CarryInDef>): CarryExtraction {
+        if (rules.isEmpty()) return CarryExtraction(snapshot, emptyList())
+        val decoded = try {
+            ItemStack.deserializeItemsFromBytes(snapshot.itemBytes)
+        } catch (e: Exception) {
+            return CarryExtraction(snapshot, emptyList())
+        }
+        val candidates = decoded.indices.mapNotNull { i ->
+            val stack = decoded[i] ?: return@mapNotNull null
+            if (stack.type == Material.AIR) return@mapNotNull null
+            val meta = stack.itemMeta ?: return@mapNotNull null
+            val pdc = meta.persistentDataContainer
+            val values = rules.mapNotNull { rule ->
+                val key = NamespacedKey(rule.pdcNamespace, rule.pdcKey)
+                pdc.get(key, PersistentDataType.STRING)?.let { "${rule.pdcNamespace}:${rule.pdcKey}" to it }
+            }.toMap()
+            if (values.isEmpty()) null else CarryCandidate(i, values)
+        }
+        // 整備包契約(lophinya:kit)是一條特別嚴格的規則:除了「識別值存在且是合法 UUID」
+        // (CarryInSelection 已經檢查過)之外,契約要求的其餘六個 PDC key 也都要能解析,
+        // 一個缺就整份 fail closed——這件物品當成沒有比對到攜入規則,照舊留在永久背包快照裡。
+        // 這不影響其他非 lophinya:kit 的一般攜入規則(它們只認識別值)。
+        val selections = CarryInSelection.select(candidates, rules).filter { sel ->
+            if (sel.rule.pdcNamespace != ExpeditionKitPdc.NAMESPACE || sel.rule.pdcKey != ExpeditionKitPdc.KIT) {
+                true
+            } else {
+                val stack = decoded[sel.slotIndex]
+                stack != null && ExpeditionKitReader.read(stack) != null
+            }
+        }
+        if (selections.isEmpty()) return CarryExtraction(snapshot, emptyList())
+
+        val chosenSlots = selections.map { it.slotIndex }.toSet()
+        val escrow = selections.map { sel ->
+            val stack = decoded[sel.slotIndex]!!
+            CarryInEscrow(
+                kitId = sel.kitId,
+                pdcNamespace = sel.rule.pdcNamespace,
+                pdcKey = sel.rule.pdcKey,
+                itemBytes = ItemStack.serializeItemsAsBytes(arrayOf(stack)),
+            )
+        }
+        val stripped = Array(decoded.size) { i ->
+            if (i in chosenSlots) ItemStack(Material.AIR) else (decoded[i] ?: ItemStack(Material.AIR))
+        }
+        val strippedBytes = ItemStack.serializeItemsAsBytes(stripped)
+        return CarryExtraction(InventorySnapshot(strippedBytes, snapshot.heldSlot, snapshot.contentsSize), escrow)
     }
 
     private fun applyInstanceInventory(
@@ -200,7 +276,11 @@ class InstanceInventoryService(
                 outcome.complete(1)
                 return@dispatch
             }
-            p.inventory.clear()
+            // 攜入物品(見 CarryInDef):先在**原地**蓋上 instance 章,再清空——不能先 clear()
+            // 整個背包,那樣會把還沒蓋章的攜入物品跟其他東西一起清掉。上面的 matches() 已經
+            // 確認背包跟捕捉快照當下完全一致,所以這裡用同一組識別值一定找得到同一件物品。
+            markCarryInPlace(p, clearing.carryIn, clearing.instanceId.toString())
+            clearNonCarryInSlots(p, clearing.instanceId.toString())
             p.inventory.heldItemSlot = 0
             applyLoadout(p, def, clearing.instanceId.toString())
             outcome.complete(0)
@@ -250,7 +330,61 @@ class InstanceInventoryService(
             // 局內起始裝備一律蓋 instance 標記——沒蓋的話它就是永久物品,玩家帶得出去。
             items.mark(stack, instanceId)
             val slot = entry.slot
-            if (slot != null) player.inventory.setItem(slot, stack) else player.inventory.addItem(stack)
+            val occupied = slot != null && player.inventory.getItem(slot)?.type?.let { it != Material.AIR } == true
+            if (slot != null && !occupied) {
+                player.inventory.setItem(slot, stack)
+            } else {
+                if (occupied) {
+                    plugin.logger.warning(
+                        "[HanaToki] instance=$instanceId 局內起始裝備槽位 $slot 已被攜入物品占用,改放進背包空位",
+                    )
+                }
+                player.inventory.addItem(stack)
+            }
+        }
+    }
+
+    /**
+     * 把 [carryIn] 裡的每一件物品,在它**現在所在的格位**蓋上 instance 章。
+     *
+     * 不靠記憶體裡的 slot index([CarryInSelection] 選取時的格位)——重新用識別值([items] 的
+     * PDC key)在目前背包裡比對一次,原因見 [captureAndPersist] 的 `matches()` 保證:走到這裡
+     * 之前已經確認背包內容跟捕捉快照當下逐位元組相同,所以識別值一定能唯一對回同一件物品,
+     * 而不依賴「格位沒有在兩次讀取之間被搬動」這個更弱的假設。
+     */
+    private fun markCarryInPlace(player: Player, carryIn: List<CarryInEscrow>, instanceId: String) {
+        if (carryIn.isEmpty()) return
+        val pending = carryIn.associateBy { it.kitId }.toMutableMap()
+        val contents = player.inventory.contents
+        for (slot in contents.indices) {
+            if (pending.isEmpty()) break
+            val stack = contents[slot] ?: continue
+            if (stack.type == Material.AIR) continue
+            val meta = stack.itemMeta ?: continue
+            val matchedKit = pending.keys.firstOrNull { kitId ->
+                val escrow = pending.getValue(kitId)
+                val key = NamespacedKey(escrow.pdcNamespace, escrow.pdcKey)
+                meta.persistentDataContainer.get(key, PersistentDataType.STRING) == kitId.toString()
+            } ?: continue
+            items.mark(stack, instanceId)
+            player.inventory.setItem(slot, stack)
+            pending.remove(matchedKit)
+        }
+        if (pending.isNotEmpty()) {
+            plugin.logger.warning(
+                "[HanaToki] instance=$instanceId 有 ${pending.size} 件攜入物品在蓋章前就從背包消失(不應發生,已略過)",
+            )
+        }
+    }
+
+    /** 清空背包裡**沒有**被蓋上這個 instance 章的格位——已經蓋章的攜入物品原地保留。 */
+    private fun clearNonCarryInSlots(player: Player, instanceId: String) {
+        val inventory = player.inventory
+        val contents = inventory.contents
+        for (slot in contents.indices) {
+            val stack = contents[slot] ?: continue
+            if (items.isInstanceScoped(stack) && items.instanceIdOf(stack) == instanceId) continue
+            inventory.setItem(slot, null)
         }
     }
 
@@ -325,10 +459,57 @@ class InstanceInventoryService(
             return abort(instanceId).thenApply { true }
         }
 
+        // 見證出口只在「第一次」從 ACTIVE/CLEARING 轉進 RESTORING 時發一次(見 ExpeditionSink
+        // 的 KDoc)。已經是 RESTORING 的話代表這是同一筆交易的重試/第二條收斂路徑撞進來
+        // (見本函式呼叫端 [restore] 的說明),不能再發一次——不然同一個 kit 會被見證兩次。
+        if (record.state != JournalState.RESTORING) {
+            dispatchExpeditionEvidence(record, System.currentTimeMillis())
+        }
+
         val restoring = record.withState(JournalState.RESTORING, System.currentTimeMillis())
         records[instanceId] = restoring
         return runAsync { journal.writeSync(restoring) }.thenCompose {
             writeSnapshotBack(restoring, reason, attempt = 0)
+        }
+    }
+
+    /**
+     * 對這筆交易攜入的每一個整備包(`pdc == lophinya:kit`)各發一次見證,不論有沒有被
+     * [consumeCarriedKit] 消耗過(用 `deployed` 分辨)。額度([RewardQuotaLookup])用完
+     * **不會**擋這裡——見證出口跟獎勵發放是兩條完全獨立的路徑,這個函式從頭到尾不查任何
+     * quota 型別。
+     */
+    private fun dispatchExpeditionEvidence(record: JournalRecord, resolvedAtMs: Long) {
+        for (escrow in record.carryIn) {
+            if (escrow.pdcNamespace != ExpeditionKitPdc.NAMESPACE || escrow.pdcKey != ExpeditionKitPdc.KIT) continue
+            val stack = try {
+                ItemStack.deserializeItemsFromBytes(escrow.itemBytes).getOrNull(0)
+            } catch (e: Exception) {
+                null
+            }
+            val data = stack?.let { ExpeditionKitReader.read(it) }
+            if (data == null) {
+                plugin.logger.warning(
+                    "[HanaToki] instance=${record.instanceId} kitId=${escrow.kitId} 見證前重讀整備包資料失敗(不應發生,已放棄這筆見證)",
+                )
+                continue
+            }
+            expeditionDispatcher.dispatch(
+                ExpeditionEvidence(
+                    kitId = escrow.kitId,
+                    deskId = data.deskId,
+                    packRevision = data.packRevision,
+                    ability = data.ability,
+                    product = data.product,
+                    playerId = record.playerId,
+                    dungeonId = record.dungeonId,
+                    encounterId = escrow.deployEncounterId ?: "",
+                    deployed = escrow.consumed,
+                    runId = record.sessionId,
+                    packedAtMs = data.packedAtMs,
+                    resolvedAtMs = resolvedAtMs,
+                ),
+            )
         }
     }
 
@@ -370,7 +551,11 @@ class InstanceInventoryService(
         // 但嚴重程度差很多:前者是常態,後者要人看。
         val done = CompletableFuture<Boolean?>()
         PlayerOp.dispatch(plugin, player) { p ->
-            done.complete(InventorySnapshot.restore(p, snapshot))
+            val ok = InventorySnapshot.restore(p, snapshot)
+            // 沒被消耗掉的攜入物品原樣還回來(見 CarryInDef)。放在快照覆蓋**之後**——
+            // `inv.contents = target` 是整組覆蓋,先放的話會被這一步蓋掉。
+            if (ok) restoreUnconsumedCarryIn(p, record.instanceId, record.carryIn)
+            done.complete(ok)
         }.whenComplete { _, _ -> done.complete(null) }
         return done.thenCompose { ok ->
             if (ok == null) {
@@ -412,6 +597,112 @@ class InstanceInventoryService(
         }
         if (scheduled == null) next.complete(false)
         return next
+    }
+
+    /**
+     * 把 [carryIn] 裡**沒被消耗**的物品原樣加回玩家永久背包(見 [ExpeditionCustodyDecision.shouldReturn])。
+     * 已消耗的不處理——它們已經在 [consumeCarriedKit] 裡被真的移除了,這裡不重建。
+     *
+     * `escrow.itemBytes` 是 extraction 當下、還沒蓋 instance 章的物品,所以不需要額外脫章。
+     * 背包滿了放不下的話丟在玩家腳下,而不是靜靜遺失。
+     */
+    private fun restoreUnconsumedCarryIn(player: Player, instanceId: UUID, carryIn: List<CarryInEscrow>) {
+        for (escrow in carryIn) {
+            if (!ExpeditionCustodyDecision.shouldReturn(KitStatus(escrow.kitId, escrow.consumed))) continue
+            val stack = try {
+                ItemStack.deserializeItemsFromBytes(escrow.itemBytes).getOrNull(0)
+            } catch (e: Exception) {
+                null
+            }
+            if (stack == null || stack.type == Material.AIR) {
+                plugin.logger.warning("[HanaToki] instance=$instanceId kitId=${escrow.kitId} 攜入物品還原時解不開,已遺失")
+                continue
+            }
+            val leftover = player.inventory.addItem(stack)
+            if (leftover.isNotEmpty()) {
+                leftover.values.forEach { player.world.dropItemNaturally(player.location, it) }
+            }
+        }
+    }
+
+    // ---- ExpeditionCustody(整備包首次有效部署,見 com.tinyyana.hanatoki.expedition) ------
+
+    /** 這位玩家目前這次 run 帶進來、還沒消耗的整備包 kitId。沒有進行中的交易就回空清單。 */
+    fun carriedKitsOf(playerId: UUID): List<UUID> {
+        val instanceId = activeByPlayer[playerId] ?: return emptyList()
+        val record = records[instanceId] ?: return emptyList()
+        return ExpeditionCustodyDecision.carried(expeditionKitStatusesOf(record))
+    }
+
+    private fun expeditionKitStatusesOf(record: JournalRecord): List<KitStatus> =
+        record.carryIn
+            .filter { it.pdcNamespace == ExpeditionKitPdc.NAMESPACE && it.pdcKey == ExpeditionKitPdc.KIT }
+            .map { KitStatus(it.kitId, it.consumed) }
+
+    /**
+     * 首次有效消耗(見 `ExpeditionCustody.deploy`)。**先物理移除、後更新 record**——中間丟例外
+     * 的話寧可留下「物品沒了但帳沒記到」這種需要人工核對的窄縫,也不要反過來(記了帳但物品
+     * 還在,等於免費複製一份效果)。
+     *
+     * ⚠ **刻意同步、不派工到 [PlayerOp]**:呼叫端(內容插件的 `DungeonBehavior` callback,
+     * 典型情境是這位玩家自己觸發的 interaction)本來就已經在這位玩家所屬的 region 序列執行區
+     * 執行(Folia 對玩家觸發的事件本來就派在該玩家自己的 region)——在那個情境裡用
+     * `PlayerOp.dispatch` 再派工一次、卻要同步等它完成,會在同一條執行緒上等一個只能靠這條
+     * 執行緒自己继续 tick 才會被排到的任務,等於自我鎖死。**呼叫端的責任**:只在觸發這次部署
+     * 的那位玩家自己的 callback 裡呼叫,不要從計時器、其他玩家的 callback,或任何不保證是
+     * 這位玩家所屬 region 的地方呼叫這個方法。
+     *
+     * ⚠ 已知窄縫:如果這個呼叫跟 `restore()` 在同一個 tick 內對同一個 instance 同時觸發
+     * (玩家在部署整備包的同一瞬間斷線/被踢/逾時),`records` 的最終狀態可能跟物理背包狀態
+     * 有一瞬間的落差(見下面的 `computeIfPresent` 保護與其後的 warning log)。這個窗口需要
+     * 兩件事在同一刻撞在一起,機率極低,目前接受這個限制而不是為它加一整條跨 instance 的
+     * 序列化佇列。
+     */
+    fun consumeCarriedKit(playerId: UUID, kitId: UUID, encounterId: String): Boolean {
+        val instanceId = activeByPlayer[playerId] ?: return false
+        val record = records[instanceId] ?: return false
+        if (!ExpeditionCustodyDecision.canDeploy(record.state, expeditionKitStatusesOf(record), kitId)) return false
+        val escrow = record.carryIn.firstOrNull { it.kitId == kitId } ?: return false
+        val player = plugin.server.getPlayer(playerId) ?: return false
+
+        if (!removeCarryInItem(player, instanceId.toString(), escrow)) return false
+
+        val updated = records.computeIfPresent(instanceId) { _, current ->
+            if (current.state != JournalState.ACTIVE) current
+            else current.withCarryIn(current.carryIn.map { if (it.kitId == kitId) it.withConsumed(encounterId) else it })
+        }
+        val committed = updated?.carryIn?.firstOrNull { it.kitId == kitId }?.consumed == true
+        if (!committed) {
+            plugin.logger.warning(
+                "[HanaToki] instance=$instanceId kitId=$kitId 物品已物理移除,但 instance 狀態已變更,消耗紀錄未落地(已知窄縫,見 consumeCarriedKit KDoc)",
+            )
+            return false
+        }
+        runAsync { journal.writeSync(updated) }.whenComplete { ok, _ ->
+            if (ok != true) {
+                plugin.logger.warning(
+                    "[HanaToki] instance=$instanceId kitId=$kitId 消耗狀態寫入 journal 失敗(記憶體已更新,崩潰重啟後這件可能被誤判成未消耗而重新退回)",
+                )
+            }
+        }
+        return true
+    }
+
+    /** 在玩家背包裡找到這個 instance 章 + 這個 kitId 的那一件並移除。找不到回 false。 */
+    private fun removeCarryInItem(player: Player, instanceId: String, escrow: CarryInEscrow): Boolean {
+        val inventory = player.inventory
+        val contents = inventory.contents
+        val key = NamespacedKey(escrow.pdcNamespace, escrow.pdcKey)
+        for (slot in contents.indices) {
+            val stack = contents[slot] ?: continue
+            if (stack.type == Material.AIR) continue
+            if (!items.isInstanceScoped(stack) || items.instanceIdOf(stack) != instanceId) continue
+            val raw = stack.itemMeta?.persistentDataContainer?.get(key, PersistentDataType.STRING) ?: continue
+            if (raw != escrow.kitId.toString()) continue
+            inventory.setItem(slot, null)
+            return true
+        }
+        return false
     }
 
     /** 這筆交易持久化下來的返回點(重啟後記憶體登記表是空的,靠這個把人送回去)。 */

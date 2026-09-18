@@ -34,6 +34,7 @@ class InstanceJournalTest {
         snapshot: InventorySnapshot? = null,
         sessionId: UUID? = null,
         returnPoint: ReturnPointData? = ReturnPointData("world", 1.5, 64.0, -2.5, 90f, 10f),
+        carryIn: List<CarryInEscrow> = emptyList(),
     ) = JournalRecord(
         instanceId = instanceId,
         playerId = UUID.randomUUID(),
@@ -45,7 +46,37 @@ class InstanceJournalTest {
         updatedAtMs = 2_000L,
         returnPoint = returnPoint,
         snapshot = snapshot,
+        carryIn = carryIn,
     )
+
+    @Test
+    fun `carryIn 攜入清單來回不失真`() {
+        val kitId = UUID.randomUUID()
+        val original = record(
+            carryIn = listOf(
+                CarryInEscrow(kitId, "lophinya", "kit", byteArrayOf(5, 6, 7), consumed = false),
+                CarryInEscrow(UUID.randomUUID(), "lophinya", "kit", byteArrayOf(1), consumed = true, deployEncounterId = "enc-1"),
+            ),
+        )
+        assertTrue(journal.writeSync(original))
+        val read = assertNotNull(journal.read(original.instanceId))
+        assertEquals(2, read.carryIn.size)
+        val unconsumed = read.carryIn.first { it.kitId == kitId }
+        assertFalse(unconsumed.consumed)
+        assertNull(unconsumed.deployEncounterId)
+        assertContentEquals(byteArrayOf(5, 6, 7), unconsumed.itemBytes)
+        val consumed = read.carryIn.first { it.kitId != kitId }
+        assertTrue(consumed.consumed)
+        assertEquals("enc-1", consumed.deployEncounterId)
+    }
+
+    @Test
+    fun `沒有攜入物的既有紀錄照舊來回`() {
+        val original = record()
+        assertTrue(journal.writeSync(original))
+        val read = assertNotNull(journal.read(original.instanceId))
+        assertTrue(read.carryIn.isEmpty())
+    }
 
     @Test
     fun `寫入後讀得回完全一樣的內容`() {

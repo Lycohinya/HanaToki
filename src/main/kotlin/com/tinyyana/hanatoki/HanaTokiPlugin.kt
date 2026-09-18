@@ -93,6 +93,13 @@ class HanaTokiPlugin : JavaPlugin() {
             this,
             ServicePriority.Normal,
         )
+        // 整備包的托管與首次有效部署,見 expedition/ExpeditionCustody。
+        server.servicesManager.register(
+            com.tinyyana.hanatoki.expedition.ExpeditionCustody::class.java,
+            core.expeditionCustody,
+            this,
+            ServicePriority.Normal,
+        )
 
         logger.info("[HanaToki] 已啟用")
     }
