@@ -425,6 +425,39 @@ private class StageContextImpl(
         }
     }
 
+    override fun applyEffectToMember(playerId: UUID, effectKey: String, durationTicks: Int, amplifier: Int) {
+        val key = org.bukkit.NamespacedKey.fromString(effectKey)
+        val type = key?.let { org.bukkit.Registry.EFFECT.get(it) }
+        if (type == null) {
+            core.plugin.logger.warning("[HanaToki] 未知的 PotionEffectType「$effectKey」,這次效果略過")
+            return
+        }
+        PlayerOp.dispatch(core.plugin, playerId) { player ->
+            player.addPotionEffect(
+                org.bukkit.potion.PotionEffect(type, durationTicks, amplifier, true, false, true),
+            )
+        }
+    }
+
+    override fun pushMembersFrom(location: Location, radius: Double, strength: Double, lift: Double) {
+        val radiusSq = radius * radius
+        activeMembers().forEach { playerId ->
+            PlayerOp.dispatch(core.plugin, playerId) { player ->
+                val here = player.location
+                if (here.world != location.world) return@dispatch
+                if (here.distanceSquared(location) > radiusSq) return@dispatch
+                val dx = here.x - location.x
+                val dz = here.z - location.z
+                val dist = Math.hypot(dx, dz)
+                // 正好重疊時沒有水平方向可推,只給垂直分量——不要除以零,也不要隨便挑一個方向,
+                // 那會讓「站在正中央」變成一個玩家無法預測的擲骰。
+                val vx = if (dist < 1.0E-4) 0.0 else dx / dist * strength
+                val vz = if (dist < 1.0E-4) 0.0 else dz / dist * strength
+                player.velocity = player.velocity.clone().add(org.bukkit.util.Vector(vx, lift, vz))
+            }
+        }
+    }
+
     override fun membersWithin(location: Location, radius: Double): CompletableFuture<List<UUID>> {
         val radiusSq = radius * radius
         val hits = java.util.concurrent.ConcurrentLinkedQueue<UUID>()

@@ -191,6 +191,42 @@ interface StageContext {
     fun damageMembersWithin(location: Location, radius: Double, amount: Double, damageTypeKey: String)
 
     /**
+     * 給某位在場成員一個藥水效果。
+     *
+     * 存在理由：內容層要表達「你現在抱著東西，走不快」「這片霧讓你看不遠」這類**狀態**時，
+     * 手上只有傷害與訊息兩種工具——前者把狀態說成扣血，後者只是文字。
+     * 效果本身是原版就有的東西，缺的只是一條 region-safe 的派工路徑。
+     *
+     * [effectKey] 是 `PotionEffectType` 的 namespaced key（例如 `"minecraft:slowness"`）；
+     * 解析不了時記警告並略過，不讓一個打錯的字串把整段演出吃掉。
+     *
+     * ⚠ 跟其他對玩家的操作同一條規則：派工到該玩家自己的 EntityScheduler，
+     * 不從 anchor region 直接碰可能在別的 region 的玩家。
+     */
+    fun applyEffectToMember(playerId: UUID, effectKey: String, durationTicks: Int, amplifier: Int)
+
+    /**
+     * 把 [location] 半徑 [radius] 內的在場成員**往外推**。
+     *
+     * ## 為什麼需要這個
+     *
+     * [damageMembersWithin] 只能表達「這裡很痛」。有一類內容的威脅本質是**位置**而不是數值——
+     * 水脈脈衝沿著走廊推過來、爆風把人掀離平台、守衛的橫掃把人掃出圈外。
+     * 只有傷害可用的話，內容層唯一能表達「你不該站在這裡」的手段就是把數字調高，
+     * 於是所有威脅最後都退化成 DPS 檢定（2026-09-19 洄雨別院的懸渠迴廊逼出來的缺口）。
+     *
+     * 方向是從 [location] 指向該玩家的水平方向；正好重疊時只給垂直分量，不會除以零。
+     *
+     * ⚠ 跟 [damageMembersWithin] 同一條安全性理由：方向與距離判定在**每位玩家自己的**
+     * EntityScheduler task 內做，讀的是他自己 region 的座標。從 anchor region 直接改別人的
+     * velocity 是 ARCH §5.1 一再修正過的同一類錯誤。
+     *
+     * @param strength 水平推力（格/tick 的速度分量；1.0 已經相當強，多數用途在 0.3–0.8）
+     * @param lift 垂直分量（正值往上抬一點，讓推開看起來像被沖走而不是貼地滑行）
+     */
+    fun pushMembersFrom(location: Location, radius: Double, strength: Double, lift: Double)
+
+    /**
      * ARCH §2「Trigger:進入區域」的原語:回傳 [location] 半徑 [radius] 內的在場成員。
      *
      * 與 [damageMembersWithin] 同一條安全性理由——距離判定在每位玩家自己的 EntityScheduler
