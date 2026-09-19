@@ -77,6 +77,87 @@ object JournalRecovery {
 }
 
 /**
+ * 「這筆交易的整備包見證要不要發」——抽成不碰 Bukkit 的純函數,理由跟 [JournalRecovery] 一樣:
+ * 這是 2026-09 稽核問題 1 的核心判斷,值得被單元測試直接打,不是只能靠拔電源驗證。
+ *
+ * 判斷**故意只看 [JournalRecord.evidenceDispatched]**,不看 [JournalRecord.state]。舊版判斷式
+ * 是 `state != JournalState.RESTORING`——這在 `InstanceInventoryService.shutdownFlush()`
+ * 把 state 直接跳成 RESTORING 卻忘記呼叫發送時,會讓下次啟動的這個判斷誤判成「已經發過」,
+ * 見證永久遺失。獨立欄位不會被別的地方的 state 轉換意外改到。
+ */
+object ExpeditionEvidenceGuard {
+    fun shouldDispatch(record: JournalRecord): Boolean = !record.evidenceDispatched
+}
+
+/**
+ * 「整備包首次有效消耗」的認領 + 補償邏輯(2026-09 稽核問題 3 的修法)——從
+ * `InstanceInventoryService.consumeCarriedKit` 抽出來,理由跟 [JournalRecovery]/
+ * [ExpeditionEvidenceGuard] 一樣:這段只碰 [java.util.concurrent.ConcurrentHashMap] 跟純資料
+ * 型別,不需要真的起一個 Bukkit `Player` 就能單元測試「認領跟移除的順序對不對」。
+ *
+ * ## 為什麼是「先認領、後移除」
+ *
+ * 舊版是「先物理移除、後記帳」:物品先從背包挖掉,`computeIfPresent` 才檢查 record 還是不是
+ * ACTIVE——跟 `restore()` 撞車時記帳可能失敗,那時物品已經不在背包裡了,只留一行 warning,
+ * 沒有任何補償,是「物品消失但契約沒有 commit」的窄縫。
+ *
+ * 這裡反過來:[attempt] 先用 `computeIfPresent` 認領(state 不是 ACTIVE,或這個 kit 已經被
+ * 認領過,一律直接失敗,不呼叫 [removeItem]——背包從頭到尾不會被碰)。認領成功之後才呼叫
+ * [removeItem] 真的去移除;如果那時候找不到(代表背包在這個極窄的窗口內被 `restore()` 的
+ * `setContents` 整組覆蓋掉),就把剛剛的認領**原地退回去**再回傳失敗——玩家沒有虧任何東西
+ * (物品本來就已經因為 restore 而不在他手上了,不是被這次呼叫拿走的),呼叫端看到失敗也
+ * 不會發部署效果,不會出現「拿到效果又拿回物品」的免費複製。
+ */
+object CarryInConsumption {
+    /**
+     * @param removeItem 呼叫端提供的「去背包裡找到並移除這件物品」動作,回傳有沒有真的找到。
+     * @return 消耗成功時的最終紀錄(供呼叫端寫回 journal);任何一步失敗都回 null,呼叫端一律
+     *   當成「這次部署沒有發生」處理,不需要额外補償——背包狀態要嘛完全沒被動過,要嘛已經在
+     *   這裡被復原。
+     */
+    fun attempt(
+        records: java.util.concurrent.ConcurrentHashMap<UUID, JournalRecord>,
+        instanceId: UUID,
+        kitId: UUID,
+        encounterId: String,
+        removeItem: () -> Boolean,
+    ): JournalRecord? {
+        val claimed = records.computeIfPresent(instanceId) { _, current ->
+            if (current.state != JournalState.ACTIVE) {
+                current
+            } else if (current.carryIn.firstOrNull { it.kitId == kitId }?.consumed == true) {
+                current
+            } else {
+                current.withCarryIn(current.carryIn.map { if (it.kitId == kitId) it.withConsumed(encounterId) else it })
+            }
+        }
+        val committed = claimed?.carryIn?.firstOrNull { it.kitId == kitId }
+        if (committed == null || committed.consumed != true || committed.deployEncounterId != encounterId) {
+            // 認領失敗:record 已經不是 ACTIVE(收斂搶先了),或這個 kit 已經被認領過
+            // (重複呼叫)。兩種都是「這次部署沒有發生」,不是異常,不需要補償。
+            return null
+        }
+
+        if (removeItem()) return claimed
+
+        // 認領成功但找不到物品可以移除:退回剛剛的認領,只退「還是我們那筆」的情況
+        // (比對 encounterId)——如果這中間又被別的路徑動過,不要憑空蓋掉別人寫的結果。
+        records.computeIfPresent(instanceId) { _, current ->
+            current.withCarryIn(
+                current.carryIn.map {
+                    if (it.kitId == kitId && it.deployEncounterId == encounterId) {
+                        CarryInEscrow(it.kitId, it.pdcNamespace, it.pdcKey, it.itemBytes)
+                    } else {
+                        it
+                    }
+                },
+            )
+        }
+        return null
+    }
+}
+
+/**
  * 一件被 `instance-inventory.carry-in` 帶進 run 的物品(見 [com.tinyyana.hanatoki.config.CarryInDef]、
  * `com.tinyyana.hanatoki.expedition.ExpeditionCustody`)。
  *
@@ -107,6 +188,18 @@ class CarryInEscrow(
  *   有 [carryIn] 規則的副本,這份快照**不含**已經被帶進 run 的那幾格(見 [CarryInEscrow])。
  * @param carryIn 這筆交易攜入 run、由引擎托管的物品(見 [CarryInEscrow])。空 = 這座副本沒有
  *   `carry-in` 規則,或這一格都沒有符合的物品——既有副本行為完全不變。
+ * @param evidenceDispatched 整備包見證出口(`ExpeditionSink`)有沒有已經對這筆交易發過(2026-09
+ *   稽核問題 1 的修法)。**故意獨立於 [state]**:舊版把「有沒有發過見證」蓋在
+ *   `state != RESTORING` 這個判斷上,而 `shutdownFlush()` 會把 state 直接跳成 [JournalState.RESTORING]
+ *   卻從來沒呼叫發送——下次啟動時發送守衛看到 state 已經是 RESTORING,就永久跳過那筆見證
+ *   (見 `InstanceInventoryService.startRestore` 的說明)。拆成獨立欄位之後,見證「有沒有發」
+ *   跟背包交易「走到哪一步」是兩件事,`shutdownFlush()` 忘記發送不會再讓見證憑空消失
+ *   ——下次啟動時 [evidenceDispatched] 仍是 false,補送就會照常發生。
+ *
+ *   預設 `false`:讀到沒有這個欄位的舊格式紀錄(見 [InstanceJournal] FORMAT_VERSION 2 以下)
+ *   時一律當作「還沒發過」,這跟舊版「state != RESTORING 才發」的既有行為完全一致
+ *   (舊版所有走到 RESTORING 之前的紀錄本來就还没发过見證),不會讓已經發過的見證重發、
+ *   也不會改變任何背包還原的位元。
  */
 class JournalRecord(
     val instanceId: UUID,
@@ -120,18 +213,23 @@ class JournalRecord(
     val returnPoint: ReturnPointData?,
     val snapshot: InventorySnapshot?,
     val carryIn: List<CarryInEscrow> = emptyList(),
+    val evidenceDispatched: Boolean = false,
 ) {
     fun withState(state: JournalState, nowMs: Long): JournalRecord =
-        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, nowMs, returnPoint, snapshot, carryIn)
+        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, nowMs, returnPoint, snapshot, carryIn, evidenceDispatched)
 
     fun withSnapshot(snapshot: InventorySnapshot, state: JournalState, nowMs: Long): JournalRecord =
-        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, nowMs, returnPoint, snapshot, carryIn)
+        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, nowMs, returnPoint, snapshot, carryIn, evidenceDispatched)
 
     fun withSession(sessionId: UUID?, nowMs: Long): JournalRecord =
-        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, nowMs, returnPoint, snapshot, carryIn)
+        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, nowMs, returnPoint, snapshot, carryIn, evidenceDispatched)
 
     fun withCarryIn(carryIn: List<CarryInEscrow>): JournalRecord =
-        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, updatedAtMs, returnPoint, snapshot, carryIn)
+        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, updatedAtMs, returnPoint, snapshot, carryIn, evidenceDispatched)
+
+    /** 見證已經發送(或已經確定不需要再發)——標記完之後就跟 [state] 的變化完全無關了。 */
+    fun withEvidenceDispatched(dispatched: Boolean): JournalRecord =
+        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, updatedAtMs, returnPoint, snapshot, carryIn, dispatched)
 }
 
 /** 返回點:純資料,重啟後也還在(記憶體版的 `ReturnPointRegistry` 重啟就空了)。 */
@@ -301,13 +399,19 @@ class InstanceJournal(private val dir: File, private val logger: Logger) {
             out.writeBoolean(c.deployEncounterId != null)
             c.deployEncounterId?.let { out.writeUTF(it) }
         }
+        out.writeBoolean(r.evidenceDispatched)
     }
 
     private fun decode(input: DataInputStream): JournalRecord? {
         if (input.readInt() != MAGIC) return null
         val version = input.readInt()
-        if (version != FORMAT_VERSION) {
-            logger.warning("[HanaToki] journal 格式版本 $version 不是目前的 $FORMAT_VERSION")
+        // 3(2026-09):新增 [JournalRecord.evidenceDispatched]。2 仍然接受——只是少讀最後一個
+        // boolean,見下方 `evidenceDispatched` 的預設值。**這是刻意放寬**:格式版本 2 的紀錄
+        // 是稽核問題 1(見證關服遺失)真正修好之前寫下的,一律當作「還沒發過見證」重新補送才是
+        // 正確行為,見 [JournalRecord.evidenceDispatched] 的 KDoc。版本 1 以下(沒有 carryIn)
+        // 太舊,繼續拒絕並隔離。
+        if (version != FORMAT_VERSION && version != LEGACY_FORMAT_VERSION) {
+            logger.warning("[HanaToki] journal 格式版本 $version 不是目前的 $FORMAT_VERSION,也不是可相容讀取的舊版 $LEGACY_FORMAT_VERSION")
             return null
         }
         val instanceId = readUuid(input)
@@ -349,9 +453,13 @@ class InstanceJournal(private val dir: File, private val logger: Logger) {
             val deployEncounterId = if (input.readBoolean()) input.readUTF() else null
             CarryInEscrow(kitId, pdcNamespace, pdcKey, bytes, consumed, deployEncounterId)
         }
+        // 版本 2 的檔案在這裡結束,沒有 evidenceDispatched 這個 boolean——預設 false 是安全值
+        // (見 [JournalRecord.evidenceDispatched] 的 KDoc:等同舊版「state != RESTORING 才發」
+        // 的既有行為,不會漏發也不會重發)。
+        val evidenceDispatched = if (version >= FORMAT_VERSION) input.readBoolean() else false
         return JournalRecord(
             instanceId, playerId, dungeonId, slotId, sessionId, state,
-            createdAt, updatedAt, returnPoint, snapshot, carryIn,
+            createdAt, updatedAt, returnPoint, snapshot, carryIn, evidenceDispatched,
         )
     }
 
@@ -365,7 +473,11 @@ class InstanceJournal(private val dir: File, private val logger: Logger) {
     private companion object {
         const val MAGIC = 0x48544A31 // "HTJ1"
 
-        /** 2(2026-09):新增 [JournalRecord.carryIn]。舊版檔案版本不符會被 [decode] 拒絕並隔離,見類別 KDoc。 */
-        const val FORMAT_VERSION = 2
+        /** 3(2026-09):新增 [JournalRecord.evidenceDispatched]。 */
+        const val FORMAT_VERSION = 3
+
+        /** 2:有 [JournalRecord.carryIn] 但沒有 evidenceDispatched——仍可相容讀取,見 [decode]。
+         * 1 以下(連 carryIn 都沒有)太舊,繼續拒絕並隔離。 */
+        const val LEGACY_FORMAT_VERSION = 2
     }
 }

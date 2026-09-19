@@ -459,14 +459,14 @@ class InstanceInventoryService(
             return abort(instanceId).thenApply { true }
         }
 
-        // 見證出口只在「第一次」從 ACTIVE/CLEARING 轉進 RESTORING 時發一次(見 ExpeditionSink
-        // 的 KDoc)。已經是 RESTORING 的話代表這是同一筆交易的重試/第二條收斂路徑撞進來
-        // (見本函式呼叫端 [restore] 的說明),不能再發一次——不然同一個 kit 會被見證兩次。
-        if (record.state != JournalState.RESTORING) {
-            dispatchExpeditionEvidence(record, System.currentTimeMillis())
+        // 見證出口只在「第一次」發一次(見 ExpeditionSink 的 KDoc、[ExpeditionEvidenceGuard]
+        // 的判斷理由)。
+        val resolvedAtMs = System.currentTimeMillis()
+        if (ExpeditionEvidenceGuard.shouldDispatch(record)) {
+            dispatchExpeditionEvidence(record, resolvedAtMs)
         }
 
-        val restoring = record.withState(JournalState.RESTORING, System.currentTimeMillis())
+        val restoring = record.withState(JournalState.RESTORING, resolvedAtMs).withEvidenceDispatched(true)
         records[instanceId] = restoring
         return runAsync { journal.writeSync(restoring) }.thenCompose {
             writeSnapshotBack(restoring, reason, attempt = 0)
@@ -640,9 +640,19 @@ class InstanceInventoryService(
             .map { KitStatus(it.kitId, it.consumed) }
 
     /**
-     * 首次有效消耗(見 `ExpeditionCustody.deploy`)。**先物理移除、後更新 record**——中間丟例外
-     * 的話寧可留下「物品沒了但帳沒記到」這種需要人工核對的窄縫,也不要反過來(記了帳但物品
-     * 還在,等於免費複製一份效果)。
+     * 首次有效消耗(見 `ExpeditionCustody.deploy`)。
+     *
+     * ## 2026-09 稽核問題 3:記帳跟移除現在是同一個決定
+     *
+     * 舊版是「先物理移除、後更新 record」:`removeCarryInItem` 先把物品從背包挖掉,再用
+     * `computeIfPresent` 記帳,record 已經不是 ACTIVE(被同一個 tick 內的 `restore()` 搶先
+     * 收斂)的話記帳會放棄,回傳 false——但那時物品已經被物理移除了,呼叫端看到 false
+     * 只知道「這次部署失敗」,不知道玩家的整備包其實已經憑空消失,只留一行 warning 需要人工核對。
+     *
+     * 改成**先認領記帳、後移除物品**,實際判斷邏輯抽到 [CarryInConsumption.attempt]
+     * (獨立出來方便不靠 Bukkit 直接單元測試):認領失敗代表背包完全不該被動,直接回傳
+     * null;認領成功之後才移除物品,找不到就把認領原地退回去。不論哪一種失敗,玩家都沒有
+     * 淨損失——要嘛背包沒被碰,要嘛物品是被 `restore()` 拿走的(不是被這次呼叫拿走又沒發效果)。
      *
      * ⚠ **刻意同步、不派工到 [PlayerOp]**:呼叫端(內容插件的 `DungeonBehavior` callback,
      * 典型情境是這位玩家自己觸發的 interaction)本來就已經在這位玩家所屬的 region 序列執行區
@@ -651,12 +661,6 @@ class InstanceInventoryService(
      * 執行緒自己继续 tick 才會被排到的任務,等於自我鎖死。**呼叫端的責任**:只在觸發這次部署
      * 的那位玩家自己的 callback 裡呼叫,不要從計時器、其他玩家的 callback,或任何不保證是
      * 這位玩家所屬 region 的地方呼叫這個方法。
-     *
-     * ⚠ 已知窄縫:如果這個呼叫跟 `restore()` 在同一個 tick 內對同一個 instance 同時觸發
-     * (玩家在部署整備包的同一瞬間斷線/被踢/逾時),`records` 的最終狀態可能跟物理背包狀態
-     * 有一瞬間的落差(見下面的 `computeIfPresent` 保護與其後的 warning log)。這個窗口需要
-     * 兩件事在同一刻撞在一起,機率極低,目前接受這個限制而不是為它加一整條跨 instance 的
-     * 序列化佇列。
      */
     fun consumeCarriedKit(playerId: UUID, kitId: UUID, encounterId: String): Boolean {
         val instanceId = activeByPlayer[playerId] ?: return false
@@ -665,20 +669,17 @@ class InstanceInventoryService(
         val escrow = record.carryIn.firstOrNull { it.kitId == kitId } ?: return false
         val player = plugin.server.getPlayer(playerId) ?: return false
 
-        if (!removeCarryInItem(player, instanceId.toString(), escrow)) return false
-
-        val updated = records.computeIfPresent(instanceId) { _, current ->
-            if (current.state != JournalState.ACTIVE) current
-            else current.withCarryIn(current.carryIn.map { if (it.kitId == kitId) it.withConsumed(encounterId) else it })
+        val claimed = CarryInConsumption.attempt(records, instanceId, kitId, encounterId) {
+            removeCarryInItem(player, instanceId.toString(), escrow)
         }
-        val committed = updated?.carryIn?.firstOrNull { it.kitId == kitId }?.consumed == true
-        if (!committed) {
+        if (claimed == null) {
             plugin.logger.warning(
-                "[HanaToki] instance=$instanceId kitId=$kitId 物品已物理移除,但 instance 狀態已變更,消耗紀錄未落地(已知窄縫,見 consumeCarriedKit KDoc)",
+                "[HanaToki] instance=$instanceId kitId=$kitId 這次部署沒有生效(認領失敗或背包已被 restore() 覆蓋,已補償,玩家沒有淨損失)",
             )
             return false
         }
-        runAsync { journal.writeSync(updated) }.whenComplete { ok, _ ->
+
+        runAsync { journal.writeSync(claimed) }.whenComplete { ok, _ ->
             if (ok != true) {
                 plugin.logger.warning(
                     "[HanaToki] instance=$instanceId kitId=$kitId 消耗狀態寫入 journal 失敗(記憶體已更新,崩潰重啟後這件可能被誤判成未消耗而重新退回)",
@@ -750,12 +751,32 @@ class InstanceInventoryService(
      * [recoverAll] 都會在下次啟用時把它收乾淨——而在那之前玩家手上的局內物品已經不合法。
      *
      * 熱插拔(伺服器沒有在關)時額外做一次 best-effort 的即時還原,讓玩家不用等重新啟用。
+     *
+     * ## 2026-09 稽核問題 1:這裡曾經是見證永久遺失的源頭
+     *
+     * 舊版這個函式只把 state 直接跳成 [JournalState.RESTORING],從來沒呼叫過
+     * [dispatchExpeditionEvidence]。下次啟動 `recoverAll()` 讀到的 state 已經是 RESTORING,
+     * 而發送守衛當時寫的是「`state != RESTORING` 才發」——於是這裡漏發的那一批,永遠沒有第二次
+     * 機會補上。崩潰重啟反而不會踩到:沒跑到這個函式,state 還是 ACTIVE/CLEARING,守衛成立。
+     *
+     * 修法是把發送守衛換成獨立欄位 [JournalRecord.evidenceDispatched](不再看 `state`),
+     * 並且**直接在這裡呼叫一次**——不用像舊版那樣賭下次啟動的 `startRestore` 會不會補上:
+     * 熱插拔(`hotSwap == true`)那個分支下面的 [writeSnapshotBack] 一旦真的收斂完成,
+     * 會直接刪掉整份 journal 紀錄,連給下次啟動讀的機會都沒有——不在這裡先發,那批見證一樣
+     * 會遺失,只是換一種踩法。[ExpeditionDispatcher]/`ExpeditionSinkImpl` 對這次呼叫的落地
+     * 一律走非同步排程,排不進 AsyncScheduler(關服快結束時常見)會退回同步寫**本機小檔案**
+     * ——不是跨網路的阻塞呼叫,在這條快要停止的執行緒上做,跟下面 `journal.writeSync` 是
+     * 同一個假設(此時不能再依賴 AsyncScheduler)。
      */
     fun shutdownFlush() {
         val hotSwap = !Bukkit.isStopping()
         for (record in records.values.toList()) {
             if (record.state == JournalState.PREPARED || record.snapshot == null) continue
-            val restoring = record.withState(JournalState.RESTORING, System.currentTimeMillis())
+            val now = System.currentTimeMillis()
+            if (ExpeditionEvidenceGuard.shouldDispatch(record)) {
+                dispatchExpeditionEvidence(record, now)
+            }
+            val restoring = record.withState(JournalState.RESTORING, now).withEvidenceDispatched(true)
             journal.writeSync(restoring) // 同步:此時不能再依賴 AsyncScheduler
             records[record.instanceId] = restoring
             activeByPlayer.remove(record.playerId, record.instanceId)

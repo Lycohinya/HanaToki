@@ -1,6 +1,9 @@
 package com.tinyyana.hanatoki.inventory
 
+import java.io.BufferedOutputStream
+import java.io.DataOutputStream
 import java.io.File
+import java.io.FileOutputStream
 import java.util.UUID
 import java.util.logging.Level
 import java.util.logging.Logger
@@ -198,5 +201,136 @@ class InstanceJournalTest {
     fun `建構子會自己把資料夾建起來`() {
         assertTrue(dir.exists())
         assertFalse(File(dir, "nothing.journal").exists())
+    }
+
+    // ---- 2026-09 稽核問題 1:evidenceDispatched 的向後相容 --------------------------------
+
+    @Test
+    fun `evidenceDispatched 來回不失真`() {
+        val original = record(state = JournalState.RESTORING).withEvidenceDispatched(true)
+        assertTrue(journal.writeSync(original))
+        val read = assertNotNull(journal.read(original.instanceId))
+        assertTrue(read.evidenceDispatched, "寫 true 讀回來要還是 true")
+    }
+
+    @Test
+    fun `新紀錄預設 evidenceDispatched 是 false`() {
+        val original = record()
+        assertTrue(journal.writeSync(original))
+        val read = assertNotNull(journal.read(original.instanceId))
+        assertFalse(read.evidenceDispatched)
+    }
+
+    /**
+     * 手工組一份**舊格式(FORMAT_VERSION 2,沒有 evidenceDispatched 這個 boolean)**的檔案,
+     * 模擬「這個修法上線之前就已經寫在磁碟上」的紀錄——不是靠 mock,是真的位元組格式差異。
+     *
+     * 驗證兩件事(缺一不可):
+     * ① 讀得回來,不會被當成壞檔案隔離(向後相容的底線)。
+     * ② `evidenceDispatched` 預設 false,而且 snapshot/carryIn/state 等其他欄位一個位元都沒變
+     *   ——這對應「不得讓既有玩家的背包還原行為改變一個位元」的要求:格式升級只加欄位,
+     *   不改寫任何舊資料本來就有的內容。
+     */
+    @Test
+    fun `讀到沒有 evidenceDispatched 的舊格式紀錄時預設 false,且背包相關欄位完全不變`() {
+        val instanceId = UUID.randomUUID()
+        val playerId = UUID.randomUUID()
+        val kitId = UUID.randomUUID()
+        val snapshotBytes = byteArrayOf(1, 2, 3, 4, 5)
+        val carryBytes = byteArrayOf(9, 8, 7)
+        val f = File(dir, "$instanceId.journal")
+
+        writeLegacyV2Record(
+            f, instanceId, playerId,
+            dungeonId = "test-roguelike", slotId = "test-roguelike#0",
+            sessionId = null, state = JournalState.RESTORING,
+            createdAtMs = 111L, updatedAtMs = 222L,
+            returnPoint = ReturnPointData("world", 1.0, 2.0, 3.0, 4f, 5f),
+            snapshot = InventorySnapshot(snapshotBytes, heldSlot = 2, contentsSize = 41),
+            carryIn = listOf(CarryInEscrow(kitId, "lophinya", "kit", carryBytes, consumed = false)),
+        )
+
+        val read = assertNotNull(journal.read(instanceId), "舊格式(version 2)紀錄不該被當成壞檔案拒絕")
+        assertFalse(read.evidenceDispatched, "沒有這個欄位的舊紀錄要預設當作『還沒發過見證』")
+
+        // 背包還原真正會用到的欄位:一個位元都不能變。
+        assertEquals(JournalState.RESTORING, read.state)
+        assertContentEquals(snapshotBytes, read.snapshot?.itemBytes)
+        assertEquals(2, read.snapshot?.heldSlot)
+        assertEquals(41, read.snapshot?.contentsSize)
+        assertEquals(1, read.carryIn.size)
+        assertContentEquals(carryBytes, read.carryIn.single().itemBytes)
+        assertFalse(read.carryIn.single().consumed)
+        assertEquals(playerId, read.playerId)
+        assertEquals("world", read.returnPoint?.worldName)
+
+        // 也確認 readAll()(啟動恢復掃描用的那條路徑)一樣讀得到、一樣向後相容。
+        val all = journal.readAll()
+        assertEquals(1, all.size)
+        assertFalse(all.single().evidenceDispatched)
+        val quarantined = dir.listFiles { _, name -> name.endsWith(".corrupt") }
+        assertTrue(quarantined == null || quarantined.isEmpty(), "舊格式不該被隔離")
+    }
+
+    /** 照抄 FORMAT_VERSION=2 時代的 [InstanceJournal] 編碼邏輯,寫出一份沒有 evidenceDispatched 的檔案。 */
+    private fun writeLegacyV2Record(
+        target: File,
+        instanceId: UUID,
+        playerId: UUID,
+        dungeonId: String,
+        slotId: String,
+        sessionId: UUID?,
+        state: JournalState,
+        createdAtMs: Long,
+        updatedAtMs: Long,
+        returnPoint: ReturnPointData?,
+        snapshot: InventorySnapshot?,
+        carryIn: List<CarryInEscrow>,
+    ) {
+        fun writeUuid(out: DataOutputStream, id: UUID) {
+            out.writeLong(id.mostSignificantBits)
+            out.writeLong(id.leastSignificantBits)
+        }
+        FileOutputStream(target).use { fos ->
+            val out = DataOutputStream(BufferedOutputStream(fos))
+            out.writeInt(0x48544A31) // MAGIC,同 InstanceJournal
+            out.writeInt(2) // FORMAT_VERSION 2:carryIn 有,evidenceDispatched 沒有
+            writeUuid(out, instanceId)
+            writeUuid(out, playerId)
+            out.writeUTF(dungeonId)
+            out.writeUTF(slotId)
+            out.writeBoolean(sessionId != null)
+            sessionId?.let { writeUuid(out, it) }
+            out.writeUTF(state.name)
+            out.writeLong(createdAtMs)
+            out.writeLong(updatedAtMs)
+            out.writeBoolean(returnPoint != null)
+            returnPoint?.let { rp ->
+                out.writeUTF(rp.worldName)
+                out.writeDouble(rp.x); out.writeDouble(rp.y); out.writeDouble(rp.z)
+                out.writeFloat(rp.yaw); out.writeFloat(rp.pitch)
+            }
+            out.writeBoolean(snapshot != null)
+            snapshot?.let { s ->
+                out.writeInt(s.heldSlot)
+                out.writeInt(s.contentsSize)
+                out.writeInt(s.itemBytes.size)
+                out.write(s.itemBytes)
+            }
+            out.writeInt(carryIn.size)
+            for (c in carryIn) {
+                writeUuid(out, c.kitId)
+                out.writeUTF(c.pdcNamespace)
+                out.writeUTF(c.pdcKey)
+                out.writeInt(c.itemBytes.size)
+                out.write(c.itemBytes)
+                out.writeBoolean(c.consumed)
+                out.writeBoolean(c.deployEncounterId != null)
+                c.deployEncounterId?.let { out.writeUTF(it) }
+            }
+            // 版本 2 到此結束——沒有 evidenceDispatched 的 boolean。
+            out.flush()
+            fos.fd.sync()
+        }
     }
 }
