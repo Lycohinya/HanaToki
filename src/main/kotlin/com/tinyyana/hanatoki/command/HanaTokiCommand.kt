@@ -295,13 +295,37 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
                 val names = core.bossModels.animationNames(handle.modelId)
                 sender.sendMessage("§7${handle.modelId} 的動畫(" + names.size + "):" + names.joinToString(", ").ifEmpty { "(無)" })
             }
+            "showcase" -> withDebugModel(sender, player) { handle ->
+                val seconds = args.getOrNull(3)?.toDoubleOrNull()?.coerceIn(1.0, 15.0) ?: 4.0
+                val names = core.bossModels.animationNames(handle.modelId).sorted()
+                if (names.isEmpty()) { sender.sendMessage("§c這個模型沒有動畫"); return@withDebugModel }
+                sender.sendMessage("§a依序播放 ${names.size} 支動畫,每支 ${seconds} 秒;model clear 可中止")
+                showcaseStep(player, handle, names, 0, (seconds * 20).toLong())
+            }
             "clear" -> {
                 core.bossModels.closeOwner(owner)
                 debugModels.remove(player.uniqueId)
                 sender.sendMessage("§a已清除 debug 模型")
             }
-            else -> sender.sendMessage("§7/hanatoki admin model <spawn <modelId> [scale]|play <anim>|base <anim>|stop <anim>|locators|list|clear>")
+            else -> sender.sendMessage("§7/hanatoki admin model <spawn <modelId> [scale]|play <anim>|base <anim>|stop <anim>|showcase [秒]|locators|list|clear>")
         }
+    }
+
+    /**
+     * 真人驗收用:一支一支播,名稱顯示在 action bar,看的人只要站著看、截圖。
+     * 走玩家自己的 entity scheduler;模型被清掉、換掉或玩家離線就自然停。
+     */
+    private fun showcaseStep(player: Player, handle: com.tinyyana.hanatoki.presentation.BossModelHandle, names: List<String>, index: Int, interval: Long) {
+        if (!player.isOnline || !handle.isActive || debugModels[player.uniqueId] !== handle) return
+        if (index > 0) handle.stop(names[index - 1])
+        if (index >= names.size) { player.sendActionBar(net.kyori.adventure.text.Component.text("showcase 結束")); return }
+        val name = names[index]
+        handle.play(name)
+        player.sendActionBar(net.kyori.adventure.text.Component.text("${index + 1}/${names.size}  $name"))
+        val label = net.kyori.adventure.text.Component.text("${index + 1}/${names.size}  $name")
+        // action bar 約三秒就淡掉,中途補送一次,截圖時名稱還在
+        if (interval > 50) player.scheduler.runDelayed(core.plugin, { _ -> if (debugModels[player.uniqueId] === handle) player.sendActionBar(label) }, null, interval / 2)
+        player.scheduler.runDelayed(core.plugin, { _ -> showcaseStep(player, handle, names, index + 1, interval) }, null, interval)
     }
 
     private fun withDebugModel(sender: CommandSender, player: Player, action: (com.tinyyana.hanatoki.presentation.BossModelHandle) -> Unit) {
@@ -329,7 +353,7 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
             args[0].equals("admin", true) && args[1].equals("restore", true) ->
                 core.instanceInventory.snapshotRecords().map { it.instanceId.toString() }
             args[0].equals("admin", true) && args[1].equals("model", true) ->
-                listOf("spawn", "play", "base", "stop", "locators", "list", "clear")
+                listOf("spawn", "play", "base", "stop", "showcase", "locators", "list", "clear")
             else -> emptyList()
         }
         4 -> when {
