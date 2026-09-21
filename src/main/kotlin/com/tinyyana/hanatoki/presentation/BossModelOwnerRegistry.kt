@@ -35,7 +35,4 @@ class BossModelOwnerRegistry<H : AutoCloseable> {
     }
 
     fun size(): Int = byKey.size
-
-    /** reload 收斂用的一次性快照(key, handle)。 */
-    fun snapshot(): List<Pair<String, H>> = byKey.entries.map { it.key to it.value }
 }

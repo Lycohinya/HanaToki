@@ -7,9 +7,9 @@ import kotlin.test.assertTrue
 
 /**
  * [NoOpBossModels] 是 BetterModel 沒裝/沒啟用時的退回實作(見 [BossModelsFactory])——
- * 不碰 `bind`/`spawnStatic`(它們的參數需要真的 Bukkit `Entity`/`Location`,不在單元測試
- * 範圍內,`available = false` 已經保證兩者一律回 null,見它們的實作),只驗證其餘方法
- * 對「BetterModel 不存在」這個狀態安全地什麼都不做。
+ * 不碰 `bind`(它的參數需要真的 Bukkit `Entity`,不在單元測試範圍內,`available = false`
+ * 已經保證它一律回 null,見它的實作),只驗證其餘方法對「BetterModel 不存在」這個狀態
+ * 安全地什麼都不做。
  */
 class NoOpBossModelsTest {
     @Test

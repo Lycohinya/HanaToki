@@ -238,8 +238,31 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
                 val front = player.location.clone().add(dir.multiply(3.0))
                 front.yaw = player.location.yaw + 180f
                 front.pitch = 0f
-                val handle = core.bossModels.spawnStatic(owner, front, modelId)
-                if (handle == null) { sender.sendMessage("§c生成失敗:$modelId 不是已知的模型 id(見 /hanatoki admin model list 前先 spawn 一個能用的)"); return }
+                // 2026-09-22 修正:DummyTracker(原本的 spawnStatic)不會自動追蹤任何觀察者,
+                // 兩機器人封包測試證實沒有任何 client 收到過任何一個 item_display。真正的 Boss
+                // 一律綁在活的 base entity 上(EntityTracker,那條路徑才會自動追蹤觀察者),
+                // debug 指令改成生一隻專用的暫時載體再 bind——跟內建 `/bettermodel spawn`
+                // 用 Husk 的作法一樣(那條路徑兩個 bot 都真的收到了 65 個 item_display)。
+                // ActorController 需要一個真的在跑的 dungeon session 才會生 actor(見它的
+                // `sessionActive` 檢查),這裡沒有 session,不能借用那條路,所以自己生一隻
+                // 最小號的載體:不隱形不重要(BetterModel 會蓋掉外觀),但要不會亂動、不會被
+                // 打死、不會被自然消失規則清掉。
+                val world = front.world ?: run { sender.sendMessage("§c目前世界不存在"); return }
+                val carrier = world.spawn(front, org.bukkit.entity.Husk::class.java) { husk ->
+                    husk.setAI(false)
+                    husk.isCollidable = false
+                    husk.isInvulnerable = true
+                    husk.isSilent = true
+                    husk.isPersistent = false
+                    husk.setGravity(false)
+                    husk.setRemoveWhenFarAway(false)
+                }
+                val handle = core.bossModels.bind(owner, carrier, modelId)
+                if (handle == null) {
+                    carrier.remove() // bind 失敗:不留下沒人管的載體
+                    sender.sendMessage("§c生成失敗:$modelId 不是已知的模型 id(見 /hanatoki admin model list 前先 spawn 一個能用的)")
+                    return
+                }
                 scale?.let(handle::scale)
                 if (handle.play("idle_hover", true, null)) handle.setBase("idle_hover")
                 debugModels[player.uniqueId] = handle
