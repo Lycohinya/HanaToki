@@ -92,6 +92,14 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
     val rewardDispatcher = RewardDispatcher(plugin)
     val actorController = ActorController(plugin) { sessionManager.sessionById(it) != null }
     val propController = PropController(plugin) { sessionManager.sessionById(it) != null }
+
+    /**
+     * Boss 外觀呈現服務(潘朵拉的少女：殘響),見 `presentation/BossModels.kt` 的 KDoc。
+     * 建構在 BetterModel(softdepend)是否已啟用之後——`plugin.yml` 沒有 depend 它,
+     * onEnable 執行到這一行時如果它有裝一定已經啟用完了(Bukkit 的 softdepend 保證順序)。
+     */
+    val bossModels: com.tinyyana.hanatoki.presentation.BossModels =
+        com.tinyyana.hanatoki.presentation.BossModelsFactory.create(plugin)
     val bossBars = SessionBossBars(plugin)
     val stageEngine = StageEngine(this)
 
@@ -472,9 +480,14 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         kick(playerId, resultKey)
     }
 
-    private fun finishSession(ended: com.tinyyana.hanatoki.instance.EndedSession, drainingWorld: String? = null): CompletableFuture<Void> =
-        handleSessionEnded(ended.slotId, ended.dungeonId, ended.reason, ended.memberIds,
+    private fun finishSession(ended: com.tinyyana.hanatoki.instance.EndedSession, drainingWorld: String? = null): CompletableFuture<Void> {
+        // 這是全部 session 結束路徑(逾時/kick/resolve/drainContent/shutdownAll...)唯一匯聚
+        // 的地方(見 grep 結果,全部 finishSession 呼叫點),Boss 外觀 handle 的收斂只需要接
+        // 這一處——不用在每個結束路徑各補一次。
+        bossModels.closeOwner(ended.sessionId.toString())
+        return handleSessionEnded(ended.slotId, ended.dungeonId, ended.reason, ended.memberIds,
             stageEngine.endFor(ended.sessionId, ended.reason.name), drainingWorld)
+    }
 
     private fun handleSessionEnded(slotId: String, dungeonId: String, reason: EndReason, memberIds: List<UUID>, stageEnd: CompletableFuture<Void>, drainingWorld: String?): CompletableFuture<Void> {
         val cleanup = CompletableFuture<Void>()
@@ -577,6 +590,9 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         for (e in ended) {
             finishSession(e)
         }
+        // 保險絲:上面的 finishSession 已經按 session 收掉對應的 boss model owner,這裡再收一次
+        // debug: 開的(admin 指令生的,不掛在任何 session 底下),PlugMan 熱插拔不能留著。
+        bossModels.closeAll()
         // ⚠ 一定要在最後、而且是同步的:上面那條路徑走的是 AsyncScheduler,插件停用時它會被
         //   取消,不保證跑得完。這一句把所有還沒收斂的 journal 同步標成 RESTORING,
         //   讓下次啟用的 `recoverAll()` 一定接得住(細節見 InstanceInventoryService.shutdownFlush)。

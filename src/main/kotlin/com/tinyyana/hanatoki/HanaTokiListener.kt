@@ -37,6 +37,9 @@ class HanaTokiListener(private val core: HanaTokiCore) : Listener {
     @EventHandler
     fun onQuit(event: PlayerQuitEvent) {
         core.sessionManager.markOffline(event.player.uniqueId, System.currentTimeMillis())
+        // admin debug 指令生的 boss model 是掛在 "debug:<uuid>" 這個 owner 下,不屬於任何
+        // session,session 結束的收斂路徑(finishSession)碰不到它——玩家離線就順手清掉。
+        core.bossModels.closeOwner("debug:${event.player.uniqueId}")
     }
 
     /**
@@ -180,6 +183,9 @@ class HanaTokiListener(private val core: HanaTokiCore) : Listener {
         // 死亡座標在這裡(死亡 region)讀好傳進去,控制器不再跨 region 讀實體。
         core.stageEngine.dynamicEncounters.onEntityDeath(entityId, event.entity.location.clone())
         core.stageEngine.handleActorDeath(entityId)
+        // 這個實體如果是某個 boss model handle 的 base entity(見 BossModels.bind),外觀
+        // 沒有理由比 hitbox 活得久——找不到就是 no-op。
+        core.bossModels.closeForEntity(entityId)
     }
 
     /**
@@ -190,6 +196,9 @@ class HanaTokiListener(private val core: HanaTokiCore) : Listener {
     @EventHandler
     fun onEntityRemoved(event: com.destroystokyo.paper.event.entity.EntityRemoveFromWorldEvent) {
         core.stageEngine.dynamicEncounters.onEntityRemovedFromWorld(event.entity.uniqueId)
+        // 沒有死亡事件就消失的 base entity(區塊卸載、別的插件 remove())同樣要收掉外觀——
+        // 死亡之後也會來一次,那時已經被 onEntityDeath 收掉,這裡是 no-op(見 closeForEntity)。
+        core.bossModels.closeForEntity(event.entity.uniqueId)
     }
 
     /**

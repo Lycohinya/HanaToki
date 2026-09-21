@@ -15,6 +15,22 @@ import org.bukkit.entity.Player
  */
 class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabCompleter {
 
+    /**
+     * admin debug 指令目前生出來的 boss model(見 `model spawn`)——只記在指令這一層,
+     * 不是引擎狀態。owner 收斂("debug:<uuid>")才是真正的安全網(玩家離線/插件關閉都會
+     * 經 [com.tinyyana.hanatoki.presentation.BossModels.closeOwner]/`closeAll` 收掉),
+     * 這裡只是拿來讓 `play`/`base`/`stop`/`locators`/`list` 知道「現在是哪一個」。
+     */
+    private val debugModels = java.util.concurrent.ConcurrentHashMap<java.util.UUID, com.tinyyana.hanatoki.presentation.BossModelHandle>()
+
+    private companion object {
+        /** `model locators` 印哪些骨頭——潘朵拉的少女：殘響模型上全部的 `loc_*` 空骨頭。 */
+        val DEBUG_LOCATOR_NAMES = listOf(
+            "loc_hand_r", "loc_hand_l", "loc_dice", "loc_halo", "loc_eyes", "loc_chest",
+            "loc_mark", "loc_feet", "loc_rule", "loc_echo_1", "loc_echo_2", "loc_echo_3",
+        )
+    }
+
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
         if (args.isEmpty()) {
             sender.sendMessage("§7/hanatoki <enter <dungeonId>|leave|admin <list|kick|reset|debug>>")
@@ -189,6 +205,9 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
                     sender.sendMessage("§7diffrollback 完成:slot=$slotId reverted=$before pending=${core.diffRecorderFor(slotId).pendingCount()}")
                 }
             }
+            // 潘朵拉的少女：殘響外觀呈現的 debug 工具(見 presentation/BossModels.kt),BetterModel
+            // 沒裝就整棵子指令直接回友善訊息,不散在每個分支重複判斷。
+            "model" -> handleModelDebug(sender, args)
             // Map Asset layer 的 executable contract(見 testcontent/StructureProbe),只在隔離測試環境用。
             "mapprobe" -> {
                 val slotId = args.getOrNull(2)
@@ -196,8 +215,75 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
                 if (slotId == null || mode == null) { sender.sendMessage("§c用法:/hanatoki admin mapprobe <slotId> <fixed|jigsaw|foreign|fail|cancel> [seed]"); return }
                 com.tinyyana.hanatoki.testcontent.StructureProbe.run(core, sender, slotId, mode, args.getOrNull(4)?.toLongOrNull() ?: 0L)
             }
-            else -> sender.sendMessage("§7/hanatoki admin <list|kick <player>|reset <slotId>|debug|poses|journal|restore <instanceId>|difftest <slotId> <count>|diffrollback <slotId>|mapprobe <slotId> <mode>>")
+            else -> sender.sendMessage("§7/hanatoki admin <list|kick <player>|reset <slotId>|debug|poses|journal|restore <instanceId>|difftest <slotId> <count>|diffrollback <slotId>|mapprobe <slotId> <mode>|model <spawn|play|base|stop|locators|list|clear>>")
         }
+    }
+
+    /**
+     * `/hanatoki admin model ...`:潘朵拉的少女：殘響外觀呈現的 debug 工具。玩法(階段/技能/
+     * hitbox/傷害)不在這裡——這裡只驗證 BetterModel 那一側的呈現(模型/動畫/locator)能不能動。
+     */
+    private fun handleModelDebug(sender: CommandSender, args: Array<out String>) {
+        val player = sender as? Player ?: run { sender.sendMessage("§c只有玩家能用這個 debug 指令"); return }
+        if (!core.bossModels.available) { sender.sendMessage("§c沒有裝 BetterModel,這個 debug 指令用不了"); return }
+        val owner = "debug:${player.uniqueId}"
+        when (args.getOrNull(2)?.lowercase()) {
+            "spawn" -> {
+                val modelId = args.getOrNull(3) ?: run { sender.sendMessage("§c用法:/hanatoki admin model spawn <modelId> [scale]"); return }
+                val scale = args.getOrNull(4)?.toFloatOrNull()
+                core.bossModels.closeOwner(owner)
+                debugModels.remove(player.uniqueId)
+                // 3 格前、面對玩家(所以模型的正面轉過來對著他,不是背對)。
+                val dir = player.location.direction.clone().normalize()
+                val front = player.location.clone().add(dir.multiply(3.0))
+                front.yaw = player.location.yaw + 180f
+                front.pitch = 0f
+                val handle = core.bossModels.spawnStatic(owner, front, modelId)
+                if (handle == null) { sender.sendMessage("§c生成失敗:$modelId 不是已知的模型 id(見 /hanatoki admin model list 前先 spawn 一個能用的)"); return }
+                scale?.let(handle::scale)
+                if (handle.play("idle_hover", true, null)) handle.setBase("idle_hover")
+                debugModels[player.uniqueId] = handle
+                sender.sendMessage("§a已生成 $modelId" + (scale?.let { " scale=$it" } ?: ""))
+            }
+            "play" -> withDebugModel(sender, player) { handle ->
+                val anim = args.getOrNull(3) ?: run { sender.sendMessage("§c用法:/hanatoki admin model play <animation>"); return@withDebugModel }
+                sender.sendMessage(if (handle.play(anim)) "§a播放 $anim" else "§c這個模型沒有叫 $anim 的動畫")
+            }
+            "base" -> withDebugModel(sender, player) { handle ->
+                val anim = args.getOrNull(3) ?: run { sender.sendMessage("§c用法:/hanatoki admin model base <animation>"); return@withDebugModel }
+                handle.setBase(anim)
+                sender.sendMessage("§a基底動畫設為 $anim")
+            }
+            "stop" -> withDebugModel(sender, player) { handle ->
+                val anim = args.getOrNull(3) ?: run { sender.sendMessage("§c用法:/hanatoki admin model stop <animation>"); return@withDebugModel }
+                handle.stop(anim)
+                sender.sendMessage("§a已停止 $anim")
+            }
+            "locators" -> withDebugModel(sender, player) { handle ->
+                sender.sendMessage("§7=== ${handle.modelId} locators ===")
+                DEBUG_LOCATOR_NAMES.forEach { name ->
+                    val loc = handle.locator(name)
+                    sender.sendMessage(
+                        if (loc != null) "§7  $name: " + "%.2f, %.2f, %.2f".format(loc.x, loc.y, loc.z) else "§7  $name: (無)",
+                    )
+                }
+            }
+            "list" -> withDebugModel(sender, player) { handle ->
+                val names = core.bossModels.animationNames(handle.modelId)
+                sender.sendMessage("§7${handle.modelId} 的動畫(" + names.size + "):" + names.joinToString(", ").ifEmpty { "(無)" })
+            }
+            "clear" -> {
+                core.bossModels.closeOwner(owner)
+                debugModels.remove(player.uniqueId)
+                sender.sendMessage("§a已清除 debug 模型")
+            }
+            else -> sender.sendMessage("§7/hanatoki admin model <spawn <modelId> [scale]|play <anim>|base <anim>|stop <anim>|locators|list|clear>")
+        }
+    }
+
+    private fun withDebugModel(sender: CommandSender, player: Player, action: (com.tinyyana.hanatoki.presentation.BossModelHandle) -> Unit) {
+        val handle = debugModels[player.uniqueId] ?: run { sender.sendMessage("§c沒有生成中的 debug 模型,先 /hanatoki admin model spawn <modelId>"); return }
+        action(handle)
     }
 
     override fun onTabComplete(
@@ -209,7 +295,7 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
         1 -> listOf("enter", "leave", "admin").filter { it.startsWith(args[0].lowercase()) }
         2 -> when (args[0].lowercase()) {
             "enter" -> core.registry.definitions.keys.toList()
-            "admin" -> listOf("list", "kick", "reset", "debug", "poses", "journal", "restore", "content-disable", "content-reload", "mapprobe")
+            "admin" -> listOf("list", "kick", "reset", "debug", "poses", "journal", "restore", "content-disable", "content-reload", "mapprobe", "model")
                 .filter { it.startsWith(args[1].lowercase()) }
             else -> emptyList()
         }
@@ -219,6 +305,18 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
                 Bukkit.getOnlinePlayers().map { it.name }
             args[0].equals("admin", true) && args[1].equals("restore", true) ->
                 core.instanceInventory.snapshotRecords().map { it.instanceId.toString() }
+            args[0].equals("admin", true) && args[1].equals("model", true) ->
+                listOf("spawn", "play", "base", "stop", "locators", "list", "clear")
+            else -> emptyList()
+        }
+        4 -> when {
+            args[0].equals("admin", true) && args[1].equals("model", true) && args[2].equals("spawn", true) ->
+                core.bossModels.modelIds().toList()
+            args[0].equals("admin", true) && args[1].equals("model", true) &&
+                (args[2].equals("play", true) || args[2].equals("base", true) || args[2].equals("stop", true)) -> {
+                val handle = (sender as? Player)?.let { p -> debugModels[p.uniqueId] }
+                handle?.let { core.bossModels.animationNames(it.modelId).toList() } ?: emptyList()
+            }
             else -> emptyList()
         }
         else -> emptyList()

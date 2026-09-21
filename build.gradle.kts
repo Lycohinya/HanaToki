@@ -15,6 +15,9 @@ dependencies {
     // 副本;shade 進來會製造同名 class 不同 classloader 的 LinkageError 風險(見 README
     // 「Cross-plugin call safety」)。runtime 由 plugin.yml 的 Paper library loader 提供。
     compileOnly(libs.kotlin.stdlib)
+    // 潘朵拉的少女：殘響的外觀呈現引擎,softdepend(見 plugin.yml)——BetterModel 沒裝時
+    // HanaToki 照常載入運作,見 presentation/BossModelsFactory.kt 的 class-loading guard。
+    compileOnly(libs.bettermodel.bukkit.api)
 
     testImplementation(kotlin("test"))
     testImplementation(libs.paper.api)

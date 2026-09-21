@@ -7,9 +7,14 @@ minecraft = "26.2"
 shadow = "9.4.3"
 run-task = "3.0.2"
 
+# 潘朵拉的少女：殘響(pandora_echo)的外觀呈現引擎,softdepend——見 plugin.yml 與
+# presentation/bettermodel/BetterModelBossModels.kt 的 KDoc。
+bettermodel = "3.5.0"
+
 [libraries]
 paper-api = { module = "io.papermc.paper:paper-api", version.ref = "paper-api" }
 kotlin-stdlib = { module = "org.jetbrains.kotlin:kotlin-stdlib-jdk8", version.ref = "kotlin" }
+bettermodel-bukkit-api = { module = "io.github.toxicity188:bettermodel-bukkit-api", version.ref = "bettermodel" }
 
 [plugins]
 shadow = { id = "com.gradleup.shadow", version.ref = "shadow" }
