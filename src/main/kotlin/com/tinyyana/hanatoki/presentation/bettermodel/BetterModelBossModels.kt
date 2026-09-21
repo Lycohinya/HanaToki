@@ -140,7 +140,11 @@ class BetterModelBossModels(private val plugin: Plugin) : BossModels {
         }
 
         override fun setBase(animation: String) {
+            // 先停掉舊的基底迴圈:BetterModel 的迴圈動畫會疊著播,s01 實測換基底後封包量是
+            // 兩支迴圈的總和(idle_hover 281 pkt/s → 換成 dice_observe 後 684 pkt/s)。
+            val previous = baseAnimation
             baseAnimation = animation
+            if (previous != null && previous != animation) stop(previous)
             play(animation, true, null)
         }
 
