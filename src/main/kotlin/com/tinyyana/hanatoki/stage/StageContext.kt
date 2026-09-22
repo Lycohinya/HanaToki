@@ -268,6 +268,73 @@ interface StageContext {
      */
     fun memberPositions(): CompletableFuture<Map<UUID, DoubleArray>>
 
+    /**
+     * 每一位在場成員的狀態快照。陣列欄位固定為 [MEMBER_SNAPSHOT_FIELDS] 的順序:
+     * `x, y, z, yaw, pitch, health, maxHealth, onGround(1/0), sneaking(1/0), heldSlot`。
+     * 離線/不在副本世界/已死亡的人不會出現在結果裡。
+     *
+     * 存在理由(2026-09-22,潘朵拉):Boss 要「看」玩家——朝誰、誰一直貼身、誰在繞圈——
+     * 只有座標不夠,還要朝向與是否站在地上(判斷在空中/在跳),以及血量(救援、低血提示)。
+     * 同 [memberPositions] 的安全性理由:每位成員在自己的 EntityScheduler 裡讀自己的狀態;
+     * future 完成時不保證在哪條執行線上,碰 [state] 之前先 [submit]。
+     */
+    fun memberSnapshots(): CompletableFuture<Map<UUID, DoubleArray>>
+
+    /**
+     * 對**一位**在場成員造成傷害。[damageTypeKey] 空字串 = 預設傷害管道;否則同
+     * [damageMembersWithin] 的 key 語意(解析不了退回預設管道並記警告)。
+     *
+     * 存在理由:圓形範圍以外的形狀(扇形、直線、預判落點)由內容層自己用 [memberSnapshots]
+     * 判定,判定完需要一個只打那個人的出口。實際扣血在該玩家自己的 EntityScheduler 裡做。
+     */
+    fun damageMember(playerId: UUID, amount: Double, damageTypeKey: String)
+
+    /** 對一位在場成員加一段速度(擊退、拉扯)。派工到該玩家自己的 EntityScheduler。 */
+    fun pushMember(playerId: UUID, vx: Double, vy: Double, vz: Double)
+
+    /**
+     * 只給**一位**成員看的粒子(`Player.spawnParticle`,其他人收不到封包)。
+     * 私人資訊(只有你看得到的真身、只有你知道的落點)用這個,公開的招式範圍用 [particles]。
+     */
+    fun particlesFor(
+        playerId: UUID,
+        location: Location,
+        particle: Particle,
+        count: Int,
+        spreadX: Double,
+        spreadY: Double,
+        spreadZ: Double,
+        extra: Double,
+    )
+
+    /**
+     * 有顏色的粒子(`Particle.DUST`,[rgb] 是 `0xRRGGBB`)。招式預警用顏色分類——同一類招式
+     * 永遠同一個顏色,玩家才學得起來。[size] 0.5–4.0。
+     */
+    fun dust(location: Location, rgb: Int, size: Float, count: Int, spreadX: Double, spreadY: Double, spreadZ: Double)
+
+    /** 同 [dust],但只給一位成員看(私人資訊)。 */
+    fun dustFor(playerId: UUID, location: Location, rgb: Int, size: Float, count: Int, spreadX: Double, spreadY: Double, spreadZ: Double)
+
+    /**
+     * 用字串 key 播音效給每一位在場成員([soundKey] 例如 `"minecraft:block.amethyst_block.chime"`
+     * 或資源包自己的 `"lycohinya:..."`)。[Sound] 型別只涵蓋原版登記過的聲音,自訂聲景要走這條。
+     */
+    fun soundAll(location: Location, soundKey: String, volume: Float, pitch: Float)
+
+    /** 同上,只給一位成員。 */
+    fun soundFor(playerId: UUID, location: Location, soundKey: String, volume: Float, pitch: Float)
+
+    /**
+     * 在**這位成員自己的** EntityScheduler 上對他做一件事(切換快捷欄、把掉出場地的人拉回來……)。
+     * 不是在場成員、已離線或不在副本世界時不執行。
+     *
+     * 存在理由:上面每一個專用方法都是這條路的特例;規則改寫這類「暫時改玩家一個狀態」的內容
+     * 需要的操作五花八門,每一種都開一支引擎方法不划算。派工仍然由引擎負責,內容層拿到的
+     * [org.bukkit.entity.Player] 只能在 [action] 裡用、不能帶出去存。
+     */
+    fun runOnMember(playerId: UUID, action: Consumer<org.bukkit.entity.Player>)
+
     /** ARCH §5.1②:切換 stage(內部會呼叫舊 stage 的 onExit、新 stage 的 onEnter)。 */
     fun transition(stageId: String)
 
@@ -364,4 +431,10 @@ interface StageContext {
 
     /** 同上但重複執行,直到 stage 離開/session 結束被自動取消。 */
     fun submitRepeating(initialDelayTicks: Long, periodTicks: Long, action: Runnable)
+
+    companion object {
+        /** [memberSnapshots] 陣列的欄位順序(文件用;內容層以 index 讀)。 */
+        val MEMBER_SNAPSHOT_FIELDS: List<String> =
+            listOf("x", "y", "z", "yaw", "pitch", "health", "maxHealth", "onGround", "sneaking", "heldSlot")
+    }
 }

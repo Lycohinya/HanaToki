@@ -171,6 +171,16 @@ data class InstanceInventoryDef(
     val loadout: List<LoadoutEntry> = emptyList(),
     /** 可帶入物規則(見 [CarryInDef])。空 = 不做任何攜入,既有副本行為完全不變。 */
     val carryIn: List<CarryInDef> = emptyList(),
+    /**
+     * keep-inventory 模式(2026-09-22,潘朵拉):**不清空、不換掉永久背包**,只托管 [carryIn]。
+     *
+     * 存在理由:Boss 戰要的是「高配裝備有價值」——玩家帶自己的劍、弓、藥水進場,打掉的就是打掉了
+     * (死亡保留物品由伺服器既有規則負責)。但整備包仍然需要同一套 escrow 語意:只在首次有效部署
+     * 時消耗、沒用就原樣退回、崩潰重啟不複製也不吃掉。這個模式下攜入物原地蓋 instance 章
+     * (不能丟、不能放容器),還原時脫章或從 journal 補回;[loadout] 若有則是蓋章的局內物品,
+     * 離場一律移除。永久背包的其他東西引擎一格都不碰。
+     */
+    val keepInventory: Boolean = false,
 )
 
 /**
@@ -375,7 +385,14 @@ object DungeonDefinitionParser {
             if (max < 1) throw DefinitionError("dungeons.$id.instance-inventory.carry-in[$index].max 必須 >= 1")
             CarryInDef(parts[0], parts[1], max)
         }
-        return InstanceInventoryDef(loadout, carryIn)
+        val keep = (m["keep-inventory"] as? Boolean) ?: false
+        if (keep && carryIn.isEmpty() && loadout.isEmpty()) {
+            throw DefinitionError(
+                "dungeons.$id.instance-inventory.keep-inventory=true 但沒有 carry-in 也沒有 loadout——" +
+                    "那等於不開局內背包,請直接拿掉整個 instance-inventory 區塊",
+            )
+        }
+        return InstanceInventoryDef(loadout, carryIn, keep)
     }
 
     private fun parseStageGraph(dungeonId: String, raw: Map<String, Any?>): StageGraph {

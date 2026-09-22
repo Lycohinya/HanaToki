@@ -133,4 +133,15 @@ interface ActorHandle {
 
     /** 換任一裝備欄(頭/胸/腿/腳/副手)。[slotName] 是 [org.bukkit.inventory.EquipmentSlot] 的常數名。 */
     fun setEquipment(actorId: String, slotName: String, item: org.bukkit.inventory.ItemStack?): CompletableFuture<Void>
+
+    /**
+     * 把 BetterModel 角色模型綁到這位 actor 身上([com.tinyyana.hanatoki.presentation.BossModels.bind])。
+     *
+     * 存在理由:`bind` 必須在實體自己的 region thread 上呼叫,而內容層拿不到 actor 的實體。
+     * 這裡替它派工過去再綁;owner 是這個 session,session 結束時一起收。
+     * future 以 null 完成 = BetterModel 不在、actor 不存在或模型 id 不存在——內容層要能照樣運作。
+     *
+     * ⚠ handle 的 `close()` 會連同載體實體一起移除(BossModelHandle 的既有語意)。
+     */
+    fun bindModel(actorId: String, modelId: String): CompletableFuture<com.tinyyana.hanatoki.presentation.BossModelHandle>
 }

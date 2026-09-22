@@ -94,4 +94,13 @@ class ActorSpec {
 
     /** 是否播放實體自己的音效。演出 actor 一律關掉,音效由內容層自己下 cue。 */
     var silent: Boolean = true
+
+    /**
+     * 載體的整體縮放(`minecraft:scale` attribute)。null = 不動。
+     *
+     * 存在理由(2026-09-22,潘朵拉):BetterModel 的角色模型約 3 格高,載體若是 1.8 格的 Mannequin,
+     * 看得到的大小與打得到的範圍就對不上(Yana 的硬要求是兩者對齊,見 [invisible])。
+     * scale 會同時放大 hitbox,所以載體隱形之後「砍她身上任何看得到的地方都算數」。
+     */
+    var scale: Double? = null
 }

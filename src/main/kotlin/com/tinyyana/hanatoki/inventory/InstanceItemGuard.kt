@@ -88,6 +88,8 @@ class InstanceItemGuard(
         if (event.inventory.type != InventoryType.ENDER_CHEST) return
         val player = event.player as? Player ?: return
         if (service.activeInstanceIdOf(player.uniqueId) == null) return
+        // keep-inventory 模式沒有局內背包快照可偷渡(永久背包本來就在身上),終界箱不必擋。
+        if (service.isKeepInventory(player.uniqueId)) return
         event.isCancelled = true
         player.sendMessage(texts.format("instance-item.no-ender-chest"))
     }

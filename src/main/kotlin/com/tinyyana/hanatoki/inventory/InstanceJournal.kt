@@ -214,22 +214,32 @@ class JournalRecord(
     val snapshot: InventorySnapshot?,
     val carryIn: List<CarryInEscrow> = emptyList(),
     val evidenceDispatched: Boolean = false,
+    /**
+     * 這筆交易是 keep-inventory 模式(見 [com.tinyyana.hanatoki.config.InstanceInventoryDef.keepInventory]):
+     * 玩家的永久背包**從頭到尾都在身上**,引擎只托管 [carryIn]。還原時不能用 [snapshot] 覆蓋
+     * (那會把局內打掉的箭、喝掉的藥水變回來),改走「脫章/補回攜入物、移除局內物品」。
+     * 必須持久化:崩潰重啟後恢復流程只有 journal 可以看,猜錯模式就是複製或吃掉整個背包。
+     */
+    val keepInventory: Boolean = false,
 ) {
     fun withState(state: JournalState, nowMs: Long): JournalRecord =
-        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, nowMs, returnPoint, snapshot, carryIn, evidenceDispatched)
+        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, nowMs, returnPoint, snapshot, carryIn, evidenceDispatched, keepInventory)
 
     fun withSnapshot(snapshot: InventorySnapshot, state: JournalState, nowMs: Long): JournalRecord =
-        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, nowMs, returnPoint, snapshot, carryIn, evidenceDispatched)
+        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, nowMs, returnPoint, snapshot, carryIn, evidenceDispatched, keepInventory)
 
     fun withSession(sessionId: UUID?, nowMs: Long): JournalRecord =
-        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, nowMs, returnPoint, snapshot, carryIn, evidenceDispatched)
+        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, nowMs, returnPoint, snapshot, carryIn, evidenceDispatched, keepInventory)
 
     fun withCarryIn(carryIn: List<CarryInEscrow>): JournalRecord =
-        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, updatedAtMs, returnPoint, snapshot, carryIn, evidenceDispatched)
+        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, updatedAtMs, returnPoint, snapshot, carryIn, evidenceDispatched, keepInventory)
+
+    fun withKeepInventory(keep: Boolean): JournalRecord =
+        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, updatedAtMs, returnPoint, snapshot, carryIn, evidenceDispatched, keep)
 
     /** 見證已經發送(或已經確定不需要再發)——標記完之後就跟 [state] 的變化完全無關了。 */
     fun withEvidenceDispatched(dispatched: Boolean): JournalRecord =
-        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, updatedAtMs, returnPoint, snapshot, carryIn, dispatched)
+        JournalRecord(instanceId, playerId, dungeonId, slotId, sessionId, state, createdAtMs, updatedAtMs, returnPoint, snapshot, carryIn, dispatched, keepInventory)
 }
 
 /** 返回點:純資料,重啟後也還在(記憶體版的 `ReturnPointRegistry` 重啟就空了)。 */
@@ -400,6 +410,7 @@ class InstanceJournal(private val dir: File, private val logger: Logger) {
             c.deployEncounterId?.let { out.writeUTF(it) }
         }
         out.writeBoolean(r.evidenceDispatched)
+        out.writeBoolean(r.keepInventory)
     }
 
     private fun decode(input: DataInputStream): JournalRecord? {
@@ -410,7 +421,7 @@ class InstanceJournal(private val dir: File, private val logger: Logger) {
         // 是稽核問題 1(見證關服遺失)真正修好之前寫下的,一律當作「還沒發過見證」重新補送才是
         // 正確行為,見 [JournalRecord.evidenceDispatched] 的 KDoc。版本 1 以下(沒有 carryIn)
         // 太舊,繼續拒絕並隔離。
-        if (version != FORMAT_VERSION && version != LEGACY_FORMAT_VERSION) {
+        if (version !in LEGACY_FORMAT_VERSION..FORMAT_VERSION) {
             logger.warning("[HanaToki] journal 格式版本 $version 不是目前的 $FORMAT_VERSION,也不是可相容讀取的舊版 $LEGACY_FORMAT_VERSION")
             return null
         }
@@ -456,10 +467,12 @@ class InstanceJournal(private val dir: File, private val logger: Logger) {
         // 版本 2 的檔案在這裡結束,沒有 evidenceDispatched 這個 boolean——預設 false 是安全值
         // (見 [JournalRecord.evidenceDispatched] 的 KDoc:等同舊版「state != RESTORING 才發」
         // 的既有行為,不會漏發也不會重發)。
-        val evidenceDispatched = if (version >= FORMAT_VERSION) input.readBoolean() else false
+        val evidenceDispatched = if (version >= 3) input.readBoolean() else false
+        // 版本 4 以前沒有 keep-inventory 模式,一律是覆蓋還原(既有行為)。
+        val keepInventory = if (version >= 4) input.readBoolean() else false
         return JournalRecord(
             instanceId, playerId, dungeonId, slotId, sessionId, state,
-            createdAt, updatedAt, returnPoint, snapshot, carryIn, evidenceDispatched,
+            createdAt, updatedAt, returnPoint, snapshot, carryIn, evidenceDispatched, keepInventory,
         )
     }
 
@@ -473,8 +486,8 @@ class InstanceJournal(private val dir: File, private val logger: Logger) {
     private companion object {
         const val MAGIC = 0x48544A31 // "HTJ1"
 
-        /** 3(2026-09):新增 [JournalRecord.evidenceDispatched]。 */
-        const val FORMAT_VERSION = 3
+        /** 3(2026-09):新增 [JournalRecord.evidenceDispatched]。4(2026-09-22):新增 [JournalRecord.keepInventory]。 */
+        const val FORMAT_VERSION = 4
 
         /** 2:有 [JournalRecord.carryIn] 但沒有 evidenceDispatched——仍可相容讀取,見 [decode]。
          * 1 以下(連 carryIn 都沒有)太舊,繼續拒絕並隔離。 */

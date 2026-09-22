@@ -379,8 +379,22 @@ private class StageContextImpl(
 
     override fun particles(location: Location, particle: Particle, count: Int, spreadX: Double, spreadY: Double, spreadZ: Double, extra: Double) {
         WorldOp.dispatchAt(core.plugin, location) { loc ->
-            loc.world?.spawnParticle(particle, loc, count, spreadX, spreadY, spreadZ, extra)
+            loc.world?.spawnParticle(particle, loc, count, spreadX, spreadY, spreadZ, extra, defaultParticleData(particle))
         }
+    }
+
+    /**
+     * 有些粒子在 26.2 必須帶資料(`DRAGON_BREATH` 要 Float、`FLASH` 要 Color……),不帶就丟
+     * IllegalArgumentException,整個派工被吃掉。這支 API 只收「種類 + 數量」,所以缺資料時給一個
+     * 中性的預設值;要控制顏色的內容請用 [dust]。
+     */
+    private fun defaultParticleData(particle: Particle): Any? = when (particle.dataType) {
+        java.lang.Void::class.java -> null
+        java.lang.Float::class.java -> 1.0f
+        java.lang.Integer::class.java -> 0
+        org.bukkit.Color::class.java -> org.bukkit.Color.WHITE
+        Particle.DustOptions::class.java -> Particle.DustOptions(org.bukkit.Color.WHITE, 1.0f)
+        else -> null
     }
 
     override fun damageMembersWithin(location: Location, radius: Double, amount: Double, damageTypeKey: String) {
@@ -499,6 +513,97 @@ private class StageContextImpl(
             }
         }
         return CompletableFuture.allOf(*probes.toTypedArray()).thenApply { found.toMap() }
+    }
+
+    override fun memberSnapshots(): CompletableFuture<Map<UUID, DoubleArray>> {
+        val found = java.util.concurrent.ConcurrentHashMap<UUID, DoubleArray>()
+        val world = anchor.world
+        val probes = activeMembers().map { playerId ->
+            PlayerOp.dispatch(core.plugin, playerId) { player ->
+                if (player.isDead) return@dispatch
+                val here = player.location
+                if (here.world != world) return@dispatch
+                val max = player.getAttribute(org.bukkit.attribute.Attribute.MAX_HEALTH)?.value ?: 20.0
+                @Suppress("DEPRECATION")
+                val grounded = player.isOnGround
+                found[playerId] = doubleArrayOf(
+                    here.x, here.y, here.z, here.yaw.toDouble(), here.pitch.toDouble(),
+                    player.health, max, if (grounded) 1.0 else 0.0, if (player.isSneaking) 1.0 else 0.0,
+                    player.inventory.heldItemSlot.toDouble(),
+                )
+            }
+        }
+        return CompletableFuture.allOf(*probes.toTypedArray()).thenApply { found.toMap() }
+    }
+
+    override fun damageMember(playerId: UUID, amount: Double, damageTypeKey: String) {
+        if (playerId !in activeMembers()) return
+        val type = if (damageTypeKey.isBlank()) null else resolveDamageType(damageTypeKey).also {
+            if (it == null) core.plugin.logger.warning("[HanaToki] 未知的 DamageType「$damageTypeKey」,這一下退回預設傷害管道")
+        }
+        PlayerOp.dispatch(core.plugin, playerId) { player ->
+            if (player.isDead || player.world != anchor.world) return@dispatch
+            if (type == null) player.damage(amount)
+            else player.damage(amount, org.bukkit.damage.DamageSource.builder(type).withDamageLocation(player.location).build())
+        }
+    }
+
+    override fun pushMember(playerId: UUID, vx: Double, vy: Double, vz: Double) {
+        if (playerId !in activeMembers()) return
+        PlayerOp.dispatch(core.plugin, playerId) { player ->
+            if (player.isDead || player.world != anchor.world) return@dispatch
+            player.velocity = player.velocity.clone().add(org.bukkit.util.Vector(vx, vy, vz))
+        }
+    }
+
+    override fun particlesFor(
+        playerId: UUID,
+        location: Location,
+        particle: Particle,
+        count: Int,
+        spreadX: Double,
+        spreadY: Double,
+        spreadZ: Double,
+        extra: Double,
+    ) {
+        PlayerOp.dispatch(core.plugin, playerId) { player ->
+            if (player.world != location.world) return@dispatch
+            player.spawnParticle(particle, location, count, spreadX, spreadY, spreadZ, extra, defaultParticleData(particle))
+        }
+    }
+
+    override fun dust(location: Location, rgb: Int, size: Float, count: Int, spreadX: Double, spreadY: Double, spreadZ: Double) {
+        val options = Particle.DustOptions(org.bukkit.Color.fromRGB(rgb and 0xFFFFFF), size.coerceIn(0.1f, 4f))
+        WorldOp.dispatchAt(core.plugin, location) { loc ->
+            loc.world?.spawnParticle(Particle.DUST, loc, count, spreadX, spreadY, spreadZ, 0.0, options, true)
+        }
+    }
+
+    override fun dustFor(playerId: UUID, location: Location, rgb: Int, size: Float, count: Int, spreadX: Double, spreadY: Double, spreadZ: Double) {
+        val options = Particle.DustOptions(org.bukkit.Color.fromRGB(rgb and 0xFFFFFF), size.coerceIn(0.1f, 4f))
+        PlayerOp.dispatch(core.plugin, playerId) { player ->
+            if (player.world != location.world) return@dispatch
+            player.spawnParticle(Particle.DUST, location, count, spreadX, spreadY, spreadZ, 0.0, options, true)
+        }
+    }
+
+    override fun soundAll(location: Location, soundKey: String, volume: Float, pitch: Float) {
+        activeMembers().forEach { soundFor(it, location, soundKey, volume, pitch) }
+    }
+
+    override fun soundFor(playerId: UUID, location: Location, soundKey: String, volume: Float, pitch: Float) {
+        PlayerOp.dispatch(core.plugin, playerId) { player ->
+            if (player.world != location.world) return@dispatch
+            player.playSound(location, soundKey, org.bukkit.SoundCategory.HOSTILE, volume, pitch)
+        }
+    }
+
+    override fun runOnMember(playerId: UUID, action: java.util.function.Consumer<org.bukkit.entity.Player>) {
+        if (playerId !in activeMembers()) return
+        PlayerOp.dispatch(core.plugin, playerId) { player ->
+            if (player.world != anchor.world) return@dispatch
+            action.accept(player)
+        }
     }
 
     override fun transition(stageId: String) {

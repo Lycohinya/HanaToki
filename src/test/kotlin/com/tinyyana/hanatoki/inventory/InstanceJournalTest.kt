@@ -74,6 +74,16 @@ class InstanceJournalTest {
     }
 
     @Test
+    fun `keep-inventory 旗標來回不失真,預設是覆蓋還原`() {
+        val kept = record().withKeepInventory(true).withState(JournalState.ACTIVE, 3_000L)
+        assertTrue(journal.writeSync(kept))
+        assertTrue(assertNotNull(journal.read(kept.instanceId)).keepInventory)
+        val plain = record()
+        assertTrue(journal.writeSync(plain))
+        assertFalse(assertNotNull(journal.read(plain.instanceId)).keepInventory)
+    }
+
+    @Test
     fun `沒有攜入物的既有紀錄照舊來回`() {
         val original = record()
         assertTrue(journal.writeSync(original))

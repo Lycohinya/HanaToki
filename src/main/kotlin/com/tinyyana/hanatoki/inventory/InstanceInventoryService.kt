@@ -90,6 +90,16 @@ class InstanceInventoryService(
 
     fun activeInstanceIdOf(playerId: UUID): UUID? = activeByPlayer[playerId]
 
+    /**
+     * 這位玩家目前這筆交易是不是 keep-inventory 模式(見 [JournalRecord.keepInventory])。
+     * 巡檢([ForeignItemWarden])與終界箱封鎖只對「手上是局內背包」的人有意義——keep 模式下
+     * 玩家手上本來就是自己的永久背包,不能把它當成偷渡物收走。
+     */
+    fun isKeepInventory(playerId: UUID): Boolean {
+        val instanceId = activeByPlayer[playerId] ?: return false
+        return records[instanceId]?.keepInventory == true
+    }
+
     fun recordOf(instanceId: UUID): JournalRecord? = records[instanceId]
 
     /** `/hanatoki admin journal` 用:目前所有未收斂的交易。 */
@@ -188,6 +198,7 @@ class InstanceInventoryService(
             val extraction = extractCarryIn(snapshot, def.carryIn)
             val clearing = base.withSnapshot(extraction.strippedSnapshot, JournalState.CLEARING, System.currentTimeMillis())
                 .withCarryIn(extraction.escrow)
+                .withKeepInventory(def.keepInventory)
             runAsync { journal.writeSync(clearing) }.thenCompose { written ->
                 if (!written) return@thenCompose CompletableFuture.completedFuture(false)
                 // `matches()` 仍然要對**完整**快照比對(見下方 applyInstanceInventory):清空之前
@@ -280,8 +291,11 @@ class InstanceInventoryService(
             // 整個背包,那樣會把還沒蓋章的攜入物品跟其他東西一起清掉。上面的 matches() 已經
             // 確認背包跟捕捉快照當下完全一致,所以這裡用同一組識別值一定找得到同一件物品。
             markCarryInPlace(p, clearing.carryIn, clearing.instanceId.toString())
-            clearNonCarryInSlots(p, clearing.instanceId.toString())
-            p.inventory.heldItemSlot = 0
+            if (!clearing.keepInventory) {
+                clearNonCarryInSlots(p, clearing.instanceId.toString())
+                p.inventory.heldItemSlot = 0
+            }
+            // keep-inventory:永久背包原封不動,只有攜入物蓋了章;loadout 若有就是額外的局內物品。
             applyLoadout(p, def, clearing.instanceId.toString())
             outcome.complete(0)
         }.whenComplete { _, _ -> outcome.complete(2) } // 玩家在這一步之前登出(見上方 fallback 說明)
@@ -550,6 +564,12 @@ class InstanceInventoryService(
         // null = action 根本沒跑(玩家在這一步之前登出);false = 快照解不開。兩者都不刪 journal,
         // 但嚴重程度差很多:前者是常態,後者要人看。
         val done = CompletableFuture<Boolean?>()
+        if (record.keepInventory) {
+            PlayerOp.dispatch(plugin, player) { p ->
+                done.complete(KeepInventoryRestore.apply(p, record.instanceId.toString(), record.carryIn, items, plugin.logger))
+            }.whenComplete { _, _ -> done.complete(null) }
+            return finishRestore(record, reason, attempt, done)
+        }
         PlayerOp.dispatch(plugin, player) { p ->
             val ok = InventorySnapshot.restore(p, snapshot)
             // 沒被消耗掉的攜入物品原樣還回來(見 CarryInDef)。放在快照覆蓋**之後**——
@@ -557,6 +577,16 @@ class InstanceInventoryService(
             if (ok) restoreUnconsumedCarryIn(p, record.instanceId, record.carryIn)
             done.complete(ok)
         }.whenComplete { _, _ -> done.complete(null) }
+        return finishRestore(record, reason, attempt, done)
+    }
+
+    /** [writeSnapshotBack] 的後半段:依還原動作的結果決定重試、保留 journal 或收斂刪檔。兩種模式共用。 */
+    private fun finishRestore(
+        record: JournalRecord,
+        reason: String,
+        attempt: Int,
+        done: CompletableFuture<Boolean?>,
+    ): CompletableFuture<Boolean> {
         return done.thenCompose { ok ->
             if (ok == null) {
                 // action 沒跑到。玩家還在線 = 撞上 retired(通常是同時在跨世界傳送),值得重試;

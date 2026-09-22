@@ -32,6 +32,10 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class ActorController(private val plugin: Plugin, private val sessionActive: java.util.function.Predicate<UUID>) {
 
+    /** Boss 外觀服務;[com.tinyyana.hanatoki.HanaTokiCore] 建好之後設進來(見 [ActorHandle.bindModel])。 */
+    @Volatile
+    internal var models: com.tinyyana.hanatoki.presentation.BossModels = com.tinyyana.hanatoki.presentation.NoOpBossModels
+
     /** key = "<sessionId>#<actorId>" -> 實體。實體可能已死/已移除,查用時一律再驗 [Entity.isValid]。 */
     private val actors = ConcurrentHashMap<String, Entity>()
 
@@ -197,6 +201,16 @@ class ActorController(private val plugin: Plugin, private val sessionActive: jav
             return out
         }
 
+        override fun bindModel(actorId: String, modelId: String): CompletableFuture<com.tinyyana.hanatoki.presentation.BossModelHandle> {
+            val out = CompletableFuture<com.tinyyana.hanatoki.presentation.BossModelHandle>()
+            val entity = actors[key(sessionId, actorId)] ?: return CompletableFuture.completedFuture(null)
+            // bind 必須在實體自己的 region thread 上呼叫(BossModels.bind 的前提),所以派工過去再綁。
+            // owner 用 sessionId:session 收斂時 HanaTokiCore.finishSession 的 closeOwner 一次收掉。
+            WorldOp.dispatch(plugin, entity) { e -> out.complete(if (e.isValid) models.bind(sessionId.toString(), e, modelId) else null) }
+                .whenComplete { _, _ -> out.complete(null) }
+            return out
+        }
+
         private fun withActor(actorId: String, action: (Entity) -> Unit): CompletableFuture<Void> {
             val entity = actors[key(sessionId, actorId)] ?: return CompletableFuture.completedFuture(null)
             return WorldOp.dispatch(plugin, entity, action)
@@ -223,6 +237,7 @@ class ActorController(private val plugin: Plugin, private val sessionActive: jav
         living?.setAI(spec.ai)
         living?.isCollidable = spec.collidable
         spec.removeWhenFarAway?.let { living?.setRemoveWhenFarAway(it) }
+        spec.scale?.let { value -> living?.getAttribute(Attribute.SCALE)?.baseValue = value }
         spec.maxHealth?.let { hp ->
             living?.getAttribute(Attribute.MAX_HEALTH)?.baseValue = hp
             living?.health = hp

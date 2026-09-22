@@ -64,6 +64,8 @@ class ForeignItemWarden(
         for (record in service.snapshotRecords()) {
             val instanceId = service.activeInstanceIdOf(record.playerId) ?: continue
             if (instanceId != record.instanceId) continue
+            // keep-inventory:玩家手上就是他自己的永久背包,沒有「偷渡物」這回事。
+            if (record.keepInventory) continue
             sweep(record.playerId, instanceId)
         }
     }

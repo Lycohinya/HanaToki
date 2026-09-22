@@ -99,7 +99,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
      * onEnable 執行到這一行時如果它有裝一定已經啟用完了(Bukkit 的 softdepend 保證順序)。
      */
     val bossModels: com.tinyyana.hanatoki.presentation.BossModels =
-        com.tinyyana.hanatoki.presentation.BossModelsFactory.create(plugin)
+        com.tinyyana.hanatoki.presentation.BossModelsFactory.create(plugin).also { actorController.models = it }
     val bossBars = SessionBossBars(plugin)
     val stageEngine = StageEngine(this)
 

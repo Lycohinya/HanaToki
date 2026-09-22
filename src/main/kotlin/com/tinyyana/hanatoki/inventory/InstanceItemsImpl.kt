@@ -49,6 +49,18 @@ class InstanceItemsImpl(
         return item
     }
 
+    /**
+     * 拿掉 instance 章(keep-inventory 模式的攜入物歸還,見 [KeepInventoryRestore])。
+     * 物品本身與它原本的 PDC(整備包契約的六個 key)不動。
+     */
+    internal fun unmark(item: ItemStack): ItemStack {
+        item.editMeta { meta ->
+            meta.persistentDataContainer.remove(scopeKey)
+            meta.persistentDataContainer.remove(instanceKey)
+        }
+        return item
+    }
+
     override fun instanceIdOf(item: ItemStack): String? {
         val meta = item.itemMeta ?: return null
         return meta.persistentDataContainer.get(instanceKey, PersistentDataType.STRING)
