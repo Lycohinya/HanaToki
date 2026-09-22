@@ -16,11 +16,12 @@ website: https://tinyyana.com
 libraries:
   - org.jetbrains.kotlin:kotlin-stdlib-jdk8:2.4.20-Beta1
 
-# 引擎本體邏輯零依賴(玩法內容一律由消費端插件自行提供)。BetterModel 是唯一例外——它只負責
+# 引擎本體不依賴玩法內容(玩法內容一律由消費端插件自行提供)。BetterModel 只負責
 # 潘朵拉的少女：殘響(pandora_echo)的**外觀呈現**(item-display 骨架/動畫/locator 座標),
 # 玩法(階段/技能/hitbox/傷害)仍在 HanaToki 這一側。softdepend 而不是 depend:沒裝的時候
 # HanaToki 照常載入,presentation/BossModels 服務退回 NoOpBossModels(見它的 KDoc)。
-softdepend: [ BetterModel ]
+# Vessel 是可選的生物收納器;先載入後註冊其釋放事件,避免玩家繞過副本放置保護。
+softdepend: [ BetterModel, Vessel ]
 
 commands:
   hanatoki:

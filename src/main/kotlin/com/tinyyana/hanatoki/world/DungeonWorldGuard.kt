@@ -1,7 +1,10 @@
 package com.tinyyana.hanatoki.world
 
 import com.tinyyana.hanatoki.HanaTokiCore
+import org.bukkit.Location
 import org.bukkit.entity.Player
+import org.bukkit.event.Cancellable
+import org.bukkit.event.Event
 import org.bukkit.event.EventHandler
 import org.bukkit.event.EventPriority
 import org.bukkit.event.Listener
@@ -34,6 +37,22 @@ import org.bukkit.event.player.PlayerBucketFillEvent
  * 也不該手滑改到場地,要改就明確開權限。
  */
 class DungeonWorldGuard(private val core: HanaTokiCore) : Listener {
+
+    /** Vessel restores snapshots directly, without EntityPlaceEvent or a reliable spawn reason. */
+    fun registerVesselGuard() {
+        val plugin = core.plugin
+        val vessel = plugin.server.pluginManager.getPlugin("Vessel") ?: return
+        // Use the provider's classloader: Vessel is optional and must not become a compile dependency.
+        val eventType = vessel.javaClass.classLoader
+            .loadClass("org.maboroshi.vessel.api.event.VesselReleaseEvent").asSubclass(Event::class.java)
+        val playerGetter = eventType.getMethod("getPlayer")
+        val locationGetter = eventType.getMethod("getLocation")
+        plugin.server.pluginManager.registerEvent(eventType, this, EventPriority.HIGH, { _, event ->
+            val player = playerGetter.invoke(event) as Player
+            val location = locationGetter.invoke(event) as Location
+            if (deny(player, location.world.name)) (event as Cancellable).isCancelled = true
+        }, plugin, true)
+    }
 
     /**
      * 這一輪擋掉的次數(`/hanatoki admin debug` 看得到,確認保護真的在生效)。
