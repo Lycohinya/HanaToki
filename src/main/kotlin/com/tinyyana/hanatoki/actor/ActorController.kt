@@ -124,6 +124,9 @@ class ActorController(private val plugin: Plugin, private val sessionActive: jav
         override fun teleport(actorId: String, location: Location): CompletableFuture<Void> =
             withActor(actorId) { it.teleportAsync(location) }
 
+        override fun pathTo(actorId: String, location: Location, speed: Double): CompletableFuture<Void> =
+            withActor(actorId) { entity -> (entity as? org.bukkit.entity.Mob)?.pathfinder?.moveTo(location, speed) }
+
         override fun lookAt(actorId: String, target: Location): CompletableFuture<Void> =
             withActor(actorId) { it.lookAt(target.x, target.y, target.z, LookAnchor.EYES) }
 

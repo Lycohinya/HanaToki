@@ -72,6 +72,16 @@ interface ActorHandle {
     /** 瞬移到新位置(決鬥的後撤/突進——[ActorSpec.immovable] 的 actor 只能這樣位移)。 */
     fun teleport(actorId: String, location: Location): CompletableFuture<Void>
 
+    /**
+     * 叫有 AI 的 actor 用**原版尋路**走向某座標(`Mob.pathfinder.moveTo`,[speed] 是移動速度倍率)。
+     * 不是 Mob 的載體、已死、或找不到路時什麼都不做——下一次呼叫再試。
+     *
+     * 存在理由:內容層知道場地的路網(橋口、階梯頂),原版 AI 只看得到追擊半徑內的目標;
+     * 目標在追擊半徑外或隔著一段階梯時,給牠下一個轉接點,實際怎麼走仍由原版決定。
+     * 派工在實體自己的 EntityScheduler(同 [teleport])。
+     */
+    fun pathTo(actorId: String, location: Location, speed: Double): CompletableFuture<Void>
+
     /** 轉向看往某座標(固定站位 actor 的「轉身」)。 */
     fun lookAt(actorId: String, target: Location): CompletableFuture<Void>
 
