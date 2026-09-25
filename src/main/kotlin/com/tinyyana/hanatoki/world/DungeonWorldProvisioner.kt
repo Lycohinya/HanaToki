@@ -54,6 +54,16 @@ class DungeonWorldProvisioner(private val plugin: Plugin) {
      * 東西,留著的只可能是被錯誤生成器寫下的地形。已經載入的世界(熱插拔)不碰。
      */
     fun preloadKnownWorlds() {
+        // 開機的 onEnable 跑在 "Server thread" 上(Lecithin 啟動期還不是 global tick thread)——Multiverse
+        // 也是在同一條執行緒上建它清單裡的世界。只有在這裡同步建,才搶得到 Multiverse 前面;
+        // 排程延後的話它早就用原版生成器把世界載入了(2026-09-25 s01 實測)。
+        startupThread = !Bukkit.getServer().isGlobalTickThread && Thread.currentThread().name == STARTUP_THREAD
+        try { preloadAll() } finally { startupThread = false }
+    }
+
+    @Volatile private var startupThread = false
+
+    private fun preloadAll() {
         for ((name, autoSave) in known.read()) {
             val loaded = Bukkit.getWorld(name)
             if (loaded != null) { warnIfForeignGenerator(loaded, null); continue }
@@ -114,7 +124,7 @@ class DungeonWorldProvisioner(private val plugin: Plugin) {
                 return null
             }
         }
-        if (!Bukkit.getServer().isGlobalTickThread) {
+        if (!Bukkit.getServer().isGlobalTickThread && !startupThread) {
             // 不是「稍後重試就好」的暫時狀況,是呼叫端把 bootstrap 排錯執行緒了——講清楚,
             // 不要在這裡偷偷派工(那會讓呼叫端拿到 null 卻以為只是世界不存在)。
             plugin.logger.severe(
@@ -228,6 +238,8 @@ class DungeonWorldProvisioner(private val plugin: Plugin) {
     }
 
     companion object {
+        private const val STARTUP_THREAD = "Server thread"
+
         /**
          * 在 global region tick thread 上執行 [action]:已經在上面就直接跑(維持呼叫端的
          * 「onEnable 內同步完成」語意),否則派工過去。

@@ -20,8 +20,11 @@ libraries:
 # 潘朵拉的少女：殘響(pandora_echo)的**外觀呈現**(item-display 骨架/動畫/locator 座標),
 # 玩法(階段/技能/hitbox/傷害)仍在 HanaToki 這一側。softdepend 而不是 depend:沒裝的時候
 # HanaToki 照常載入,presentation/BossModels 服務退回 NoOpBossModels(見它的 KDoc)。
-# Vessel 是可選的生物收納器;先載入後註冊其釋放事件,避免玩家繞過副本放置保護。
-softdepend: [ BetterModel, Vessel ]
+# Vessel 是可選的生物收納器;HanaToki 啟用時它已經「載入」(插件全部先載入才開始啟用),
+# DungeonWorldGuard 透過它的 classloader 反射註冊釋放事件,不需要排在它後面。
+# ⚠ 不能再 softdepend Vessel:Vessel loadafter GriefPrevention、GriefPrevention softdepend
+#   Multiverse,加上下面的 loadbefore 會形成循環(2026-09-25 s01 LoadOrderTree ERROR)。
+softdepend: [ BetterModel ]
 # 副本世界要搶在 Multiverse 之前用虛空生成器載入(見 world/KnownDungeonWorlds.kt):Multiverse 清單裡
 # 若有副本世界,它會用原版生成器載入,副本場地就泡進一般地形(2026-09-25 刀塚)
 loadbefore: [ Multiverse-Core ]

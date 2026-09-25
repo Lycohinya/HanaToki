@@ -32,9 +32,11 @@ class HanaTokiPlugin : JavaPlugin() {
         // 載入會順帶建立副本專屬世界(`world-create: true` 的定義),而 Folia/Lecithin 的
         // `createWorld` 只能在 global region tick thread 上呼叫。伺服器啟動時的 onEnable 本來
         // 就在那條執行緒上(直接跑),PlugMan 熱插拔則是由指令觸發、跑在別的 region 上(派工過去)。
+        // 認得的副本世界在這裡**同步**建好(開機的 Server thread / 熱插拔時的 global tick thread),
+        // 搶在 Multiverse 之前(plugin.yml loadbefore);之後它清單裡寫什麼都換不掉生成器
+        if (server.isGlobalTickThread || Thread.currentThread().name == "Server thread") core.worldProvisioner.preloadKnownWorlds()
+        else DungeonWorldProvisioner.runOnGlobalRegion(this) { core.worldProvisioner.preloadKnownWorlds() }
         DungeonWorldProvisioner.runOnGlobalRegion(this) {
-            // 先載入認得的副本世界,Multiverse 之後才輪到(plugin.yml loadbefore),它換不掉生成器
-            core.worldProvisioner.preloadKnownWorlds()
             core.registry.loadAll(dungeonsFile, core.slotPool)
         }
 
