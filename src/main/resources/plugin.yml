@@ -22,6 +22,9 @@ libraries:
 # HanaToki 照常載入,presentation/BossModels 服務退回 NoOpBossModels(見它的 KDoc)。
 # Vessel 是可選的生物收納器;先載入後註冊其釋放事件,避免玩家繞過副本放置保護。
 softdepend: [ BetterModel, Vessel ]
+# 副本世界要搶在 Multiverse 之前用虛空生成器載入(見 world/KnownDungeonWorlds.kt):Multiverse 清單裡
+# 若有副本世界,它會用原版生成器載入,副本場地就泡進一般地形(2026-09-25 刀塚)
+loadbefore: [ Multiverse-Core ]
 
 commands:
   hanatoki:

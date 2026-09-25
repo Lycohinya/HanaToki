@@ -1,0 +1,9 @@
+# HanaToki 建過的虛空副本世界(見 world/KnownDungeonWorlds.kt)。開機時 HanaToki 會搶在 Multiverse
+# 之前用虛空生成器載入這些世界;auto-save: false 的世界(每局重蓋場地)載入前會清掉殘留的區塊。
+# 引擎會自己維護這份檔,新副本不用手動加。出貨版內容是 2026-09-25 正式服各副本世界的種子。
+worlds:
+  hanatoki_tachizuka: {auto-save: false}
+  hanatoki_roguelike: {auto-save: true}
+  hanatoki_pale_cherry: {auto-save: true}
+  hanatoki_pandora_echo: {auto-save: true}
+  hanatoki_rain_court: {auto-save: true}

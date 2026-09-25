@@ -9,6 +9,7 @@ import org.bukkit.World
 import org.bukkit.WorldCreator
 import org.bukkit.entity.SpawnCategory
 import org.bukkit.plugin.Plugin
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -45,6 +46,43 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class DungeonWorldProvisioner(private val plugin: Plugin) {
 
+    val known = KnownDungeonWorlds(File(plugin.dataFolder, "known-worlds.yml"))
+
+    /**
+     * 開機時先把認得的虛空副本世界用虛空生成器載入(必須在 global tick thread,並且在 Multiverse
+     * 之前——plugin.yml 的 loadbefore)。不保留存檔的世界先清掉殘留區塊:那裡不會有任何值得留的
+     * 東西,留著的只可能是被錯誤生成器寫下的地形。已經載入的世界(熱插拔)不碰。
+     */
+    fun preloadKnownWorlds() {
+        for ((name, autoSave) in known.read()) {
+            val loaded = Bukkit.getWorld(name)
+            if (loaded != null) { warnIfForeignGenerator(loaded, null); continue }
+            if (!autoSave) purgeChunkData(name)
+            ensureWorld(name, create = true, autoSave = autoSave, generatorId = null)
+        }
+    }
+
+    /** 26.2 的維度資料夾在主世界底下的 dimensions/<ns>/<name>;舊版在伺服器根目錄。找得到哪個清哪個。 */
+    private fun purgeChunkData(worldName: String) {
+        val overworld = Bukkit.getWorlds().firstOrNull()?.worldFolder ?: return
+        val folder = listOf(
+            File(overworld.parentFile, worldName),
+            File(overworld, "dimensions/minecraft/$worldName"),
+            File(Bukkit.getWorldContainer(), worldName),
+        ).firstOrNull { it.isDirectory } ?: return
+        val removed = KnownDungeonWorlds.CHUNK_DATA.map { File(folder, it) }.filter { it.isDirectory && it.deleteRecursively() }
+        if (removed.isNotEmpty()) plugin.logger.info("[HanaToki] 副本世界 $worldName 不保留存檔,載入前清掉殘留區塊:${removed.joinToString { it.name }}")
+    }
+
+    /** 不擋玩家:世界照常開放,只留下一行找得到原因與修法的 log。 */
+    private fun warnIfForeignGenerator(world: World, generatorId: String?) {
+        if (generatorId != null || world.generator is VoidChunkGenerator) return
+        plugin.logger.warning(
+            "[HanaToki] 副本世界 ${world.name} 已被其他插件用非虛空生成器載入(${world.generator?.javaClass?.name ?: "原版"})," +
+                "新區塊會長出地形。常見原因是 Multiverse 的清單有這個世界:/mv remove ${world.name};下次開機 HanaToki 會先用虛空生成器載入",
+        )
+    }
+
     /** worldName -> 目前已套用的邊界半徑(格)。再次登記更遠的 slot 時才需要撐開。 */
     private val borderRadius = ConcurrentHashMap<String, Double>()
 
@@ -58,7 +96,10 @@ class DungeonWorldProvisioner(private val plugin: Plugin) {
      * @return 世界,或建立失敗時 null(已記 severe log,呼叫端只要跳過該副本的 slot 登記)。
      */
     fun ensureWorld(worldName: String, create: Boolean, autoSave: Boolean, generatorId: String?): World? {
-        Bukkit.getWorld(worldName)?.let { return it }
+        Bukkit.getWorld(worldName)?.let {
+            if (create) { warnIfForeignGenerator(it, generatorId); remember(worldName, autoSave, generatorId) }
+            return it
+        }
         if (!create) return null
         // ⚠ 生成器 id 填了但沒註冊時**不能**退回 void 生成器:那個世界的資料夾可能已經存在
         // (蒼櫻就是),用 void 生成器載入會讓之後生成的區塊全變虛空,而且不可逆。
@@ -93,6 +134,7 @@ class DungeonWorldProvisioner(private val plugin: Plugin) {
             plugin.logger.severe("[HanaToki] 副本世界 $worldName 建立失敗:${it.message}")
         }.getOrNull() ?: return null
 
+        remember(worldName, autoSave, generatorId)
         if (generatorId == null) {
             applyVoidWorldSettings(world, autoSave)
             buildSpawnPlatform(world)
@@ -102,6 +144,11 @@ class DungeonWorldProvisioner(private val plugin: Plugin) {
             plugin.logger.info("[HanaToki] 副本世界就緒:$worldName(生成器 $generatorId,auto-save=$autoSave)")
         }
         return world
+    }
+
+    private fun remember(worldName: String, autoSave: Boolean, generatorId: String?) {
+        runCatching { if (generatorId == null) known.remember(worldName, autoSave) else known.forget(worldName) }
+            .onFailure { plugin.logger.warning("[HanaToki] known-worlds.yml 寫入失敗:${it.message}") }
     }
 
     /**
