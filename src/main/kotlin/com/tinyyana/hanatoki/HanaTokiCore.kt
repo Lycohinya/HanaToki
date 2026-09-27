@@ -73,10 +73,14 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
                 val ended = sessionManager.endSession(session.sessionId, EndReason.ABANDONED) ?: return@mapNotNull null
                 finishSession(ended, registry.definitions[ended.dungeonId]?.worldName)
             }
-            // 收斂卡住(有人送不出去)時不能讓 drain 永遠等:逾時就回報失敗,收斂本身照樣在背景重試,
-            // slot 不會因為 drain 放棄等待而被提早歸還。
-            val cleanupWaits = slotCleanups.pendingFor(ids).map {
-                it.copy().orTimeout(DRAIN_CLEANUP_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+            // 收斂卡住(有人死在死亡畫面、送不出去)時 drain 不能永遠等,也**不能失敗**:drain 失敗的話
+            // 內容的定義永遠停在「關閉中」,新版 jar 載入後重新註冊會被擋掉,那座副本在重開服前都進不去。
+            // 所以逾時就放行;收斂本身照樣在背景重試,slot 在重新註冊時會被重新保留(見 reservePendingSlots)。
+            val cleanupWaits = slotCleanups.pendingFor(ids).map { pending ->
+                pending.copy().completeOnTimeout(null, DRAIN_CLEANUP_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
+                    .whenComplete { _, _ ->
+                        if (!pending.isDone) plugin.logger.warning("[HanaToki] 副本 $ids 收回時仍有場地在收斂,先放行,收斂在背景繼續(/hanatoki admin list)")
+                    }
             }
             CompletableFuture.allOf(*(endings + stageEngine.pendingEnds(ids) + cleanupWaits).toTypedArray())
         }
@@ -632,6 +636,39 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         // 這一處——不用在每個結束路徑各補一次。
         bossModels.closeOwner(ended.sessionId.toString())
         return beginCleanup(ended, stageEngine.endFor(ended.sessionId, ended.reason.name), drainingWorld, holdsSlot = true)
+    }
+
+    /**
+     * 內容重新註冊(熱插拔換版)時,上一版還沒收完的場地要繼續佔著:slot 登記是重建出來的全新
+     * 一份(預設空閒),不保留的話新的一局會分到一個還有人/還沒回滾的場地。收斂完成時照常歸還。
+     */
+    internal fun reservePendingSlots(dungeonIds: Collection<String>) {
+        for (id in dungeonIds) {
+            slotPool.slotIds(id).filter { slotCleanups.hasPendingFor(it) }.forEach { slotId ->
+                if (slotPool.reserve(slotId)) plugin.logger.info("[HanaToki] slot=$slotId 上一版的收斂還沒完成,重新註冊後繼續保留")
+            }
+        }
+    }
+
+    /**
+     * 內容註冊完成後:人在這些副本世界裡、卻沒有任何 session 的線上玩家 = 熱插拔當下被留在場地上的人
+     * (HanaToki 或內容插件換版時,進行中的局已經被收掉,新的一份登記表不認得他們)。
+     * 跟登入時的安全網同一條路:先還背包,再送回去。常駐副本的世界不在這裡(那裡本來就可以站)。
+     */
+    internal fun rescueStrandedPlayers(dungeonIds: Collection<String>) {
+        val worlds = dungeonIds.mapNotNull { registry.definitions[it] }
+            .filter { it.mode != ExecutionMode.PERSISTENT && isDungeonWorld(it.worldName) }
+            .map { it.worldName }.toSet()
+        if (worlds.isEmpty()) return
+        for (player in plugin.server.onlinePlayers) {
+            PlayerOp.dispatch(plugin, player) { p ->
+                if (p.world.name !in worlds || sessionManager.sessionOf(p.uniqueId) != null) return@dispatch
+                instanceInventory.restoreForPlayer(p.uniqueId, "reload-rescue").whenComplete { _, _ ->
+                    sendHome(p.uniqueId)
+                    PlayerOp.message(plugin, p.uniqueId, texts.format("session.recovered"))
+                }
+            }
+        }
     }
 
     /**

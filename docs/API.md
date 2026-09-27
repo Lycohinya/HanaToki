@@ -241,6 +241,8 @@ val items = server.servicesManager.getRegistration(InstanceItems::class.java)?.p
 
 session 結束後依序：還背包 → 送人離場（確認真的不在場上）→ 回滾場地 → 歸還 slot。任何一步失敗（傳送回 false／丟例外／實體 retired、玩家死亡中）都**留在原地每秒重試**，死亡的人等重生、離線的人交給登入流程；全員離場之後才回滾，slot 恰好歸還一次。收斂中的 slot 用 `/hanatoki admin list` 看（phase、待離場人數、每人嘗試次數、最後錯誤）；`/hanatoki admin reset <slot>` 對收斂中的 slot 只會立即重試，不會在有人還在場上時硬放。
 
+**熱插拔**：內容插件停用時的 drain 最多等收斂 30 秒，逾時放行而不是失敗（失敗會讓定義卡在「關閉中」，新版重新註冊被擋、那座副本在重開服前都進不去）。重新註冊時，上一版還沒收完的 slot 會繼續佔著直到收斂歸還；人在這些副本世界裡卻沒有 session 的線上玩家會被還背包並送回原處。換 HanaToki 本身會連鎖重載所有內容插件，進行中的每一局都以 abandoned 結束。
+
 ## 6. `PresenceBridge`
 
 ```kotlin

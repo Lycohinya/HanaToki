@@ -993,7 +993,12 @@ class InstanceInventoryService(
             journal.writeSync(restoring) // 同步:此時不能再依賴 AsyncScheduler
             records[record.instanceId] = restoring
             activeByPlayer.remove(record.playerId, record.instanceId)
-            if (hotSwap) writeSnapshotBack(restoring, "plugin-disable", attempt = 0)
+            // 插件停用中排不進 EntityScheduler 會直接丟例外;不接住的話迴圈會斷在這一筆,
+            // 後面的交易就沒有被標成 RESTORING(重新啟用時一樣會收,只是少了這一層保險)。
+            if (hotSwap) {
+                runCatching { writeSnapshotBack(restoring, "plugin-disable", attempt = 0) }
+                    .onFailure { plugin.logger.info("[HanaToki] instance=${record.instanceId} 停用中無法即時還原,重新啟用時會接手:${it.message}") }
+            }
         }
     }
 

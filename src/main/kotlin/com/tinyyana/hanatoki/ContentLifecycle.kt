@@ -41,6 +41,8 @@ internal class ContentLifecycle(private val core: HanaTokiCore) {
                         ids.forEach { id -> core.registry.definitions[id]?.let { core.registry.unregister(id, it, core.slotPool) } }
                         throw error
                     }
+                    // 開放進場之前:上一版還沒收完的場地繼續佔著,不能分給新的一局。
+                    core.reservePendingSlots(ids)
                     val definitions = ids.associateWith { core.registry.definitions[it] ?: error("Definition not loaded: $it") }
                     val registration = Registration(owner.name, definitions, HashMap(texts), HashMap(behaviors))
                     knownOwners += owner.name
@@ -49,6 +51,8 @@ internal class ContentLifecycle(private val core: HanaTokiCore) {
                     core.texts.merge(texts)
                     result.complete(registration)
                 }
+                // 熱插拔當下被留在這些副本世界裡的人,送回原本的地方。
+                core.rescueStrandedPlayers(ids)
             } catch (error: Throwable) { result.completeExceptionally(error) }
         })
         return result

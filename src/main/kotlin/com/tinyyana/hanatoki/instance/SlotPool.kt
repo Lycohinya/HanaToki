@@ -52,6 +52,9 @@ class SlotPool<A> {
         slots[slotId]?.occupied?.set(false)
     }
 
+    /** 直接把一個空閒的 slot 標成佔用(不經 [allocate] 的挑選)。回傳是否由這次呼叫佔到。 */
+    fun reserve(slotId: String): Boolean = slots[slotId]?.occupied?.compareAndSet(false, true) ?: false
+
     fun isOccupied(slotId: String): Boolean = slots[slotId]?.occupied?.get() ?: false
 
     fun anchorOf(slotId: String): A? = slots[slotId]?.anchor
