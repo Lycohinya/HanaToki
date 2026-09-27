@@ -28,14 +28,14 @@ class InstanceItemsImpl(
     /** 查「這位玩家現在在跑哪一局」。由 [InstanceInventoryService] 提供(同插件內,不跨邊界)。 */
     private val activeLookup: (UUID) -> UUID?,
     /**
-     * 查「這位玩家現在跟誰同一個 session」(含自己)。由 [InstanceInventoryService] 轉接
-     * `SessionManager`(同插件內,不跨邊界)。查不到 session 就回空集合。
+     * 查「這位玩家目前這個 session 發出過的全部 instance token」(含他自己的)。由
+     * [InstanceInventoryService] 提供(同插件內,不跨邊界)。不在任何 session 裡就回空集合。
      *
-     * 存在理由見 [isLegalFor]:多人副本(深域)的掉落是地面共享堆,但 `instanceId` 是
-     * per-player 的安全背包交易概念(每位隊員各自一份、值互不相同),兩者語意不同,
-     * 合法性判定要跨隊友查,不能只認自己那一份。
+     * 存在理由見 [RunItemLegality]:多人副本(深域)的起始武器與掉落是整隊共用的,
+     * 但 `instanceId` 是 per-player 的背包交易 token,合法性要看 session 發過哪些 token,
+     * 不能只認自己那一份,也不能只認「現在還在場」的隊員那幾份。
      */
-    private val sessionMembersOf: (UUID) -> Collection<UUID> = { emptyList() },
+    private val sessionTokensOf: (UUID) -> Set<String> = { emptySet() },
 ) : InstanceItems {
 
     private val scopeKey = NamespacedKey(plugin, "instance_scope")
@@ -76,13 +76,23 @@ class InstanceItemsImpl(
 
     override fun activeInstanceIdOf(playerId: UUID): String? = activeLookup(playerId)?.toString()
 
-    override fun isLegalFor(playerId: UUID, item: ItemStack): Boolean {
-        if (!isInstanceScoped(item)) return true // 永久物品,永遠合法
-        val itemInstance = instanceIdOf(item) ?: return false // 標記半殘 → 不合法
-        if (itemInstance == activeLookup(playerId)?.toString()) return true
-        // 隊友的掉落物一樣合法(2026-09-02 修:深域組隊掉落是地面共享堆,誰走過去撿都行——
-        // 但物品身上只蓋得了一位隊員的 instanceId,不能只認跟自己完全相同的那一份)。
-        return sessionMembersOf(playerId).any { it != playerId && activeLookup(it)?.toString() == itemInstance }
+    override fun isLegalFor(playerId: UUID, item: ItemStack): Boolean =
+        verdictFor(playerId, item) != RunItemVerdict.RUN_ILLEGAL
+
+    /**
+     * 所有執行期合法性判定的唯一入口(拾取、掃背包、巡檢都走這裡),規則見 [RunItemLegality]。
+     * 永久物品回 [RunItemVerdict.PERMANENT]——對「外流」方向它合法,對巡檢的「局內只准有局內物品」
+     * 方向它是要移出去的局外物品,由呼叫端依方向解讀。
+     */
+    fun verdictFor(playerId: UUID, item: ItemStack): RunItemVerdict {
+        val scoped = isInstanceScoped(item)
+        if (!scoped) return RunItemVerdict.PERMANENT
+        return RunItemLegality.classify(
+            scoped = true,
+            itemToken = instanceIdOf(item),
+            playerToken = activeLookup(playerId)?.toString(),
+            sessionTokens = sessionTokensOf(playerId),
+        )
     }
 
     private companion object {

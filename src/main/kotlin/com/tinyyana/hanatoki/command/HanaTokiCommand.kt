@@ -131,10 +131,22 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
             }
             "list" -> {
                 val sessions = core.sessionManager.snapshot()
-                if (sessions.isEmpty()) { sender.sendMessage("§7目前沒有進行中的 session"); return }
+                if (sessions.isEmpty()) sender.sendMessage("§7目前沒有進行中的 session")
                 sessions.forEach {
                     sender.sendMessage("§7session=${it.sessionId} dungeon=${it.dungeonId} slot=${it.slotId} members=${it.activeMembers().size}")
                 }
+                // session 已結束、場地還在收斂的 slot(有人還沒送出去、回滾在重試)。
+                val cleanups = core.slotCleanups.describe()
+                if (cleanups.isNotEmpty()) {
+                    sender.sendMessage("§7=== 收斂中(${cleanups.size})===")
+                    cleanups.forEach { sender.sendMessage("§7  $it") }
+                }
+                // 佔用中卻沒有 session 也沒有收斂的 slot = 洩漏(舊版本留下的),用 admin reset 歸還。
+                val sessionSlots = sessions.map { it.slotId }.toSet()
+                val leaked = core.slotPool.slotIds().filter {
+                    core.slotPool.isOccupied(it) && it !in sessionSlots && !core.slotCleanups.hasPendingFor(it)
+                }
+                if (leaked.isNotEmpty()) sender.sendMessage("§c佔用中但沒有 session/收斂的 slot:${leaked.joinToString(", ")}")
             }
             "kick" -> {
                 val name = args.getOrNull(2) ?: run { sender.sendMessage("§c用法:/hanatoki admin kick <player>"); return }
@@ -144,8 +156,7 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
             }
             "reset" -> {
                 val slotId = args.getOrNull(2) ?: run { sender.sendMessage("§c用法:/hanatoki admin reset <slotId>"); return }
-                core.adminReset(slotId)
-                sender.sendMessage("§a已重置 slot $slotId")
+                sender.sendMessage("§a" + core.adminReset(slotId))
             }
             "debug" -> {
                 sender.sendMessage("§7=== HanaToki debug ===")
@@ -154,6 +165,8 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
                     sender.sendMessage("§7  $id: free=${core.slotPool.freeCount(id)}/${core.slotPool.totalCount(id)}")
                 }
                 sender.sendMessage("§7進行中 session 數:${core.sessionManager.snapshot().size}")
+                sender.sendMessage("§7收斂中的場地:${core.slotCleanups.describe().size}(明細:/hanatoki admin list)")
+                sender.sendMessage("§7暫存箱待送:${core.instanceInventory.returns.playersWithPending().size} 位玩家")
                 sender.sendMessage("§7副本世界:${core.registry.dungeonWorldNames}")
                 sender.sendMessage("§7未收斂的局內背包交易:" + core.instanceInventory.snapshotRecords().size + " 筆(明細:/hanatoki admin journal)")
                 sender.sendMessage("§7" + core.stageEngine.dynamicEncounters.debugTotals())

@@ -128,7 +128,7 @@ class StageEngine(private val core: HanaTokiCore) {
         // 到這裡),所以 dungeon/slot/anchor 不能再從 sessionManager 查,要從 startFor 記的那份拿。
         val meta = sessionMeta.remove(sessionId)
         // 進行中的地圖 placement 立刻取消(prepare 才會早點結束),之後這個 session 的 place 一律拒收。
-        // 真正的方塊回收在 slot 釋放前(HanaTokiCore.rollbackAndRelease)。
+        // 真正的方塊回收在 slot 釋放前(HanaTokiCore.rollbackSlot,由 SlotCleanupCoordinator 在全員離場後呼叫)。
         meta?.let { core.mapPlacements.closeSession(it.slotId, sessionId) }
         val finished = CompletableFuture<Void>()
         if (meta != null) {

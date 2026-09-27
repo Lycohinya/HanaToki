@@ -27,7 +27,7 @@ class HanaTokiPlugin : JavaPlugin() {
         saveResource("dungeons.yml", false)
         saveResource("messages.yml", false)
         saveResource("known-worlds.yml", false)
-        core.texts.reload(File(dataFolder, "messages.yml"))
+        core.texts.reload(File(dataFolder, "messages.yml"), getResource("messages.yml"))
         val dungeonsFile = File(dataFolder, "dungeons.yml")
         // 載入會順帶建立副本專屬世界(`world-create: true` 的定義),而 Folia/Lecithin 的
         // `createWorld` 只能在 global region tick thread 上呼叫。伺服器啟動時的 onEnable 本來

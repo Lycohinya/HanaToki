@@ -34,6 +34,9 @@ class ReturnPointRegistry(private val isDungeonWorld: (String) -> Boolean) {
     /** 取出並移除登記(送人回去是一次性的);沒有登記就回 null,由呼叫端走 [fallbackFor]。 */
     fun take(playerId: UUID): Location? = points.remove(playerId)
 
+    /** 看一眼登記的返回點但不移除:傳送可能失敗要重試,確定送到了才 [forget]。 */
+    fun peek(playerId: UUID): Location? = points[playerId]?.clone()
+
     fun forget(playerId: UUID) {
         points.remove(playerId)
     }

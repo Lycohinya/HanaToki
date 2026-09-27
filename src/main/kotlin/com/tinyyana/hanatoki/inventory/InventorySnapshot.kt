@@ -79,37 +79,9 @@ class InventorySnapshot(
             return true
         }
 
-        /**
-         * 把幾件物品塞進快照的空格位,回傳新的快照。
-         *
-         * 用途只有一個:[ForeignItemWarden] 在 Run 裡抓到不屬於這一局的東西時,把它移進
-         * 「離場要還給玩家的那份背包」。只用**主背包格位**(0 until [STORAGE_SLOTS]):
-         * 盔甲欄與副手欄還原時會直接穿上/拿在手上,不是放東西的地方。
-         *
-         * 回傳 null = 快照解不開或已經沒有空格。呼叫端要記 log 而不是靜靜當作成功
-         * ——那代表有幾件東西真的不見了。
-         */
-        fun withAdded(snapshot: InventorySnapshot, stacks: List<ItemStack>): InventorySnapshot? {
-            if (stacks.isEmpty()) return snapshot
-            val decoded = try {
-                ItemStack.deserializeItemsFromBytes(snapshot.itemBytes)
-            } catch (e: Exception) {
-                return null
-            }
-            val slots = minOf(decoded.size, STORAGE_SLOTS)
-            var cursor = 0
-            for (stack in stacks) {
-                while (cursor < slots && decoded[cursor] != null && decoded[cursor]!!.type != Material.AIR) cursor++
-                if (cursor >= slots) return null
-                decoded[cursor] = stack
-                cursor++
-            }
-            val normalized = Array(decoded.size) { i -> decoded[i] ?: ItemStack(Material.AIR) }
-            return InventorySnapshot(ItemStack.serializeItemsAsBytes(normalized), snapshot.heldSlot, snapshot.contentsSize)
-        }
-
-        /** 主背包(快捷列 + 三排)的格數;之後是盔甲與副手。 */
-        const val STORAGE_SLOTS = 36
+        // 2026-09-27:原本這裡有一支 `withAdded`,讓巡檢把局外物品併進快照。快照滿了會整批遺失、
+        // 誤判的局內物品也會污染永久背包,已改成獨立的暫存箱(見 ReturnMailbox)。快照從此只在
+        // 進場時拍一次,不再被任何人改寫。
 
         /**
          * 目前背包跟這份快照是不是同一份內容。

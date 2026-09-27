@@ -36,6 +36,9 @@ class HanaTokiListener(private val core: HanaTokiCore) : Listener {
 
     @EventHandler
     fun onQuit(event: PlayerQuitEvent) {
+        // 局內登出:背包裡被別的插件塞進來、巡檢還沒輪到的永久物品先移進暫存箱——之後登入的
+        // 還原是整組覆蓋,留在局內背包裡的會被蓋掉。登出事件在該玩家自己的 region 上觸發。
+        core.instanceInventory.sweepPermanentOnQuit(event.player)
         core.sessionManager.markOffline(event.player.uniqueId, System.currentTimeMillis())
         // admin debug 指令生的 boss model 是掛在 "debug:<uuid>" 這個 owner 下,不屬於任何
         // session,session 結束的收斂路徑(finishSession)碰不到它——玩家離線就順手清掉。
@@ -226,6 +229,9 @@ class HanaTokiListener(private val core: HanaTokiCore) : Listener {
     @EventHandler(priority = EventPriority.HIGHEST)
     fun onPlayerDeath(event: PlayerDeathEvent) {
         val playerId = event.player.uniqueId
+        // 局內背包裡的永久物品(巡檢還沒輪到的)不落在場地上:收斂掃地會把它們清掉。
+        // 必須在下面 kick/Resolution 之前——那兩條會立刻讓這一局失效。
+        core.instanceInventory.divertPermanentDrops(playerId, event.drops)
         val stripped = core.instanceItemGuard.stripInstanceItemsFromDrops(event.drops)
         if (stripped > 0) {
             core.plugin.logger.info("[HanaToki] ${event.player.name} 死亡時移除了 $stripped 組局內物品掉落")

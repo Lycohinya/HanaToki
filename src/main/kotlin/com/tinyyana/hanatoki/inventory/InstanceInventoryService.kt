@@ -67,8 +67,8 @@ import java.util.concurrent.ConcurrentHashMap
 class InstanceInventoryService(
     private val plugin: Plugin,
     private val journal: InstanceJournal,
-    /** 見 [InstanceItemsImpl] 的同名參數:多人副本的隊友合法性判定要轉接 `SessionManager`。 */
-    sessionMembersOf: (UUID) -> Collection<UUID> = { emptyList() },
+    /** Run 期間移出局內背包的永久物品(見 [ReturnMailbox])。 */
+    val returns: ReturnMailbox,
     /** 整備包見證出口(見 `com.tinyyana.hanatoki.expedition.ExpeditionSink`)。 */
     private val expeditionDispatcher: ExpeditionDispatcher = ExpeditionDispatcher(plugin),
 ) {
@@ -86,7 +86,34 @@ class InstanceInventoryService(
      */
     private val activeByPlayer = ConcurrentHashMap<UUID, UUID>()
 
-    val items: InstanceItemsImpl = InstanceItemsImpl(plugin, { playerId -> activeByPlayer[playerId] }, sessionMembersOf)
+    /** sessionId → 這個 session 發出過的全部 token(見 [RunItemLegality] 的 session-aware 規則)。 */
+    private val sessionTokens = SessionTokenRegistry()
+
+    /**
+     * 「玩家手上**確定**是局內背包」的交易:清空已經真的執行過、而覆蓋還原還沒執行。
+     *
+     * 跟 [activeByPlayer] 不同:那一張在 [startRestore] 一開始就拿掉(收斂中所有局內物品立刻
+     * 失效),但背包真的被覆蓋要等派工到玩家 region 才發生。這段期間別的插件塞進來的永久物品,
+     * 以前會被覆蓋還原直接蓋掉——[writeSnapshotBack] 靠這張表判斷「現在手上這份還是局內背包」,
+     * 是的話先把永久物品移進 [returns] 再覆蓋。只存在記憶體:重啟後無法確定手上是哪一份,
+     * 那時寧可不收(收錯會把整個永久背包複製一份)。
+     */
+    private val liveRuns: MutableSet<UUID> = ConcurrentHashMap.newKeySet()
+
+    val items: InstanceItemsImpl = InstanceItemsImpl(plugin, { playerId -> activeByPlayer[playerId] }, ::sessionTokensFor)
+
+    /** 見 [InstanceItemsImpl] 的 `sessionTokensOf`。 */
+    private fun sessionTokensFor(playerId: UUID): Set<String> {
+        val token = activeByPlayer[playerId] ?: return emptySet()
+        val sessionId = records[token]?.sessionId ?: return setOf(token.toString())
+        return sessionTokens.tokensOf(sessionId) + token.toString()
+    }
+
+    /** session 結束:它發出過的 token 從此不再讓任何物品合法(成員的 active 狀態本來也已經收掉)。 */
+    fun forgetSession(sessionId: UUID) = sessionTokens.forget(sessionId)
+
+    /** 這位玩家還有沒有沒收斂完的背包交易(PREPARED~RESTORING 任一)。有的話不能往他背包送東西。 */
+    fun hasOpenRecord(playerId: UUID): Boolean = records.values.any { it.playerId == playerId }
 
     fun activeInstanceIdOf(playerId: UUID): UUID? = activeByPlayer[playerId]
 
@@ -145,6 +172,7 @@ class InstanceInventoryService(
     /** 進場在傳送成功之前失敗:PREPARED 依定義沒動過背包,直接丟掉這筆就是完整回滾。 */
     fun abort(instanceId: UUID): CompletableFuture<Void> {
         records.remove(instanceId)
+        liveRuns -= instanceId
         activeByPlayer.entries.removeIf { it.value == instanceId }
         return runAsync { journal.delete(instanceId) }.thenApply { null }
     }
@@ -196,7 +224,10 @@ class InstanceInventoryService(
             // 可帶入物(見 CarryInDef):從**這次捕捉到的**永久背包快照裡挑出符合規則的格位——
             // 一定要用剛拍到的這份而不是上一次 attempt 的舊快照,重拍代表背包在這期間變過。
             val extraction = extractCarryIn(snapshot, def.carryIn)
-            val clearing = base.withSnapshot(extraction.strippedSnapshot, JournalState.CLEARING, System.currentTimeMillis())
+            // 永久背包快照裡不准有局內物品:玩家身上殘留的舊局物品依定義已經失效,放進快照的話
+            // 還原時會原樣回到永久背包,再被下一次掃描刪掉——那正是 2026-09-27 事故的污染路徑。
+            val permanent = withoutInstanceItems(extraction.strippedSnapshot, base.instanceId, "進場快照")
+            val clearing = base.withSnapshot(permanent, JournalState.CLEARING, System.currentTimeMillis())
                 .withCarryIn(extraction.escrow)
                 .withKeepInventory(def.keepInventory)
             runAsync { journal.writeSync(clearing) }.thenCompose { written ->
@@ -297,6 +328,8 @@ class InstanceInventoryService(
             }
             // keep-inventory:永久背包原封不動,只有攜入物蓋了章;loadout 若有就是額外的局內物品。
             applyLoadout(p, def, clearing.instanceId.toString())
+            // 從這一刻起玩家手上確定是局內背包(keep-inventory 例外:手上本來就是永久背包)。
+            if (!clearing.keepInventory) liveRuns += clearing.instanceId
             outcome.complete(0)
         }.whenComplete { _, _ -> outcome.complete(2) } // 玩家在這一步之前登出(見上方 fallback 說明)
 
@@ -312,11 +345,18 @@ class InstanceInventoryService(
                         if (!ok) {
                             plugin.logger.warning("[HanaToki] instance=${clearing.instanceId} ACTIVE 狀態寫入失敗,journal 留在 CLEARING(恢復行為相同)")
                         }
+                        // 先登記 session token 再開放合法性:隊友拿到蓋這個 token 的共用物品時,
+                        // 這一份必須已經在 session 的清單裡。
+                        clearing.sessionId?.let { sessionTokens.register(it, clearing.instanceId) }
                         activeByPlayer[clearing.playerId] = clearing.instanceId
                         true
                     }
                 }
-                else -> CompletableFuture.completedFuture(false)
+                else -> {
+                    // 清空沒有執行到(背包在變或玩家離線):手上仍是永久背包,不能當成 live run。
+                    liveRuns -= clearing.instanceId
+                    CompletableFuture.completedFuture(false)
+                }
             }
         }
     }
@@ -405,29 +445,159 @@ class InstanceInventoryService(
     // ---- 局外物品的隔離 ------------------------------------------------------
 
     /**
-     * 把 [ForeignItemWarden] 從局內背包裡拿走的非本局物品,移進那份還沒還給玩家的快照。
+     * 把從局內背包移出的**永久物品**放進 [returns],離場、背包有空位時再放回去。
      *
-     * 東西不會消失:它直接進入「離場時要覆蓋回去的那份永久背包」,沿用既有的還原路徑,
-     * 不需要第二套恢復語意。只有 ACTIVE/CLEARING(= 快照已經落地)的交易才收——其他狀態
-     * 依定義沒有快照可以放,那時候應該根本不會有 Run 在跑。
+     * 以前是併進 journal 的永久背包快照:快照滿了整批遺失,被誤判的局內物品也跟著污染快照
+     * (2026-09-27 深域事故,見 [ReturnMailbox])。快照從此只在進場時拍一次,巡檢不再改寫它。
+     *
+     * ⚠ 呼叫端必須已經把這些物品從玩家身上拿走,而且只傳沒有局內章的物品(分類見
+     * [RunItemLegality]);失效的局內物品不准進來——它們不屬於任何人的永久背包,放進來就是把
+     * 垃圾洗成永久道具。這裡再檢查一次,漏網的直接丟掉並記 log。
+     *
+     * 記憶體立即生效(呼叫端在同一條玩家 region 執行緒上先拿走、再入箱,中間沒有讓出執行緒),
+     * 寫檔走非同步;寫檔失敗時東西仍在記憶體,之後的 [flushReturns] 會重寫。
      */
-    fun quarantine(instanceId: UUID, stacks: List<ItemStack>): CompletableFuture<Boolean> {
-        if (stacks.isEmpty()) return CompletableFuture.completedFuture(true)
-        val record = records[instanceId] ?: return CompletableFuture.completedFuture(false)
-        val snapshot = record.snapshot ?: run {
-            plugin.logger.warning("[HanaToki] instance=$instanceId 沒有快照可以收 ${stacks.size} 件局外物品,那幾件已經遺失")
-            return CompletableFuture.completedFuture(false)
+    fun depositReturns(playerId: UUID, stacks: List<ItemStack>, source: String): Int {
+        val payloads = ArrayList<ByteArray>()
+        val accepted = ArrayList<ItemStack>()
+        for (stack in stacks) {
+            if (stack.type == Material.AIR || stack.amount <= 0) continue
+            if (items.isInstanceScoped(stack)) {
+                plugin.logger.warning("[HanaToki] player=$playerId 的 $source 夾帶局內物品 ${stack.type}x${stack.amount},不放進暫存箱")
+                continue
+            }
+            payloads += stack.serializeAsBytes()
+            accepted += stack
         }
-        val merged = InventorySnapshot.withAdded(snapshot, stacks) ?: run {
-            plugin.logger.warning("[HanaToki] instance=$instanceId 的永久背包快照放不下 ${stacks.size} 件局外物品(滿了或解不開),那幾件已經遺失")
-            return CompletableFuture.completedFuture(false)
+        if (payloads.isEmpty()) return 0
+        returns.deposit(playerId, payloads)
+        plugin.logger.info(
+            "[HanaToki] player=$playerId $source:${payloads.size} 件永久物品移進暫存箱,離場後放回背包:" +
+                accepted.joinToString(",") { "${it.type}x${it.amount}" },
+        )
+        flushReturns()
+        return payloads.size
+    }
+
+    /** 把暫存箱的待寫檔狀態寫進磁碟(非同步)。失敗的保留 dirty,下一輪巡檢再寫。 */
+    fun flushReturns() {
+        if (!returns.hasDirty()) return
+        runAsync { returns.flushDirty() }.whenComplete { failed, error ->
+            if (error != null || (failed ?: 0) > 0) {
+                plugin.logger.severe("[HanaToki] 暫存箱有 ${failed ?: "?"} 位玩家的資料寫檔失敗(物品仍在記憶體,下一輪重試)")
+            }
         }
-        val updated = record.withSnapshot(merged, record.state, System.currentTimeMillis())
-        records[instanceId] = updated
-        return runAsync { journal.writeSync(updated) }.thenApply { ok ->
-            if (!ok) plugin.logger.warning("[HanaToki] instance=$instanceId 隔離物品的快照寫不進 journal(記憶體鏡像已更新,崩潰的話那幾件會遺失)")
-            ok
+    }
+
+    /**
+     * 暫存箱送件,**必須在該玩家自己的 EntityScheduler 上呼叫**。回傳 (放回幾件, 還剩幾件)。
+     *
+     * 只在玩家沒有任何未收斂的背包交易時送:交易還開著代表手上可能是局內背包,或還原還沒覆蓋,
+     * 這時放進去的東西會被還原蓋掉。背包放不下的部分原樣留在箱子裡,下一輪再試。
+     */
+    fun deliverReturns(player: Player): Pair<Int, Int> {
+        val playerId = player.uniqueId
+        if (player.isDead || hasOpenRecord(playerId)) return 0 to returns.pendingCount(playerId)
+        val attempted = returns.peek(playerId)
+        if (attempted.isEmpty()) return 0 to 0
+        val leftovers = ArrayList<ByteArray>()
+        var delivered = 0
+        for (bytes in attempted) {
+            val stack = try {
+                ItemStack.deserializeBytes(bytes)
+            } catch (e: Exception) {
+                null
+            }
+            if (stack == null || stack.type == Material.AIR) {
+                // 解不開不能丟:留在箱子裡給人工處理(每位玩家每十分鐘最多記一次)。
+                leftovers += bytes
+                warnUndecodable(playerId)
+                continue
+            }
+            val rest = player.inventory.addItem(stack).values
+            if (rest.isEmpty()) delivered++
+            rest.forEach { leftovers += it.serializeAsBytes() }
         }
+        returns.settle(playerId, attempted, leftovers)
+        flushReturns()
+        if (delivered > 0) {
+            plugin.logger.info("[HanaToki] player=$playerId 暫存箱放回 $delivered 件,剩 ${leftovers.size} 件等空位")
+        }
+        return delivered to leftovers.size
+    }
+
+    private val undecodableWarnedAt = ConcurrentHashMap<UUID, Long>()
+
+    private fun warnUndecodable(playerId: UUID) {
+        val now = System.currentTimeMillis()
+        val last = undecodableWarnedAt[playerId]
+        if (last != null && now - last < UNDECODABLE_WARN_INTERVAL_MS) return
+        undecodableWarnedAt[playerId] = now
+        plugin.logger.severe("[HanaToki] player=$playerId 的暫存箱有物品解不開,原樣保留,請人工檢查")
+    }
+
+    /**
+     * 局內死亡:掉落清單裡的**永久物品**(Run 期間別的插件塞進來、巡檢還沒輪到的)移進暫存箱,
+     * 不讓它們落在副本場地上被收斂掃地清掉。局內物品的處理不在這裡(見 `InstanceItemGuard`)。
+     * 只對「手上確定是局內背包」的交易生效;keep-inventory 的掉落是玩家自己的永久背包,不碰。
+     */
+    fun divertPermanentDrops(playerId: UUID, drops: MutableList<ItemStack>): Int {
+        val instanceId = activeByPlayer[playerId] ?: return 0
+        if (instanceId !in liveRuns) return 0
+        val permanent = drops.filter { it.type != Material.AIR && !items.isInstanceScoped(it) }
+        if (permanent.isEmpty()) return 0
+        drops.removeAll { stack -> permanent.any { it === stack } }
+        return depositReturns(playerId, permanent, "死亡掉落")
+    }
+
+    /**
+     * 局內登出:把背包裡的永久物品移進暫存箱,**必須在該玩家自己的 EntityScheduler 上呼叫**
+     * (登出事件本來就在那裡)。之後登入的還原是覆蓋寫,不先收的話它們會被蓋掉。
+     */
+    fun sweepPermanentOnQuit(player: Player): Int {
+        val instanceId = activeByPlayer[player.uniqueId] ?: return 0
+        if (instanceId !in liveRuns) return 0
+        return movePermanentToReturns(player, "登出")
+    }
+
+    /** 把玩家背包裡沒有局內章的物品拿走並放進暫存箱。呼叫端保證在玩家自己的 region 上。 */
+    private fun movePermanentToReturns(player: Player, source: String): Int {
+        val inventory = player.inventory
+        val contents = inventory.contents
+        val moved = ArrayList<ItemStack>()
+        for (slot in contents.indices) {
+            val stack = contents[slot] ?: continue
+            if (stack.type == Material.AIR || items.isInstanceScoped(stack)) continue
+            moved += stack.clone()
+            inventory.setItem(slot, null)
+        }
+        return depositReturns(player.uniqueId, moved, source)
+    }
+
+    /**
+     * 拿掉快照裡所有帶局內章的物品(回傳新快照;解不開就原樣回傳,交給還原那一步處理)。
+     * 永久背包快照依定義只有永久物品,這是它的邊界檢查——進場拍快照與還原前各做一次,
+     * 後者順便清掉舊版巡檢已經寫進 journal 的污染。
+     */
+    private fun withoutInstanceItems(snapshot: InventorySnapshot, instanceId: UUID, stage: String): InventorySnapshot {
+        val decoded = try {
+            ItemStack.deserializeItemsFromBytes(snapshot.itemBytes)
+        } catch (e: Exception) {
+            return snapshot
+        }
+        var removed = 0
+        val cleaned = Array(decoded.size) { i ->
+            val stack: ItemStack? = decoded[i]
+            if (stack != null && stack.type != Material.AIR && items.isInstanceScoped(stack)) {
+                removed++
+                ItemStack(Material.AIR)
+            } else {
+                stack ?: ItemStack(Material.AIR)
+            }
+        }
+        if (removed == 0) return snapshot
+        plugin.logger.info("[HanaToki] instance=$instanceId $stage 拿掉 $removed 組失效的局內物品,不進永久背包")
+        return InventorySnapshot(ItemStack.serializeItemsAsBytes(cleaned), snapshot.heldSlot, snapshot.contentsSize)
     }
 
     // ---- ④ restore ----------------------------------------------------------
@@ -480,8 +650,9 @@ class InstanceInventoryService(
             dispatchExpeditionEvidence(record, resolvedAtMs)
         }
 
-        val restoring = record.withState(JournalState.RESTORING, resolvedAtMs).withEvidenceDispatched(true)
-        records[instanceId] = restoring
+        val restoring = records.compute(instanceId) { _, current ->
+            (current ?: record).withState(JournalState.RESTORING, resolvedAtMs).withEvidenceDispatched(true)
+        }!!
         return runAsync { journal.writeSync(restoring) }.thenCompose {
             writeSnapshotBack(restoring, reason, attempt = 0)
         }
@@ -566,12 +737,19 @@ class InstanceInventoryService(
         val done = CompletableFuture<Boolean?>()
         if (record.keepInventory) {
             PlayerOp.dispatch(plugin, player) { p ->
-                done.complete(KeepInventoryRestore.apply(p, record.instanceId.toString(), record.carryIn, items, plugin.logger))
+                done.complete(
+                    KeepInventoryRestore.apply(p, record.instanceId.toString(), record.carryIn, items, plugin.logger) { overflow ->
+                        depositReturns(p.uniqueId, overflow, "攜入物歸還(背包已滿)")
+                    },
+                )
             }.whenComplete { _, _ -> done.complete(null) }
             return finishRestore(record, reason, attempt, done)
         }
         PlayerOp.dispatch(plugin, player) { p ->
-            val ok = InventorySnapshot.restore(p, snapshot)
+            // 手上還是局內背包的話,先把上一輪巡檢之後才被塞進來的永久物品移進暫存箱——
+            // 下一行是整組覆蓋,不先收就被蓋掉了。跟覆蓋在同一個 task 裡,中間不讓出執行緒。
+            if (liveRuns.remove(record.instanceId)) movePermanentToReturns(p, "收斂前最後巡檢")
+            val ok = InventorySnapshot.restore(p, withoutInstanceItems(snapshot, record.instanceId, "還原快照"))
             // 沒被消耗掉的攜入物品原樣還回來(見 CarryInDef)。放在快照覆蓋**之後**——
             // `inv.contents = target` 是整組覆蓋,先放的話會被這一步蓋掉。
             if (ok) restoreUnconsumedCarryIn(p, record.instanceId, record.carryIn)
@@ -634,7 +812,7 @@ class InstanceInventoryService(
      * 已消耗的不處理——它們已經在 [consumeCarriedKit] 裡被真的移除了,這裡不重建。
      *
      * `escrow.itemBytes` 是 extraction 當下、還沒蓋 instance 章的物品,所以不需要額外脫章。
-     * 背包滿了放不下的話丟在玩家腳下,而不是靜靜遺失。
+     * 背包滿了放不下的部分進 [returns],而不是丟在副本場地上被收斂掃地清掉。
      */
     private fun restoreUnconsumedCarryIn(player: Player, instanceId: UUID, carryIn: List<CarryInEscrow>) {
         for (escrow in carryIn) {
@@ -648,10 +826,10 @@ class InstanceInventoryService(
                 plugin.logger.warning("[HanaToki] instance=$instanceId kitId=${escrow.kitId} 攜入物品還原時解不開,已遺失")
                 continue
             }
+            // 背包滿了放不下的部分進暫存箱:這一步發生在玩家還站在副本場地上的時候,
+            // 丟在腳下會被收斂掃地一起清掉。
             val leftover = player.inventory.addItem(stack)
-            if (leftover.isNotEmpty()) {
-                leftover.values.forEach { player.world.dropItemNaturally(player.location, it) }
-            }
+            if (leftover.isNotEmpty()) depositReturns(player.uniqueId, leftover.values.toList(), "攜入物歸還(背包已滿)")
         }
     }
 
@@ -752,6 +930,8 @@ class InstanceInventoryService(
      * [restore] 已經依 journal 狀態決定要不要覆蓋還原。
      */
     fun recoverAll() {
+        val loaded = returns.loadAll()
+        if (loaded > 0) plugin.logger.info("[HanaToki] 暫存箱有 $loaded 件物品等著放回玩家背包")
         journal.cleanupTempFiles()
         val pending = journal.readAll()
         if (pending.isEmpty()) return
@@ -799,6 +979,9 @@ class InstanceInventoryService(
      * 同一個假設(此時不能再依賴 AsyncScheduler)。
      */
     fun shutdownFlush() {
+        // 暫存箱同步寫完:此時 AsyncScheduler 已經不可靠(同下方 journal 的理由)。
+        val failed = returns.flushDirty()
+        if (failed > 0) plugin.logger.severe("[HanaToki] 關服時暫存箱有 $failed 位玩家的資料寫不進磁碟")
         val hotSwap = !Bukkit.isStopping()
         for (record in records.values.toList()) {
             if (record.state == JournalState.PREPARED || record.snapshot == null) continue
@@ -851,5 +1034,8 @@ class InstanceInventoryService(
         /** 還原沒派工到(玩家仍在線)時的重試上限與間隔,見 [writeSnapshotBack]。 */
         const val MAX_RESTORE_ATTEMPTS = 6
         const val RESTORE_RETRY_DELAY_MS = 250L
+
+        /** 暫存箱物品解不開時,同一位玩家兩次 severe 之間的間隔。 */
+        const val UNDECODABLE_WARN_INTERVAL_MS = 600_000L
     }
 }

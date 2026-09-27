@@ -233,6 +233,14 @@ val items = server.servicesManager.getRegistration(InstanceItems::class.java)?.p
 
 `instanceId` 從 `DungeonEntryOutcome.instanceId()` 或 `activeInstanceIdOf(playerId)` 拿。
 
+**合法性是 scope-aware + session-aware（2026-09-27）**：`instanceId` 是每位玩家各自一份的背包交易 token，但同一個 session 發出過的任何一份 token（含已經死亡／離場的隊員那一份）對該 session 仍在場的成員都合法。多人副本的共用起始武器、地面掉落、隊友交換的物品只要蓋的是同一局某位成員的 token 就不會被攔。拾取、跨世界／登入掃背包、局外物品巡檢全部用同一條規則（`RunItemLegality`）；異局、舊局、重啟前的局、標記半殘的物品一律不合法。
+
+**局外物品**（Run 期間別的插件直接塞進局內背包的永久物品）由巡檢移進 `plugins/HanaToki/returns/` 的暫存箱，離場、背包有空位時自動放回；放不下的留在箱子裡等空位，不會丟在地上或遺失。局內死亡的永久物品掉落、局內登出時身上的永久物品、還原覆蓋前最後一刻的永久物品都走同一個暫存箱。失效的局內物品不會進暫存箱，也不會被寫進永久背包快照。`/hanatoki admin debug` 會顯示待送人數。
+
+## 5.2 收斂與 slot 歸還（2026-09-27）
+
+session 結束後依序：還背包 → 送人離場（確認真的不在場上）→ 回滾場地 → 歸還 slot。任何一步失敗（傳送回 false／丟例外／實體 retired、玩家死亡中）都**留在原地每秒重試**，死亡的人等重生、離線的人交給登入流程；全員離場之後才回滾，slot 恰好歸還一次。收斂中的 slot 用 `/hanatoki admin list` 看（phase、待離場人數、每人嘗試次數、最後錯誤）；`/hanatoki admin reset <slot>` 對收斂中的 slot 只會立即重試，不會在有人還在場上時硬放。
+
 ## 6. `PresenceBridge`
 
 ```kotlin

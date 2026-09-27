@@ -55,7 +55,15 @@ internal object KeepInventoryRestore {
     }
 
     /** 回傳 true = 已完成(可以刪 journal);false = 有攜入物解不開,journal 必須保留給人工處理。 */
-    fun apply(player: Player, instanceId: String, carryIn: List<CarryInEscrow>, items: InstanceItemsImpl, logger: Logger): Boolean {
+    fun apply(
+        player: Player,
+        instanceId: String,
+        carryIn: List<CarryInEscrow>,
+        items: InstanceItemsImpl,
+        logger: Logger,
+        /** 背包放不下的補回物品。還原時玩家還站在副本場地上,丟在腳下會被收斂掃地清掉。 */
+        overflow: (List<ItemStack>) -> Unit,
+    ): Boolean {
         val inventory = player.inventory
         val contents = inventory.contents
         val keys = carryIn.map { NamespacedKey(it.pdcNamespace, it.pdcKey) }.distinct()
@@ -83,7 +91,8 @@ internal object KeepInventoryRestore {
                 intact = false
                 continue
             }
-            inventory.addItem(stack).values.forEach { player.world.dropItemNaturally(player.location, it) }
+            val rest = inventory.addItem(stack).values.toList()
+            if (rest.isNotEmpty()) overflow(rest)
         }
         if (plan.remove.isNotEmpty() || plan.unmark.isNotEmpty() || plan.restoreFromJournal.isNotEmpty()) {
             logger.info(

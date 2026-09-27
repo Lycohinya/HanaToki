@@ -26,15 +26,21 @@ import java.util.UUID
  *
  * 不變式是白名單,不管東西從哪條路進來——插件、指令、未來新裝的插件——下一次巡檢都會抓到。
  *
+ * ## 判定
+ *
+ * 跟拾取、掃背包共用同一條規則([InstanceItemsImpl.verdictFor] / [RunItemLegality]):
+ * 同一個 session 發出過的任何 token 都合法。2026-09-27 以前這裡只認「玩家自己的 token」,
+ * 深域整隊共用首位隊員 token 的起始武器與掉落,每兩秒就被當成局外物品收走一次。
+ *
  * ## 抓到之後怎麼處理
  *
- * **不是刪掉,是移進那份還沒還給玩家的永久背包快照**([InstanceInventoryService.quarantine])。
- * 快照本來就是「離場時要覆蓋回去的那份背包」,所以東西並沒有消失,只是提早回到它該在的地方
- * ——玩家撤離/死亡/斷線收斂時照樣拿得到,而且沿用既有那條崩潰安全的還原路徑,不需要第二套
- * 恢復語意。
+ * - **永久物品**(沒有局內章):移進 [ReturnMailbox],離場、背包有空位時放回去。不再併進
+ *   journal 的永久背包快照——那份快照滿了會整批遺失,也不該被巡檢改寫。
+ * - **失效的局內物品**(異局、舊局、半殘標記):直接拿掉。它們不屬於任何人的永久背包,
+ *   放進暫存箱就是把垃圾洗成永久道具。
  *
- * 順序是**先從背包拿走,再寫快照**。中間崩潰的話東西會遺失一件(記在 log 裡);反過來寫的話
- * 中間崩潰會變成複製一件——而複製正好就是這條防線要擋的事。寧可掉也不要多。
+ * 拿走與入箱在同一個玩家 region task 裡完成,中間不讓出執行緒;暫存箱寫檔失敗時東西仍在
+ * 記憶體裡,下一輪巡檢會重寫。
  *
  * ## 執行緒
  *
@@ -68,6 +74,9 @@ class ForeignItemWarden(
             if (record.keepInventory) continue
             sweep(record.playerId, instanceId)
         }
+        deliverReturns()
+        // 寫檔失敗的暫存箱在這裡重寫(沒有待寫的就是 no-op)。
+        service.flushReturns()
     }
 
     private fun sweep(playerId: UUID, instanceId: UUID) {
@@ -77,25 +86,58 @@ class ForeignItemWarden(
             if (service.activeInstanceIdOf(playerId) != instanceId) return@dispatch
             val inventory = p.inventory
             val contents = inventory.contents
-            val seized = mutableListOf<ItemStack>()
+            val foreign = mutableListOf<ItemStack>()
+            val invalid = mutableListOf<ItemStack>()
             for (slot in contents.indices) {
                 val stack = contents[slot] ?: continue
                 if (stack.type == Material.AIR) continue
-                // ⚠ 不能用 `isLegalFor`:那一支守的是**外流**方向,對沒有局內章的永久物品
-                //   一律回 true(「永久物品,永遠合法」)。這裡要的是反向白名單——
-                //   在 Run 裡只有「這一局的局內物品」算合法,其他一律收走。
-                val instanceOfStack = service.items.instanceIdOf(stack)
-                if (service.items.isInstanceScoped(stack) && instanceOfStack == instanceId.toString()) continue
-                seized += stack.clone()
+                // ⚠ 不能只問 `isLegalFor`:它對永久物品回 true(外流方向),這裡是反向白名單
+                //   ——局內只准有這個 session 的局內物品。三種結果分開處理,見類別 KDoc。
+                when (service.items.verdictFor(playerId, stack)) {
+                    RunItemVerdict.RUN_LEGAL -> continue
+                    RunItemVerdict.PERMANENT -> foreign += stack.clone()
+                    RunItemVerdict.RUN_ILLEGAL -> invalid += stack.clone()
+                }
                 inventory.setItem(slot, null)
             }
-            if (seized.isEmpty()) return@dispatch
+            if (invalid.isNotEmpty()) {
+                plugin.logger.info(
+                    "[HanaToki] instance=$instanceId 巡檢清掉 ${invalid.size} 組不屬於這個 session 的局內物品:" +
+                        invalid.joinToString(",") { "${it.type}x${it.amount}" },
+                )
+            }
+            if (foreign.isEmpty()) return@dispatch
             p.sendActionBar(texts.format("instance-item.foreign-held"))
-            plugin.logger.info(
-                "[HanaToki] instance=$instanceId 巡檢到 ${seized.size} 件不屬於這一局的物品,已移進待還原的永久背包:" +
-                    seized.joinToString(",") { "${it.type}x${it.amount}" },
-            )
-            service.quarantine(instanceId, seized)
+            service.depositReturns(playerId, foreign, "instance=$instanceId 巡檢")
+        }
+    }
+
+    /** playerId -> 上次送出「背包滿了還在等」提示的時間,避免每兩秒洗一次。 */
+    private val waitingNoticeAt = java.util.concurrent.ConcurrentHashMap<UUID, Long>()
+
+    /**
+     * 暫存箱送件:在線、沒有未收斂交易的玩家,派工到他自己的 region 放回背包。
+     * 放不下的留著等下一輪;提示每位玩家最多每 [WAITING_NOTICE_INTERVAL_MS] 一次。
+     */
+    private fun deliverReturns() {
+        for (playerId in service.returns.playersWithPending()) {
+            if (service.hasOpenRecord(playerId)) continue
+            val player = plugin.server.getPlayer(playerId) ?: continue
+            PlayerOp.dispatch(plugin, player) { p ->
+                val (delivered, remaining) = service.deliverReturns(p)
+                val now = System.currentTimeMillis()
+                if (delivered > 0) {
+                    p.sendMessage(texts.format("instance-item.returned", mapOf("count" to delivered.toString())))
+                }
+                if (remaining == 0) {
+                    waitingNoticeAt.remove(playerId)
+                    return@dispatch
+                }
+                val last = waitingNoticeAt[playerId]
+                if (delivered == 0 && last != null && now - last < WAITING_NOTICE_INTERVAL_MS) return@dispatch
+                waitingNoticeAt[playerId] = now
+                p.sendMessage(texts.format("instance-item.returns-waiting", mapOf("count" to remaining.toString())))
+            }
         }
     }
 
@@ -105,5 +147,8 @@ class ForeignItemWarden(
          * 抱著別人給的東西打完一整場,體感上像是「東西被沒收」而不是「本來就進不來」。
          */
         const val SWEEP_INTERVAL_TICKS = 40L
+
+        /** 「背包滿了,還有 N 件等空位」提示的最短間隔。 */
+        const val WAITING_NOTICE_INTERVAL_MS = 300_000L
     }
 }

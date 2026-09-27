@@ -240,23 +240,32 @@ class DungeonEntry(private val core: HanaTokiCore) {
         players: List<Player>,
         prepared: Map<UUID, UUID>,
     ): CompletableFuture<Void> {
-        players.forEach { core.sessionManager.kick(it.uniqueId) }
+        // ⚠ 最後一位被 kick 的成員會讓 session 整局結束,那個 EndedSession 就是收斂要接的那筆
+        //   ——以前丟掉它再呼叫一次 endSession(拿到 null),場地收斂失敗時沒有任何東西記得這個 slot。
+        val endedByKick = players.mapNotNull { core.sessionManager.kick(it.uniqueId) }.firstOrNull()
         // A failed join must not terminate a persistent instance's other members.
-        if (!session.persistent) core.sessionManager.endSession(session.sessionId, EndReason.ABANDONED)
+        val ended = when {
+            session.persistent -> EndedSession(session.sessionId, session.dungeonId, session.slotId, EndReason.ABANDONED, players.map { it.uniqueId })
+            else -> endedByKick ?: core.sessionManager.endSession(session.sessionId, EndReason.ABANDONED)
+                ?: EndedSession(session.sessionId, session.dungeonId, session.slotId, EndReason.ABANDONED, players.map { it.uniqueId })
+        }
         val stageEnd = if (session.persistent) CompletableFuture.completedFuture(null)
             else core.stageEngine.endFor(session.sessionId, EndReason.ABANDONED.name)
-        return stageEnd.thenCompose {
+        // 這次進場準備過的背包交易先依 instanceId 收掉(PREPARED 直接丟棄;已經換成局內背包的覆蓋還原)。
+        val inventories: CompletableFuture<Void> = stageEnd.handle { _, _ -> null }.thenCompose {
             val invOps = prepared.values.map { core.instanceInventory.restore(it, "entry-rollback") }
-            CompletableFuture.allOf(*invOps.toTypedArray())
-        }.thenCompose {
-            CompletableFuture.allOf(*players.map { core.sendHome(it.uniqueId) }.toTypedArray())
-        }.thenCompose {
-            if (session.persistent) CompletableFuture.completedFuture(null)
-            else core.rollbackAndRelease(session.slotId, session.dungeonId)
-        }.thenAccept {
+            CompletableFuture.allOf(*invOps.toTypedArray()).handle<Void?> { _, _ -> null }
+        }.thenApply { null }
+        // 之後的「送人離場 → 回滾 → 歸還 slot」跟一般收斂共用同一條可重試的生命週期:
+        // 傳送失敗不會再讓 slot 永遠卡住,也不會在人還站在場地上時就回滾。
+        val cleanup = core.beginCleanup(ended, inventories, drainingWorld = null, holdsSlot = !session.persistent)
+        cleanup.whenComplete { _, _ ->
             players.forEach { core.returnPoints.forget(it.uniqueId) }
             core.plugin.logger.info("[HanaToki] 進場失敗已回滾:dungeon=${session.dungeonId} slot=${session.slotId}")
         }
+        // 進場結果不能被一個卡住的收斂拖住:最多等 ENTRY_ROLLBACK_WAIT_SECONDS 就回報失敗,
+        // 收斂本身照樣在背景重試到完成。
+        return cleanup.copy().completeOnTimeout(null, ENTRY_ROLLBACK_WAIT_SECONDS, java.util.concurrent.TimeUnit.SECONDS)
     }
 
     // ---- 結果物件 -----------------------------------------------------------
@@ -267,6 +276,9 @@ class DungeonEntry(private val core: HanaTokiCore) {
         /** 場地準備的硬上限。深域整套重蓋在正式服量到 2~5 秒;超過這個數字幾乎一定是出事了。 */
         const val STAGE_READY_TIMEOUT_SECONDS = 30L
         const val PREPARING_NOTICE_MILLIS = 700L
+
+        /** 進場失敗時等回滾收斂的上限,超過就先回報結果(收斂在背景繼續)。 */
+        const val ENTRY_ROLLBACK_WAIT_SECONDS = 15L
     }
 
     private fun fail(status: String, reason: String) =

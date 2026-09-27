@@ -27,8 +27,16 @@ class Texts {
     /** integration 併進來的內容層文字(key -> MiniMessage 原文)。查詢時優先於引擎自帶的檔案。 */
     private val overlay = ConcurrentHashMap<String, String>()
 
-    fun reload(file: File) {
-        config = if (file.exists()) YamlConfiguration.loadConfiguration(file) else YamlConfiguration()
+    /**
+     * @param defaults jar 內附的 `messages.yml`。伺服器上那份是 `saveResource(..., false)` 放出去的,
+     *   升版不會被覆蓋——新版加的 key 在舊檔裡不存在,沒有這層預設就會把 key 本身顯示給玩家。
+     */
+    fun reload(file: File, defaults: java.io.InputStream? = null) {
+        val loaded = if (file.exists()) YamlConfiguration.loadConfiguration(file) else YamlConfiguration()
+        defaults?.use { stream ->
+            loaded.setDefaults(YamlConfiguration.loadConfiguration(java.io.InputStreamReader(stream, Charsets.UTF_8)))
+        }
+        config = loaded
     }
 
     /**

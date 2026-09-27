@@ -20,8 +20,12 @@ instance-item:
   cannot-store: "<gray>這是這一局的東西,放不進箱子</gray>"
   no-ender-chest: "<gray>這裡打不開終界箱,身外之物先放著吧</gray>"
   cannot-pick-up: "<gray>這不是你這一局的東西</gray>"
-  # 巡檢抓到局外物品:東西已經移進離場時會還給你的那份背包,不是被沒收。
+  # 巡檢抓到局外物品:東西已經移進暫存箱,離場後放回背包,不是被沒收。
   foreign-held: "<gray>局外的東西留在外面,離場時還給你</gray>"
+  # 暫存箱把 Run 期間移出去的東西放回背包。
+  returned: "<gray>先前留在外面的 {count} 件東西已經放回背包</gray>"
+  # 背包滿了放不下,東西還留在暫存箱,騰出空位後會自動放回。
+  returns-waiting: "<gray>還有 {count} 件東西在等背包空位,騰出位置就會放回來</gray>"
 # 「安全 Run 容器」probe(test-roguelike)的文字。
 roguelike:
   entry: "<gray>試作 Run 開始。這裡沒有時限,身上是這一局的裝備——踩上銅板就撤離。</gray>"
