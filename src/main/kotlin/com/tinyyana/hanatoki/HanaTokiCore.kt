@@ -151,7 +151,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
             playerId: UUID,
             cleanup: com.tinyyana.hanatoki.instance.SlotCleanupCoordinator.CleanupView,
             attempt: Int,
-        ): CompletableFuture<Boolean> = evacuate(playerId, cleanup, attempt)
+        ): CompletableFuture<Boolean> = evacuateFromSlot(playerId, cleanup, attempt)
 
         override fun rollback(cleanup: com.tinyyana.hanatoki.instance.SlotCleanupCoordinator.CleanupView): CompletableFuture<Void> {
             sweepInstanceDrops(cleanup.slotId)
@@ -517,7 +517,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         else com.tinyyana.hanatoki.instance.MemberStatus.OUTSIDE
     }
 
-    private fun evacuate(
+    private fun evacuateFromSlot(
         playerId: UUID,
         cleanup: com.tinyyana.hanatoki.instance.SlotCleanupCoordinator.CleanupView,
         attempt: Int,
