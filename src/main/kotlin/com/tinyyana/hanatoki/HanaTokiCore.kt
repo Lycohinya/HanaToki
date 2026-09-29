@@ -154,7 +154,8 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         ): CompletableFuture<Boolean> = evacuateFromSlot(playerId, cleanup, attempt)
 
         override fun rollback(cleanup: com.tinyyana.hanatoki.instance.SlotCleanupCoordinator.CleanupView): CompletableFuture<Void> {
-            sweepInstanceDrops(cleanup.slotId)
+            sweepInstanceDrops(cleanup.slotId, cleanup.sessionId, com.tinyyana.hanatoki.inventory.SweepPhase.CLEANUP)
+            recoverStrayTridents(cleanup.slotId, cleanup.sessionId)
             return rollbackSlot(cleanup.slotId, cleanup.dungeonId)
         }
 
@@ -255,11 +256,19 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
             // 開局前先掃一次殘骸:上一局收斂時場地的 chunk 可能已經開始卸載,那批帶著舊
             // instanceId 的掉落物掃不到,會一路留到現在——玩家撿不起來,而且完全看不出為什麼
             // (2026-08-30 真人回報「有些掉在地上的物品無法被拾取」)。這裡是它們一定載入著的時刻。
-            sweepInstanceDrops(result.session.slotId)
+            val entrySlot = result.session.slotId
+            val entrySession = result.session.sessionId
+            sweepInstanceDrops(entrySlot, entrySession, com.tinyyana.hanatoki.inventory.SweepPhase.ENTRY)
             // 再補一次。上面那次跑在玩家傳送**之前**,場地的 chunk 多半還沒載入,而掃描
             // 遇到沒載入的 chunk 是直接跳過的——等於什麼都沒掃到(2026-09-01 真人回報殘留)。
-            // 玩家落地幾秒後 chunk 一定在,那時候掃才掃得到東西。
-            plugin.server.globalRegionScheduler.runDelayed(plugin, { _ -> sweepInstanceDrops(result.session.slotId) }, ENTRY_SWEEP_DELAY_TICKS)
+            // 玩家落地幾秒後 chunk 一定在,那時候掃才掃得到東西。這時玩家已經在場上,所以掃描
+            // 帶著這一局的身分:這一局成員的三叉戟、箭、丟下的東西都留著(見 SweepPolicy);
+            // 這一局已經結束、slot 換給別人的話整次跳過。
+            plugin.server.globalRegionScheduler.runDelayed(
+                plugin,
+                { _ -> sweepInstanceDrops(entrySlot, entrySession, com.tinyyana.hanatoki.inventory.SweepPhase.ENTRY) },
+                ENTRY_SWEEP_DELAY_TICKS,
+            )
             // deferEnter:場地由 behavior 的 prepareStage 先蓋好,DungeonEntry 等它就緒、把人傳進去之後
             // 才 enterStage(2026-09-03:先傳送再蓋場地 = 玩家在虛空裡自由落體等地板)。
             stageEngine.startFor(result.session.sessionId, dungeonId, result.session.slotId, result.anchor, now, deferEnter = true)
@@ -725,11 +734,72 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         const val DEFAULT_SLOT_SPACING = 256
     }
 
-    private fun sweepInstanceDrops(slotId: String) {
+    /** 這一局成員丟出去的三叉戟,收斂時找回掃描範圍外的那些(見 [com.tinyyana.hanatoki.inventory.SessionTridentTracker])。 */
+    val tridentTracker = com.tinyyana.hanatoki.inventory.SessionTridentTracker()
+
+    /**
+     * 收斂時把這一局成員丟出去、還留在世界上的三叉戟送回主人(掃描半徑外、停在不 tick 區塊的那些)。
+     * 用 UUID 找實體只是為了派工;判定與移除在實體自己的執行緒上做,跟掃描處理到同一個實體時
+     * 後到的那一方看到它已經不在就什麼都不做(回收鑰匙也保證不會入箱兩次)。區塊沒載入找不到的,
+     * 留給之後的場地掃描與虛空回收。
+     */
+    private fun recoverStrayTridents(slotId: String, sessionId: UUID, onlyOwner: UUID? = null) {
+        val ids = if (onlyOwner == null) tridentTracker.drain(sessionId) else tridentTracker.peek(sessionId)
+        val source = if (onlyOwner == null) "slot=$slotId 場外回收" else "slot=$slotId 斷線回收"
+        for (id in ids) {
+            val entity = plugin.server.getEntity(id) as? org.bukkit.entity.Trident ?: continue
+            com.tinyyana.hanatoki.folia.WorldOp.dispatch(plugin, entity) { e ->
+                val trident = e as? org.bukkit.entity.Trident ?: return@dispatch
+                if (!trident.isValid || trident.pickupStatus != org.bukkit.entity.AbstractArrow.PickupStatus.ALLOWED) return@dispatch
+                val owner = trident.ownerUniqueId ?: return@dispatch
+                if (onlyOwner != null && owner != onlyOwner) return@dispatch
+                val stack = trident.itemStack.clone()
+                if (runCatching { stack.serializeAsBytes() }.isFailure) return@dispatch
+                trident.remove()
+                instanceInventory.recoverFromArena(owner, trident.uniqueId, stack, source)
+            }
+        }
+    }
+
+    /** 成員斷線:他丟出去還沒回來的三叉戟當下送回暫存箱(見 [com.tinyyana.hanatoki.inventory.SessionTridentTracker])。 */
+    fun recoverTridentsOfLeavingMember(playerId: UUID) {
+        val session = sessionManager.sessionOf(playerId) ?: return
+        recoverStrayTridents(session.slotId, session.sessionId, onlyOwner = playerId)
+    }
+
+    /**
+     * @param sessionId 發起這次掃描的那一局。開局掃描只在 slot 仍屬於這一局時動手(延遲任務可能晚到);
+     *   收斂掃描在 slot 歸還之前跑,那時 slot 一定還是這一局的。
+     */
+    private fun sweepInstanceDrops(slotId: String, sessionId: UUID, phase: com.tinyyana.hanatoki.inventory.SweepPhase) {
         val anchor = slotPool.anchorOf(slotId) ?: return
-        InstanceDropSweeper.sweep(plugin, anchor).whenComplete { count, _ ->
-            if (count != null && count > 0) {
-                plugin.logger.info("[HanaToki] slot=$slotId 收斂時清掉 $count 個殘留的局內掉落物")
+        val entry = phase == com.tinyyana.hanatoki.inventory.SweepPhase.ENTRY
+        val session = if (entry) sessionManager.sessionBySlot(slotId)?.takeIf { it.sessionId == sessionId } else null
+        if (entry && session == null) {
+            plugin.logger.info("[HanaToki] slot=$slotId session=$sessionId 已不是這個 slot 的現任 session,開局補掃略過")
+            return
+        }
+        val scope = com.tinyyana.hanatoki.inventory.SweepScope(
+            slotId = slotId,
+            sessionId = sessionId,
+            phase = phase,
+            members = session?.memberIds()?.toSet().orEmpty(),
+            sessionTokens = if (entry) instanceInventory.tokensOfSession(sessionId) else emptySet(),
+            isInstanceScoped = { instanceInventory.items.isInstanceScoped(it) },
+            instanceTokenOf = { instanceInventory.items.instanceIdOf(it) },
+            recover = { owner, entityId, stack -> instanceInventory.recoverFromArena(owner, entityId, stack, "slot=$slotId 場地回收") },
+            isCurrent = if (entry) {
+                { sessionManager.sessionBySlot(slotId)?.sessionId == sessionId }
+            } else {
+                { true }
+            },
+        )
+        InstanceDropSweeper.sweep(plugin, anchor, scope).whenComplete { report, _ ->
+            if (report != null && report.touched) {
+                plugin.logger.info(
+                    "[HanaToki] slot=$slotId session=$sessionId ${phase.name.lowercase()} 掃描:清掉 ${report.removed}、" +
+                        "保留 ${report.kept}(這一局成員的)、送回主人 ${report.returned}",
+                )
             }
         }
     }

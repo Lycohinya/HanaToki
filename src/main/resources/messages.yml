@@ -26,6 +26,8 @@ instance-item:
   returned: "<gray>先前留在外面的 {count} 件東西已經放回背包</gray>"
   # 背包滿了放不下,東西還留在暫存箱,騰出空位後會自動放回。
   returns-waiting: "<gray>還有 {count} 件東西在等背包空位,騰出位置就會放回來</gray>"
+  # 忠誠三叉戟射空掉進副本場地底下的虛空:原物收進暫存箱(TridentOwnerKeeper)。
+  void-recovered: "<gray>掉進虛空的三叉戟離場時還給你</gray>"
 # 「安全 Run 容器」probe(test-roguelike)的文字。
 roguelike:
   entry: "<gray>試作 Run 開始。這裡沒有時限,身上是這一局的裝備——踩上銅板就撤離。</gray>"

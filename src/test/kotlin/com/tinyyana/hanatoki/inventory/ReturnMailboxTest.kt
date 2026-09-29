@@ -120,4 +120,60 @@ class ReturnMailboxTest {
         assertEquals(0, box.loadAll())
         assertFalse(File(dir, "$player.mailbox.tmp").exists())
     }
+
+    @Test
+    fun `arena recovery is idempotent per entity, across a restart`() {
+        val player = UUID.randomUUID()
+        val entity = UUID.randomUUID()
+        val box = ReturnMailbox(dir, logger)
+        val now = System.currentTimeMillis()
+        assertTrue(box.recover(player, entity, item("trident"), now))
+        // 同一個實體再出現一次(崩潰後從舊存檔回來):不再入箱
+        assertFalse(box.recover(player, entity, item("trident"), now + 1_000))
+        assertEquals(1, box.pendingCount(player))
+        assertEquals(0, box.flushDirty())
+
+        val reloaded = ReturnMailbox(dir, logger)
+        reloaded.loadAll()
+        assertTrue(reloaded.wasRecovered(player, entity))
+        assertFalse(reloaded.recover(player, entity, item("trident"), now + 2_000))
+        assertEquals(listOf("trident"), reloaded.peek(player).map { String(it) })
+    }
+
+    @Test
+    fun `recovery keys outlive delivery so a late duplicate is still recognised`() {
+        val player = UUID.randomUUID()
+        val entity = UUID.randomUUID()
+        val box = ReturnMailbox(dir, logger)
+        box.recover(player, entity, item("trident"), System.currentTimeMillis())
+        box.settle(player, box.peek(player), emptyList()) // 已經放回背包
+        box.flushDirty()
+        assertEquals(1, dir.listFiles { _, n -> n.endsWith(".mailbox") }!!.size, "物品送完了,鑰匙還要留著")
+
+        val reloaded = ReturnMailbox(dir, logger)
+        reloaded.loadAll()
+        assertEquals(0, reloaded.pendingCount(player))
+        assertFalse(reloaded.recover(player, entity, item("trident"), System.currentTimeMillis()))
+    }
+
+    @Test
+    fun `expired recovery keys are pruned and the empty file removed`() {
+        val player = UUID.randomUUID()
+        val box = ReturnMailbox(dir, logger)
+        box.recover(player, UUID.randomUUID(), item("trident"), 0)
+        box.settle(player, box.peek(player), emptyList())
+        assertTrue(box.flush(player, nowMs = 31L * 24 * 60 * 60 * 1000))
+        assertTrue(dir.listFiles { _, n -> n.endsWith(".mailbox") }!!.isEmpty())
+    }
+
+    @Test
+    fun `files without recovery keys keep the old format`() {
+        val player = UUID.randomUUID()
+        val box = ReturnMailbox(dir, logger)
+        box.deposit(player, listOf(item("bread")))
+        box.flushDirty()
+        val bytes = File(dir, "$player.mailbox").readBytes()
+        // MAGIC(4) 之後的版本號仍然是 1:回滾到舊版讀得懂
+        assertEquals(1, java.nio.ByteBuffer.wrap(bytes, 4, 4).int)
+    }
 }

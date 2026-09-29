@@ -32,6 +32,14 @@ import java.util.logging.Logger
  * 內容是 `ItemStack.serializeAsBytes()` 的原始位元組,這個類別本身不碰 Bukkit
  * (單元測試直接打,見 ReturnMailboxTest)。
  *
+ * ## 場地回收的冪等(2026-09-29)
+ *
+ * 副本場地上主人已經離場的三叉戟由 [InstanceDropSweeper] 移除後放進來([recover])。常駐場地的世界
+ * 會存檔(`world-auto-save: true`):移除之後、區塊下一次存檔之前崩潰的話,那把三叉戟會從舊存檔
+ * 回來,再被掃到一次。所以每一次回收都用**實體 UUID** 記一把鑰匙,跟物品寫在同一個檔、同一次原子
+ * 改名:鑰匙已經在的實體只移除、不再入箱。鑰匙保留 [RECOVERY_KEY_TTL_MS];沒有鑰匙的檔案仍然寫
+ * 舊格式(版本 1),回滾到舊版時只有帶鑰匙的檔會被隔離成 `.corrupt`(不會被當成空的覆蓋)。
+ *
  * ## 執行緒
  *
  * 記憶體操作(deposit/peek/settle)任何執行緒都可以呼叫;實際上都發生在該玩家自己的 EntityScheduler。
@@ -40,6 +48,10 @@ import java.util.logging.Logger
 class ReturnMailbox(private val dir: File, private val logger: Logger) {
 
     private val pending = ConcurrentHashMap<UUID, List<ByteArray>>()
+
+    /** playerId → (已回收的實體 UUID → 回收時間)。見類別 KDoc「場地回收的冪等」。 */
+    private val recovered = ConcurrentHashMap<UUID, Map<UUID, Long>>()
+    private val recoverLock = Any()
     private val dirty: MutableSet<UUID> = ConcurrentHashMap.newKeySet()
     private val ioLock = Any()
 
@@ -55,6 +67,20 @@ class ReturnMailbox(private val dir: File, private val logger: Logger) {
         pending.merge(playerId, payloads.toList()) { old, new -> old + new }
         dirty += playerId
     }
+
+    /**
+     * 場地回收:把一個實體帶著的物品放進主人的暫存箱,並記下這個實體已經回收過。
+     * 同一個實體第二次出現(崩潰後從舊存檔回來)時回傳 false,呼叫端只移除實體、不再入箱。
+     */
+    fun recover(playerId: UUID, entityId: UUID, payload: ByteArray, nowMs: Long): Boolean = synchronized(recoverLock) {
+        if (recovered[playerId]?.containsKey(entityId) == true) return false
+        recovered.merge(playerId, mapOf(entityId to nowMs)) { old, new -> old + new }
+        pending.merge(playerId, listOf(payload)) { old, new -> old + new }
+        dirty += playerId
+        true
+    }
+
+    fun wasRecovered(playerId: UUID, entityId: UUID): Boolean = recovered[playerId]?.containsKey(entityId) == true
 
     /**
      * 這位玩家目前的待送物品。**不取出**:送的過程中磁碟上那份一直保留完整清單,
@@ -81,11 +107,12 @@ class ReturnMailbox(private val dir: File, private val logger: Logger) {
     fun hasDirty(): Boolean = dirty.isNotEmpty()
 
     /** 把這位玩家目前的記憶體狀態寫進磁碟(空了就刪檔)。回傳 false = 寫入失敗,仍標著 dirty。 */
-    fun flush(playerId: UUID): Boolean = synchronized(ioLock) {
+    fun flush(playerId: UUID, nowMs: Long = System.currentTimeMillis()): Boolean = synchronized(ioLock) {
         // 先清 dirty 再讀狀態:讀完之後才發生的 deposit 會重新標 dirty,下一輪一定寫得到。
         dirty -= playerId
+        val keys = recovered.computeIfPresent(playerId) { _, map -> map.filterValues { nowMs - it < RECOVERY_KEY_TTL_MS }.ifEmpty { null } }.orEmpty()
         val current = pending[playerId].orEmpty()
-        val ok = if (current.isEmpty()) delete(playerId) else write(playerId, current)
+        val ok = if (current.isEmpty() && keys.isEmpty()) delete(playerId) else write(playerId, current, keys)
         if (!ok) dirty += playerId
         ok
     }
@@ -110,7 +137,8 @@ class ReturnMailbox(private val dir: File, private val logger: Logger) {
                 runCatching { Files.move(f.toPath(), dest.toPath(), StandardCopyOption.REPLACE_EXISTING) }
                 continue
             }
-            val (playerId, items) = decoded
+            val (playerId, items, keys) = decoded
+            if (keys.isNotEmpty()) recovered.merge(playerId, keys) { old, new -> old + new }
             if (items.isEmpty()) continue
             pending.merge(playerId, items) { old, new -> old + new }
             loaded += items.size
@@ -128,20 +156,28 @@ class ReturnMailbox(private val dir: File, private val logger: Logger) {
         return false
     }
 
-    private fun write(playerId: UUID, items: List<ByteArray>): Boolean {
+    private fun write(playerId: UUID, items: List<ByteArray>, keys: Map<UUID, Long>): Boolean {
         val target = fileFor(playerId)
         val tmp = File(dir, "$playerId$SUFFIX.tmp")
         return try {
             java.io.FileOutputStream(tmp).use { fos ->
                 val out = DataOutputStream(java.io.BufferedOutputStream(fos))
                 out.writeInt(MAGIC)
-                out.writeInt(FORMAT_VERSION)
+                out.writeInt(if (keys.isEmpty()) FORMAT_VERSION else FORMAT_VERSION_WITH_KEYS)
                 out.writeLong(playerId.mostSignificantBits)
                 out.writeLong(playerId.leastSignificantBits)
                 out.writeInt(items.size)
                 for (bytes in items) {
                     out.writeInt(bytes.size)
                     out.write(bytes)
+                }
+                if (keys.isNotEmpty()) {
+                    out.writeInt(keys.size)
+                    for ((entityId, at) in keys) {
+                        out.writeLong(entityId.mostSignificantBits)
+                        out.writeLong(entityId.leastSignificantBits)
+                        out.writeLong(at)
+                    }
                 }
                 out.flush()
                 fos.fd.sync()
@@ -155,9 +191,12 @@ class ReturnMailbox(private val dir: File, private val logger: Logger) {
         }
     }
 
-    private fun decode(input: DataInputStream): Pair<UUID, List<ByteArray>>? {
+    private data class Decoded(val playerId: UUID, val items: List<ByteArray>, val keys: Map<UUID, Long>)
+
+    private fun decode(input: DataInputStream): Decoded? {
         if (input.readInt() != MAGIC) return null
-        if (input.readInt() != FORMAT_VERSION) return null
+        val version = input.readInt()
+        if (version != FORMAT_VERSION && version != FORMAT_VERSION_WITH_KEYS) return null
         val playerId = UUID(input.readLong(), input.readLong())
         val count = input.readInt()
         if (count < 0) return null
@@ -166,12 +205,20 @@ class ReturnMailbox(private val dir: File, private val logger: Logger) {
             if (len < 0) return null
             ByteArray(len).also { input.readFully(it) }
         }
-        return playerId to items
+        if (version == FORMAT_VERSION) return Decoded(playerId, items, emptyMap())
+        val keyCount = input.readInt()
+        if (keyCount < 0) return null
+        val keys = (0 until keyCount).associate { UUID(input.readLong(), input.readLong()) to input.readLong() }
+        return Decoded(playerId, items, keys)
     }
 
     private companion object {
         const val MAGIC = 0x48544D31 // "HTM1"
         const val FORMAT_VERSION = 1
+        const val FORMAT_VERSION_WITH_KEYS = 2
+
+        /** 回收鑰匙保留多久。遠長於區塊存檔間隔;一個 slot 可能好幾天沒人進,舊存檔要到那時才會被載入。 */
+        const val RECOVERY_KEY_TTL_MS = 30L * 24 * 60 * 60 * 1000
         const val SUFFIX = ".mailbox"
     }
 }

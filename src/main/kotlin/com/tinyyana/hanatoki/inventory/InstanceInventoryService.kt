@@ -112,6 +112,9 @@ class InstanceInventoryService(
     /** session 結束:它發出過的 token 從此不再讓任何物品合法(成員的 active 狀態本來也已經收掉)。 */
     fun forgetSession(sessionId: UUID) = sessionTokens.forget(sessionId)
 
+    /** 這個 session 發出過的全部局內 token(場地掃描判斷掉落物屬不屬於這一局用)。 */
+    fun tokensOfSession(sessionId: UUID): Set<String> = sessionTokens.tokensOf(sessionId)
+
     /** 這位玩家還有沒有沒收斂完的背包交易(PREPARED~RESTORING 任一)。有的話不能往他背包送東西。 */
     fun hasOpenRecord(playerId: UUID): Boolean = records.values.any { it.playerId == playerId }
 
@@ -477,6 +480,30 @@ class InstanceInventoryService(
         )
         flushReturns()
         return payloads.size
+    }
+
+    /**
+     * 場地回收(見 [InstanceDropSweeper]、[SweepPolicy]):主人不在場的三叉戟,移除實體、原物放進主人的
+     * 暫存箱,離場/上線、背包有空位時放回去(離線、背包滿都等得到,見 [ReturnMailbox])。
+     *
+     * **必須在該實體自己的執行緒上、移除實體的同一個 task 裡呼叫**(中間不讓出執行緒):實體與物品
+     * 同一時刻只有一份。同一個實體第二次出現(崩潰後從舊存檔回來)回傳 false,呼叫端只移除、不入箱。
+     * 局內物品不會進來(那不是任何人的永久物品)。
+     */
+    fun recoverFromArena(ownerId: UUID, entityId: UUID, stack: ItemStack, source: String): Boolean {
+        if (stack.type == Material.AIR || stack.amount <= 0) return false
+        if (items.isInstanceScoped(stack)) {
+            plugin.logger.warning("[HanaToki] $source 的局內物品 ${stack.type} 不回收(entity=$entityId)")
+            return false
+        }
+        val fresh = returns.recover(ownerId, entityId, stack.serializeAsBytes(), System.currentTimeMillis())
+        if (fresh) {
+            plugin.logger.info("[HanaToki] player=$ownerId $source:回收 ${stack.type}x${stack.amount}(entity=$entityId)進暫存箱,上線且背包有空位時放回")
+            flushReturns()
+        } else {
+            plugin.logger.warning("[HanaToki] player=$ownerId $source:entity=$entityId 先前已回收過,這次只移除實體(舊存檔回來的副本)")
+        }
+        return fresh
     }
 
     /** 把暫存箱的待寫檔狀態寫進磁碟(非同步)。失敗的保留 dirty,下一輪巡檢再寫。 */
