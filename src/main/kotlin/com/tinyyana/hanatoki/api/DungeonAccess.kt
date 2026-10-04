@@ -19,7 +19,12 @@ import java.util.concurrent.CompletableFuture
  */
 interface DungeonAccess {
 
-    /** Current content catalog. JDK values only; callers may overlay their own menu presentation. */
+    /**
+     * Current content catalog. JDK values only; callers may overlay their own menu presentation.
+     *
+     * 每列的 key:`id`、`display`、`description`、`world`、`party-cap`(十進位字串、≥1,
+     * 來源是 `dungeons.yml` 的 `party-cap`;組隊入口用它決定這座副本一次最多收幾位)。
+     */
     fun listDungeons(): List<Map<String, String>>
 
     /** 這個 id 有沒有對應的副本定義(選單要不要顯示「目前無法進入」)。 */
@@ -76,4 +81,37 @@ interface DungeonAccess {
         partnerId: UUID,
         dungeonId: String,
     ): CompletableFuture<DungeonEntryOutcome>
+
+    /**
+     * [enterDungeonTracked] 的三人版(語意全有全無:任何一人失敗三個人都不進去)。
+     *
+     * 1 人走 [enterDungeonTracked]、2 人走 [enterDungeonDuoTracked]、3 人走這支。名單檢查
+     * (空、重複、超過 party-cap、離線、已在局內、pending、內容資格)由進場最終 admission
+     * 負責,失敗以 [DungeonEntryStatus] 的 `PARTY_INVALID`/`PLAYER_OFFLINE`/`ALREADY_INSIDE`/
+     * `NOT_ELIGIBLE` 回報,且**不留任何狀態**(沒取 slot、沒動背包)。
+     */
+    fun enterDungeonTrioTracked(
+        playerId: UUID,
+        partner1Id: UUID,
+        partner2Id: UUID,
+        dungeonId: String,
+    ): CompletableFuture<DungeonEntryOutcome>
+
+    /**
+     * 這位玩家是不是還有「沒收斂完」的進場相關狀態:進行中的進場交易,或失敗/結束後的回滾、
+     * 局內背包保管歸還、送出場地還沒完成。true 時再進場一定會被 admission 以 `ALREADY_INSIDE`
+     * 擋下,呼叫端(組隊大廳)應該等它變 false 再重試或拆隊。
+     *
+     * 只讀、無鎖,任何執行緒可呼叫。plugin 停用時所有登記清空。
+     */
+    fun isEntryPending(playerId: UUID): Boolean
+
+    /**
+     * 以引擎自己的 admission 預檢單一玩家:回傳玩家可讀的繁中原因,null = 目前沒有擋。
+     *
+     * 只涵蓋引擎層條件(副本不存在/停收、不在線、已在局內、pending)與引擎已知的內容資格;
+     * **只讀**,不扣料、不保留名額,所以通過預檢不保證進得去(最終 admission 在進場交易內
+     * 重查,客滿也只在那時才知道)。
+     */
+    fun entryBlockReason(playerId: UUID, dungeonId: String): String?
 }

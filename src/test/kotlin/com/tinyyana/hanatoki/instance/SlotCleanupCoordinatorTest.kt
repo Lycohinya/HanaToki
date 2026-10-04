@@ -122,6 +122,24 @@ class SlotCleanupCoordinatorTest {
     }
 
     @Test
+    fun `hasPendingMember is true until the member is confirmed off the arena`() {
+        val f = fake()
+        val c = coordinator(f)
+        val slot = f.pool.allocate("tachizuka")!!.slotId
+        val a = UUID.randomUUID()
+        val bystander = UUID.randomUUID()
+        f.players[a] = Player(dead = true, insideSlot = slot)
+        c.begin(view(slot), listOf(a), CompletableFuture.completedFuture(null))
+        assertTrue(c.hasPendingMember(a))
+        assertFalse(c.hasPendingMember(bystander))
+        drive(f, c, 3)
+        assertTrue(c.hasPendingMember(a)) // 死亡中:還沒離場
+        f.players.getValue(a).apply { dead = false; insideSlot = null }
+        drive(f, c, 1)
+        assertFalse(c.hasPendingMember(a)) // 離場、回滾、歸還都完成
+    }
+
+    @Test
     fun `death waits for respawn before evacuating and never releases early`() {
         val f = fake()
         val c = coordinator(f)

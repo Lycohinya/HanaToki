@@ -20,6 +20,7 @@ import com.tinyyana.hanatoki.hud.SessionBossBars
 import com.tinyyana.hanatoki.instance.DungeonEntry
 import com.tinyyana.hanatoki.instance.EndReason
 import com.tinyyana.hanatoki.instance.EnterResult
+import com.tinyyana.hanatoki.instance.EntryAdmission
 import com.tinyyana.hanatoki.instance.SessionManager
 import com.tinyyana.hanatoki.instance.SlotPool
 import com.tinyyana.hanatoki.inventory.ForeignItemWarden
@@ -58,12 +59,21 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
     fun isContentOwner(ownerName: String): Boolean = contentLifecycle.isKnownOwner(ownerName)
     fun isContentAccepting(dungeonId: String): Boolean = contentLifecycle.accepting(dungeonId)
 
-    internal fun trackEntry(dungeonId: String, result: CompletableFuture<*>): Boolean = synchronized(contentLifecycle.lock) {
-        if (!isContentAccepting(dungeonId)) return@synchronized false
-        entries[result] = dungeonId
-        result.whenComplete { _, _ -> entries.remove(result) }
-        true
-    }
+    /**
+     * 進場交易的入口臨界區:最終 admission(見 [EntryAdmission])通過才登記這筆交易
+     * (drain 要等它、名單成為 in-flight);回傳 null = 已受理,**呼叫端要在收尾時 [endEntry]**;
+     * 非 null = 被拒,沒有留下任何狀態。檢查與登記在同一把鎖內,兩個同時到達的請求不會都通過。
+     */
+    internal fun beginEntry(dungeonId: String, memberIds: List<UUID>, result: CompletableFuture<*>): EntryAdmission.Rejection? =
+        synchronized(contentLifecycle.lock) {
+            entryAdmission.admitAndReserve(memberIds, dungeonId)?.let { return@synchronized it }
+            entries[result] = dungeonId
+            result.whenComplete { _, _ -> entries.remove(result) }
+            null
+        }
+
+    /** 交易收尾(成功,或失敗回滾完成/等待逾時):名單不再是 in-flight。之後的收斂由 [EntryAdmission.Ports.isSettling] 接手。 */
+    internal fun endEntry(memberIds: Collection<UUID>) = entryAdmission.release(memberIds)
 
     internal fun drainContent(ids: Set<String>): CompletableFuture<Void> {
         // Close admission first, then settle in-flight entry transactions before inventory recovery.
@@ -137,6 +147,26 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
      * 見 [com.tinyyana.hanatoki.instance.SlotCleanupCoordinator]。
      */
     val slotCleanups = com.tinyyana.hanatoki.instance.SlotCleanupCoordinator(CleanupPorts())
+
+    /** 進場最終把關,見 [EntryAdmission]。鎖與註冊/進場臨界區共用同一把。 */
+    private val entryAdmission = EntryAdmission(contentLifecycle.lock, object : EntryAdmission.Ports {
+        override fun partyCap(dungeonId: String): Int? =
+            if (isContentAccepting(dungeonId)) registry.definitions[dungeonId]?.partyCap else null
+
+        override fun isOnline(playerId: UUID): Boolean = plugin.server.getPlayer(playerId)?.isOnline == true
+
+        override fun nameOf(playerId: UUID): String =
+            plugin.server.getPlayer(playerId)?.name ?: plugin.server.getOfflinePlayer(playerId).name ?: playerId.toString().take(8)
+
+        override fun isInSession(playerId: UUID): Boolean = sessionManager.sessionOf(playerId) != null
+
+        override fun isSettling(playerId: UUID): Boolean =
+            slotCleanups.hasPendingMember(playerId) || instanceInventory.hasUnsettledRecord(playerId)
+
+        // 內容資格(整備包、門檻、配額)目前只存在 LycoHanaToki/Core 的選單層,引擎沒有可問的 hook,
+        // 也不替內容捏造規則:null = 引擎沒有意見。內容層要擋就得提供 hook(見交接說明)。
+        override fun eligibilityBlock(playerId: UUID, dungeonId: String): String? = null
+    })
 
     private inner class CleanupPorts : com.tinyyana.hanatoki.instance.SlotCleanupCoordinator.Ports {
         override fun restore(playerId: UUID, reason: String): CompletableFuture<Boolean> =
@@ -852,6 +882,8 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
 
     /** onDisable 收斂:凍結新進場已由呼叫端(HanaTokiPlugin)控制;這裡把所有 session 結為 abandoned。*/
     fun shutdownAll() {
+        // 停用後進場登記一律作廢;還沒收尾的交易之後 release 是 no-op。
+        entryAdmission.clear()
         val ended = sessionManager.endAll(EndReason.ABANDONED)
         for (e in ended) {
             finishSession(e)
@@ -954,6 +986,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
             put("display", def.display)
             put("description", def.description)
             put("world", def.worldName)
+            put("party-cap", def.partyCap.toString())
         } } }
 
     /**
@@ -969,6 +1002,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
     override fun enterDungeon(playerId: UUID, dungeonId: String): Boolean {
         val player = plugin.server.getPlayer(playerId) ?: return false
         if (!hasDungeon(dungeonId)) return false
+        if (entryAdmission.check(listOf(playerId), dungeonId) != null) return false
         // 客滿的同步預檢:留住舊呼叫端「false 就顯示客滿訊息」的路徑。這裡跟真正的配置之間
         // 有理論上的競態(預檢過了、配置時被別人搶走),那條路會走非同步的 NO_SLOT 分支並
         // 通知玩家,不會留下髒狀態。
@@ -981,6 +1015,7 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         val player = plugin.server.getPlayer(playerId) ?: return false
         val partner = plugin.server.getPlayer(partnerId) ?: return false
         if (!hasDungeon(dungeonId)) return false
+        if (entryAdmission.check(listOf(playerId, partnerId), dungeonId) != null) return false
         if (!hasRoomFor(dungeonId, listOf(playerId, partnerId))) return false
         fireAndReport(dungeonEntry.enter(listOf(player, partner), dungeonId), listOf(playerId, partnerId))
         return true
@@ -988,9 +1023,10 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
 
     override fun enterDungeonTrio(playerId: UUID, partner1Id: UUID, partner2Id: UUID, dungeonId: String): Boolean {
         val ids = listOf(playerId, partner1Id, partner2Id)
-        if (ids.toSet().size != 3) return false
         val players = ids.map { plugin.server.getPlayer(it) ?: return false }
         if (!hasDungeon(dungeonId)) return false
+        // 重複、超過 party-cap、已在局內、pending、內容資格:同步就知道的失敗一律回 false
+        if (entryAdmission.check(ids, dungeonId) != null) return false
         if (!hasRoomFor(dungeonId, ids)) return false
         fireAndReport(dungeonEntry.enter(players, dungeonId), ids)
         return true
@@ -1041,6 +1077,24 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         return dungeonEntry.enter(listOf(player, partner), dungeonId)
     }
 
+    override fun enterDungeonTrioTracked(
+        playerId: UUID,
+        partner1Id: UUID,
+        partner2Id: UUID,
+        dungeonId: String,
+    ): CompletableFuture<DungeonEntryOutcome> {
+        // 重複的 UUID 不能先 map 成同一個 Player 再去重,要原樣交給 admission 回 PARTY_INVALID。
+        val players = listOf(playerId, partner1Id, partner2Id).map {
+            plugin.server.getPlayer(it) ?: return CompletableFuture.completedFuture(offlineOutcome())
+        }
+        return dungeonEntry.enter(players, dungeonId)
+    }
+
+    override fun isEntryPending(playerId: UUID): Boolean = entryAdmission.isPending(playerId)
+
+    override fun entryBlockReason(playerId: UUID, dungeonId: String): String? =
+        entryAdmission.blockReason(playerId, dungeonId)
+
     /**
      * 布林入口的非同步尾巴:交易失敗時把原因寫進 log 並通知玩家。
      *
@@ -1059,9 +1113,13 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
             val key = when (outcome.status()) {
                 DungeonEntryStatus.NO_SLOT -> "session.no-slot"
                 DungeonEntryStatus.ALREADY_INSIDE -> "session.already-inside"
+                DungeonEntryStatus.PARTY_INVALID -> "session.party-invalid"
+                DungeonEntryStatus.NOT_ELIGIBLE -> "session.not-eligible"
                 else -> "session.entry-failed"
             }
-            playerIds.forEach { PlayerOp.message(plugin, it, texts.format(key, mapOf("dungeon" to ""))) }
+            // {reason} 是 admission 產生的玩家可讀原因(NOT_ELIGIBLE 來自內容層),先轉義 MiniMessage 標籤。
+            val reason = net.kyori.adventure.text.minimessage.MiniMessage.miniMessage().escapeTags(outcome.failureReason() ?: "")
+            playerIds.forEach { PlayerOp.message(plugin, it, texts.format(key, mapOf("dungeon" to "", "reason" to reason))) }
         }
     }
 

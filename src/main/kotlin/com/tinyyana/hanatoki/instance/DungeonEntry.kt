@@ -54,25 +54,31 @@ class DungeonEntry(private val core: HanaTokiCore) {
      */
     fun enter(players: List<Player>, dungeonId: String): CompletableFuture<DungeonEntryOutcome> {
         val result = CompletableFuture<DungeonEntryOutcome>()
-        if (!core.trackEntry(dungeonId, result)) return done(fail(DungeonEntryStatus.NO_DUNGEON, "副本正在停用"))
-        try {
-            enterTracked(players, dungeonId).whenComplete { outcome, error ->
-                if (error != null) result.completeExceptionally(error) else result.complete(outcome)
-            }
-        } catch (error: Throwable) { result.completeExceptionally(error) }
+        val memberIds = players.map { it.uniqueId }
+        // 最終 admission(名單、party-cap、在線、已在局內/pending、內容資格),在取 slot、背包保管、
+        // 扣物之前,而且與 in-flight 登記同一個臨界區:被拒就什麼狀態都沒建(沒 session、沒 slot、
+        // 沒 journal),見 [EntryAdmission]。
+        core.beginEntry(dungeonId, memberIds, result)?.let { return done(fail(it.status, it.reason)) }
+        val settled = try {
+            enterTracked(players, dungeonId)
+        } catch (error: Throwable) {
+            CompletableFuture.failedFuture(error)
+        }
+        settled.whenComplete { outcome, error ->
+            // 先解除 in-flight 登記、再 complete:收到結果的人立刻重試時看到的就是收尾後的狀態
+            // (回滾逾時仍在背景收斂的部分由 isSettling 接手)。
+            core.endEntry(memberIds)
+            if (error != null) result.completeExceptionally(error) else result.complete(outcome)
+        }
         return result
     }
 
     private fun enterTracked(players: List<Player>, dungeonId: String): CompletableFuture<DungeonEntryOutcome> {
-        if (players.isEmpty()) return done(fail(DungeonEntryStatus.PLAYER_OFFLINE, "沒有可進場的玩家"))
+        // 名單/在線/已在局內/pending/資格都已經在 [enter] 的 admission 擋過(2026-09-01 的「一次只能在
+        // 一座副本裡」也搬到那裡:已有 session 的人再進第二座,prepare 會把局內背包當成永久背包拍快照
+        // ——資料損毀,不是邊界情況)。這裡只剩防禦性的定義查詢。
         val def = core.registry.definitions[dungeonId]
             ?: return done(fail(DungeonEntryStatus.NO_DUNGEON, "沒有 id=$dungeonId 的副本定義"))
-        // 一次只能在一座副本裡(2026-09-01):已經有 session 的人再進第二座,prepare 會把
-        // **局內背包**當成永久背包拍快照——那是資料損毀,不是邊界情況。斷線重連不走這條
-        // (rejoin 由 join listener 接手),所以這裡看到既有 session 一律拒絕。
-        players.firstOrNull { core.sessionManager.sessionOf(it.uniqueId) != null }?.let { inside ->
-            return done(fail(DungeonEntryStatus.ALREADY_INSIDE, "${inside.name} 已經在副本裡,先完成或撤離那一局"))
-        }
 
         return rememberReturnPoints(players).thenCompose { returnPoints ->
             val session: Session

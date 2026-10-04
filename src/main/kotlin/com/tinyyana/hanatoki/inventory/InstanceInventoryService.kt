@@ -118,6 +118,14 @@ class InstanceInventoryService(
     /** 這位玩家還有沒有沒收斂完的背包交易(PREPARED~RESTORING 任一)。有的話不能往他背包送東西。 */
     fun hasOpenRecord(playerId: UUID): Boolean = records.values.any { it.playerId == playerId }
 
+    /**
+     * 這位玩家有沒有**還沒收斂**的背包交易:PREPARED(進場中)、CLEARING(正在換成局內背包)、
+     * RESTORING(收斂中)。[JournalState.ACTIVE] 不算——那是正常在局內,不是待收斂。
+     * 進場 admission 的 pending 判斷用。
+     */
+    fun hasUnsettledRecord(playerId: UUID): Boolean =
+        records.values.any { it.playerId == playerId && it.state != JournalState.ACTIVE }
+
     fun activeInstanceIdOf(playerId: UUID): UUID? = activeByPlayer[playerId]
 
     /**

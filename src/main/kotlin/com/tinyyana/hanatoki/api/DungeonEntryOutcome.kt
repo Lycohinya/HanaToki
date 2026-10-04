@@ -32,7 +32,10 @@ interface DungeonEntryOutcome {
      * - `TELEPORT_FAILED` — `teleportAsync` 回 false 或 exceptional。
      * - `INVENTORY_FAILED` — 局內背包交易失敗(journal 寫不進去之類)。
      * - `SHUTTING_DOWN` — 引擎正在停用,不再受理新進場。
-     * - `ALREADY_INSIDE` — 已經在某座副本的 session 裡,先完成/撤離才可再進(2026-09-01)。
+     * - `ALREADY_INSIDE` — 已經在某座副本的 session 裡,先完成/撤離才可再進(2026-09-01);
+     *   也包含「已有進行中的進場交易、或上一次失敗/結束的回滾、背包歸還、送出場地還沒收斂」。
+     * - `PARTY_INVALID` — 名單空、UUID 重複、超過該副本的 `party-cap`(最終 admission,尚未取 slot)。
+     * - `NOT_ELIGIBLE` — 內容 admission/資格不符;[failureReason] 是玩家可讀的繁中原因。
      */
     fun status(): String
 
@@ -44,7 +47,11 @@ interface DungeonEntryOutcome {
     /** 有開局內背包時是這次交易的 instanceId;沒開或失敗時 null。 */
     fun instanceId(): String?
 
-    /** 失敗原因(給 log/管理員看的中文說明);成功時 null。 */
+    /**
+     * 失敗原因(中文說明);成功時 null。[DungeonEntryStatus.NOT_ELIGIBLE] 與
+     * [DungeonEntryStatus.PARTY_INVALID] 的原因是**玩家可讀**的繁中句子(誰、缺什麼、怎麼補),
+     * 呼叫端可以直接顯示。
+     */
     fun failureReason(): String?
 
     /**
@@ -68,6 +75,10 @@ object DungeonEntryStatus {
     const val INVENTORY_FAILED = "INVENTORY_FAILED"
     const val SHUTTING_DOWN = "SHUTTING_DOWN"
     const val ALREADY_INSIDE = "ALREADY_INSIDE"
+    /** 名單空、UUID 重複、超過 party-cap。最終 admission 擋下,什麼狀態都沒建。 */
+    const val PARTY_INVALID = "PARTY_INVALID"
+    /** 內容 admission/資格不符。[DungeonEntryOutcome.failureReason] 是玩家可讀的繁中原因。 */
+    const val NOT_ELIGIBLE = "NOT_ELIGIBLE"
     /** behavior 的 prepareStage 失敗或逾時(場地沒蓋出來),已回滾。 */
     const val STAGE_NOT_READY = "STAGE_NOT_READY"
 }

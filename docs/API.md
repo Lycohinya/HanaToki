@@ -139,6 +139,7 @@ Package：`com.tinyyana.hanatoki.api`
 
 ```kotlin
 interface DungeonAccess {
+    fun listDungeons(): List<Map<String, String>>   // 每列 key：id／display／description／world／party-cap（十進位字串、≥1）
     fun hasDungeon(dungeonId: String): Boolean
     fun enterDungeon(playerId: UUID, dungeonId: String): Boolean
     fun enterDungeonDuo(playerId: UUID, partnerId: UUID, dungeonId: String): Boolean
@@ -151,6 +152,16 @@ interface DungeonAccess {
         partnerId: UUID,
         dungeonId: String,
     ): CompletableFuture<DungeonEntryOutcome>
+
+    // 1.0.0-rc.15 新增
+    fun enterDungeonTrioTracked(
+        playerId: UUID,
+        partner1Id: UUID,
+        partner2Id: UUID,
+        dungeonId: String,
+    ): CompletableFuture<DungeonEntryOutcome>
+    fun isEntryPending(playerId: UUID): Boolean
+    fun entryBlockReason(playerId: UUID, dungeonId: String): String?
 }
 
 interface DungeonEntryOutcome {
@@ -158,7 +169,7 @@ interface DungeonEntryOutcome {
     fun succeeded(): Boolean
     fun sessionId(): String?      // 成功時是這一局的 sessionId
     fun instanceId(): String?     // 有開局內背包時是這次交易的 instanceId
-    fun failureReason(): String?  // 失敗原因（給 log／管理員看）
+    fun failureReason(): String?  // 失敗原因；PARTY_INVALID／NOT_ELIGIBLE 是玩家可讀的繁中
     fun rolledBack(): Boolean     // 失敗時已建立的狀態有沒有清乾淨
 }
 
@@ -171,6 +182,10 @@ object DungeonEntryStatus {
     const val TELEPORT_FAILED = "TELEPORT_FAILED"
     const val INVENTORY_FAILED = "INVENTORY_FAILED"
     const val SHUTTING_DOWN = "SHUTTING_DOWN"
+    const val ALREADY_INSIDE = "ALREADY_INSIDE"    // 已在 session，或進場／收斂尚未完成（pending）
+    const val STAGE_NOT_READY = "STAGE_NOT_READY"
+    const val PARTY_INVALID = "PARTY_INVALID"      // rc.15：名單空、UUID 重複、超過 party-cap
+    const val NOT_ELIGIBLE = "NOT_ELIGIBLE"        // rc.15：內容 admission／資格不符
 }
 ```
 
@@ -189,7 +204,10 @@ val access = server.servicesManager
 | `hasDungeon(id)` | definition map 有這個 id | 不代表世界／slot provision 成功，也不代表目前有空位 |
 | `enterDungeon(player, id)` | 玩家在線、definition 存在，且同步預檢有空位 | 傳送仍非同步；**不代表傳送成功**。要知道結果請改用 `enterDungeonTracked` |
 | `enterDungeonTracked(player, id)` | future complete 時，`succeeded()` 為 true 代表**人已經真的站在場地上**、局內背包（若有開）也換好了 | future 在任意執行緒 complete；接著要對玩家做事請自己派回他的 scheduler |
-| `enterDungeonDuo(a, b, id)` | 兩人在線、definition 存在，且 session manager 分到／加入 slot | 不檢查兩個 UUID 是否相同，也不執行 `party-cap` |
+| `enterDungeonDuo(a, b, id)` | 兩人在線、definition 存在、通過 admission，且有空位 | 同步可知的失敗（含 UUID 重複、超過 `party-cap`、已在局內、pending）回 false |
+| `enterDungeonTrioTracked(a, b, c, id)` | 同 `enterDungeonDuoTracked`，三人全有全無 | admission 失敗以 status 回報，不留狀態 |
+| `isEntryPending(player)` | 有進行中的進場交易，或失敗／結束後「送出場地」「局內背包歸還」尚未完成 | 只讀、無鎖、任何執行緒可呼叫；true 時再進場會被擋成 `ALREADY_INSIDE`；plugin 停用時清空 |
+| `entryBlockReason(player, id)` | 引擎 admission 預檢單一玩家：玩家可讀繁中原因，或 null | 只讀，不扣料、不保留名額；通過不保證進得去（客滿、競態以進場交易內重查為準） |
 | `leaveDungeon(player)` | 找到玩家目前的 session，並開始離場 | persistent 返回點缺失時可能回 false；傳送仍非同步 |
 
 入口插件在呼叫前至少檢查：
@@ -199,7 +217,19 @@ val access = server.servicesManager
 - 內容自己的費用、任務、冷卻與 party 規則；
 - API 回 false 時要給玩家下一步，而不是安靜吃掉。
 
-核心目前不會擋「已在 session 的玩家再次 enter」。這可能新開另一局並覆蓋 player-to-session 索引，呼叫端要先用 `PresenceBridge.isInside` 擋掉。
+### 進場最終 admission（1.0.0-rc.15）
+
+所有入口（三支 boolean、`enterDungeonTracked`／`Duo`／`Trio`、`/hanatoki enter`）最後都走 `DungeonEntry.enter`，在**取 slot、背包保管、扣物之前**、並與 in-flight 登記同一個臨界區內，依序檢查，第一個不符的就是結果，且**不留任何狀態**：
+
+| 順序 | 條件 | status |
+|---|---|---|
+| 1 | 副本存在且仍在收人 | `NO_DUNGEON` |
+| 2 | 名單非空、UUID 不重複、人數 ≤ 定義的 `party-cap` | `PARTY_INVALID` |
+| 3 | 全員在線 | `PLAYER_OFFLINE` |
+| 4 | 無人在任何 session、無人 pending（進場交易中、或送出場地／背包歸還尚未收斂） | `ALREADY_INSIDE` |
+| 5 | 內容資格 | `NOT_ELIGIBLE`（`failureReason()` 為玩家可讀繁中） |
+
+登記在交易收尾時解除（成功，或失敗回滾完成／最多等 15 秒），因此兩個同時到達的請求不會都通過；回滾逾時仍在背景收斂的部分由 `isEntryPending` 繼續回 true。boolean 入口對上述同步可知的失敗回 false。內容資格目前引擎沒有可問的 hook（資格只存在 LycoHanaToki／Core 選單層），第 5 步恆為通過；`party-cap` 預設 4，定義小於 1 會在載入時丟 `DefinitionError`。
 
 **2026-08-29 修正（原本的缺陷描述已不成立）**：`enter*` 不再丟掉 `teleportAsync` 的結果。傳送回 false 或 exceptional、進場途中登出、world/slot 失效、局內背包交易失敗時，核心會**完整回滾** session 成員資格、slot 佔用、stage 狀態與排程、bossbar、返回點登記與局內背包 journal，不會留下「`PresenceBridge` 說他在裡面、人卻站在原地」的狀態。布林版 `enterDungeon` 另外會主動對玩家發失敗訊息。
 

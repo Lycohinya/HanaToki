@@ -242,6 +242,8 @@ object DungeonDefinitionParser {
 
         val slotCount = int("slot-count", 1)
         if (slotCount < 1) throw DefinitionError("dungeons.$id.slot-count 必須 >= 1")
+        val partyCap = int("party-cap", 4)
+        if (partyCap < 1) throw DefinitionError("dungeons.$id.party-cap 必須 >= 1(目前 $partyCap)")
         // 常駐副本只會有一個永不結束的 instance,多出來的 slot 永遠不會被分配到——與其讓它
         // 靜靜地佔著座標,不如在載入時就講清楚設定寫錯了。
         if (mode == ExecutionMode.PERSISTENT && slotCount != 1) {
@@ -293,7 +295,7 @@ object DungeonDefinitionParser {
             spawnYaw = dbl("spawn-yaw", 0.0).toFloat(),
             sessionTimeLimitSeconds = timeLimit,
             soloCap = int("solo-cap", 1),
-            partyCap = int("party-cap", 4),
+            partyCap = partyCap,
             reconnectGraceSeconds = long("reconnect-grace-seconds", 180),
             tags = tags,
             expectedMinutes = (raw["expected-minutes"] as? String) ?: "",

@@ -50,6 +50,13 @@ class DungeonDefinitionParserTest {
     }
 
     @Test
+    fun `party-cap 小於 1 丟出 DefinitionError`() {
+        assertFailsWith<DungeonDefinitionParser.DefinitionError> {
+            DungeonDefinitionParser.parse("bad", mapOf("world" to "world", "party-cap" to 0))
+        }
+    }
+
+    @Test
     fun `session-time-limit-seconds 小於等於 0 丟出 DefinitionError`() {
         assertFailsWith<DungeonDefinitionParser.DefinitionError> {
             DungeonDefinitionParser.parse(

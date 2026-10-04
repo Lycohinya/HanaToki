@@ -153,6 +153,12 @@ class SlotCleanupCoordinator(
 
     fun hasPendingFor(slotId: String): Boolean = cleanups.values.any { it.view.slotId == slotId }
 
+    /**
+     * 這位玩家還在某筆收斂的「待離場」名單裡(stage 收尾中或還沒確認離開場地)。人確定離場後就不再算,
+     * 之後只剩場地回滾/歸還 slot——那是 slot 的事,不擋這位玩家再進場。進場 admission 的 pending 判斷用。
+     */
+    fun hasPendingMember(playerId: UUID): Boolean = cleanups.values.any { playerId in it.pending }
+
     /** 這些副本還沒歸還的收斂(drain 用)。 */
     fun pendingFor(dungeonIds: Set<String>): List<CompletableFuture<Void>> =
         cleanups.values.filter { it.view.dungeonId in dungeonIds }.map { it.done }
