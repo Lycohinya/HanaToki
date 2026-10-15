@@ -383,7 +383,7 @@ interface DungeonBehavior {
 | `message(player, key[, params])` | 對單一玩家送 MiniMessage key |
 | `messageAll(key[, params])` | 對所有 active member 送訊息 |
 | `title(player, titleKey, subtitleKey)`／`titleAll` | 送 title；空 subtitle key 代表不顯示 |
-| `actionBar(player, key)`／`actionBarAll` | 送 action bar |
+| `actionBar(player, key)`／`actionBarAll` | 送 action bar；LycoLib 在時經 LycoLib 排隊（hud.yml group `hanatoki.stage`），缺席時直送 |
 | `damageMembersWithin(location, radius, amount)` | 在每位玩家自己的 scheduler 做距離判定並造成一般傷害 |
 | `damageMembersWithin(..., damageTypeKey)` | 同上；無效 key 記 warning 後退回一般傷害 |
 | `membersWithin(location, radius)` | 非同步回傳範圍內 active member |

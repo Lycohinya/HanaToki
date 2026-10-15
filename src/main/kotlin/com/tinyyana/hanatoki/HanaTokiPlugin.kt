@@ -22,6 +22,14 @@ class HanaTokiPlugin : JavaPlugin() {
     private var acceptingNewSessions = true
 
     override fun onEnable() {
+        // 副本 ActionBar 的出口要在任何會顯示它的東西之前選好(LycoLib 在 → 經 HudBridge 排隊;不在 → 直送)
+        com.tinyyana.hanatoki.hud.ActionBars.install(
+            com.tinyyana.hanatoki.hud.ActionBars.select(
+                lycoLibEnabled = server.pluginManager.isPluginEnabled("LycoLib"),
+                lycoLibSink = { com.tinyyana.hanatoki.hud.LycoHudActionBarSink() },
+                onFailure = { logger.warning("[HanaToki] LycoLib 偵測到但 HudBridge 接入失敗,副本 ActionBar 改直送:${it.message}") },
+            ),
+        )
         core = HanaTokiCore(this)
 
         saveResource("dungeons.yml", false)
@@ -62,7 +70,7 @@ class HanaTokiPlugin : JavaPlugin() {
                 isDungeonWorld = core::isDungeonWorld,
                 recover = { owner, entityId, stack -> core.instanceInventory.recoverFromArena(owner, entityId, stack, "虛空回收") },
                 notifyOwner = { owner ->
-                    com.tinyyana.hanatoki.folia.PlayerOp.dispatch(this, owner) { p -> p.sendActionBar(core.texts.format("instance-item.void-recovered")) }
+                    com.tinyyana.hanatoki.folia.PlayerOp.dispatch(this, owner) { p -> com.tinyyana.hanatoki.hud.ActionBars.show(p, core.texts.format("instance-item.void-recovered")) }
                 },
                 sessionOf = { playerId -> core.sessionManager.sessionOf(playerId)?.sessionId },
                 tracker = core.tridentTracker,
@@ -146,6 +154,7 @@ class HanaTokiPlugin : JavaPlugin() {
     override fun onDisable() {
         // PlugMan 熱插拔硬規則(全 repo 慣例):停排程 → 清實體/session → 交把手 → flush → 關連線。
         acceptingNewSessions = false
+        com.tinyyana.hanatoki.hud.ActionBars.install(com.tinyyana.hanatoki.hud.DirectActionBarSink)
         tickTaskHandle?.cancel()
         tickTaskHandle = null
         core.foreignItemWarden.stop()

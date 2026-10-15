@@ -51,7 +51,7 @@ object PlayerOp {
         dispatch(plugin, playerId) { it.sendMessage(text) }
 
     fun actionBar(plugin: Plugin, playerId: UUID, text: Component): CompletableFuture<Void> =
-        dispatch(plugin, playerId) { it.sendActionBar(text) }
+        dispatch(plugin, playerId) { com.tinyyana.hanatoki.hud.ActionBars.show(it, text) }
 
     fun title(
         plugin: Plugin,

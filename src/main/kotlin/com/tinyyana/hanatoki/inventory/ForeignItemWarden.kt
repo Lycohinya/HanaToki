@@ -107,7 +107,7 @@ class ForeignItemWarden(
                 )
             }
             if (foreign.isEmpty()) return@dispatch
-            p.sendActionBar(texts.format("instance-item.foreign-held"))
+            com.tinyyana.hanatoki.hud.ActionBars.show(p, texts.format("instance-item.foreign-held"))
             service.depositReturns(playerId, foreign, "instance=$instanceId 巡檢")
         }
     }

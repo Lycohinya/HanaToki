@@ -20,7 +20,7 @@
 | Minecraft／Paper API | 26.2 |
 | Java | 25 |
 | 排程模型 | Paper 或 Folia-family；正式整合測試應在真 Folia／Lecithin 核心上跑 |
-| 其他插件 | 引擎本體沒有 `depend`／`softdepend` |
+| 其他插件 | 引擎本體沒有 `depend`；`softdepend` 只有 BetterModel（外觀）與 LycoLib（ActionBar 排隊），缺席照常載入。LycoLib 在時副本 ActionBar 經 LycoLib 排隊（hud.yml group `hanatoki.stage`），缺席時直送 |
 | Kotlin runtime | 由 `plugin.yml` 的 Paper library loader 載入 `kotlin-stdlib-jdk8` |
 
 第一次啟動時，伺服器需要能取得 `plugin.yml` 宣告的 Kotlin library。若主機封鎖外部下載，插件會在進入 HanaToki 自己的啟用流程前就失敗；先看伺服器啟動 log，不要一直重裝 jar 猜原因。

@@ -18,6 +18,9 @@ dependencies {
     // 潘朵拉的少女：殘響的外觀呈現引擎,softdepend(見 plugin.yml)——BetterModel 沒裝時
     // HanaToki 照常載入運作,見 presentation/BossModelsFactory.kt 的 class-loading guard。
     compileOnly(libs.bettermodel.bukkit.api)
+    // LycoLib 的 HudBridge(副本 ActionBar 排隊),softdepend、不 shade,composite build 取得編譯期型別。
+    // LycoLib 的型別只出現在 hud/LycoHudActionBarSink.kt,hud/ActionBars.select 確認它已啟用才建構。
+    compileOnly("com.tinyyana:LycoLib:0.1.0")
 
     testImplementation(kotlin("test"))
     testImplementation(libs.paper.api)

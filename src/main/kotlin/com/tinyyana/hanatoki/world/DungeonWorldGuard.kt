@@ -67,7 +67,7 @@ class DungeonWorldGuard(private val core: HanaTokiCore) : Listener {
         if (!core.isDungeonWorld(worldName)) return false
         if (player.hasPermission(BYPASS)) return false
         blockedCount.incrementAndGet()
-        player.sendActionBar(core.texts.format("dungeon.no-build", emptyMap()))
+        com.tinyyana.hanatoki.hud.ActionBars.show(player, core.texts.format("dungeon.no-build", emptyMap()))
         return true
     }
 

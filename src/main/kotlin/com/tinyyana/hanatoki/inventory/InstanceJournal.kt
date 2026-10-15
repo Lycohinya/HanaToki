@@ -257,7 +257,7 @@ class ReturnPointData(
  *
  * ## 為什麼是自己寫的檔案而不是 SQLite
  *
- * HanaToki 是零依賴的通用引擎(ARCH §11:乾淨 Paper/Folia + 只有 HanaToki 就要能跑通),
+ * HanaToki 沒有任何硬依賴(只有 softdepend BetterModel、LycoLib,缺席照常運作;ARCH §11:乾淨 Paper/Folia + 只有 HanaToki 就要能跑通),
  * 加一顆 JDBC driver 會讓它不再是「丟進去就能用」的 jar。而這裡要存的東西一筆就是一個
  * instance、生命週期短、沒有查詢需求——一個 instance 一個檔案是最貼合的形狀,連索引都不需要。
  * integration 側的 `CompletionStore` 用 SQLite 是因為它要跨月累積並做冪等查詢,情況不同。

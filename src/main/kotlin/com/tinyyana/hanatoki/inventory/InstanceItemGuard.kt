@@ -70,7 +70,7 @@ class InstanceItemGuard(
         if (last != null && now - last < PICKUP_NOTICE_COOLDOWN_MS) return
         lastPickupNotice[player.uniqueId] = now
         // 事件在該玩家自己的 region 觸發,可以直接對他送(ARCH §5.2 規則 2 的例外:對象就是事發者)。
-        player.sendActionBar(texts.format("instance-item.cannot-pick-up"))
+        com.tinyyana.hanatoki.hud.ActionBars.show(player, texts.format("instance-item.cannot-pick-up"))
     }
 
     /** playerId -> 上次送出撿不起來提示的時間。見 [onPickup]。 */

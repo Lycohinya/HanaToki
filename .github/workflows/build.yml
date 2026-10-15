@@ -8,38 +8,25 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# HanaToki 是零依賴的獨立引擎(不 includeBuild 任何其他插件),沒有跨 repo composite build
-# 的問題,所以這裡直接完整編譯 + 跑單元測試。
+# 這個 repo 是 composite build 成員:settings.gradle.kts 有 includeBuild("../LycoLib"),
+# 指向本機 workspace 底下的兄弟 repo 原始碼。兄弟 repo(LycoLib)是 private,
+# CI 的 GITHUB_TOKEN 讀不到,而依專案規則(2026-08-18 定案)不設定跨 repo PAT/secret
+# 來取得它 —— 之前用 repo secret LYCO_CI_TOKEN 的做法就是因為要手動維護這顆金鑰
+# 才一直卡住,現在移除。
+#
+# 所以這裡不嘗試真正編譯(Gradle 的 settings 階段本來就會因為 ../LycoLib 不存在而失敗),
+# 只做「零密鑰也能可靠通過」的檢查:Gradle wrapper 完整性驗證(防止 wrapper jar 被竄改)。
+# 真正的編譯 + 單元測試 + docs coverage 驗證,在本機 workspace(兄弟 repo 都在同層目錄)
+# 執行 ./gradlew build —— 這也是 AGENTS.md 規定的 L1 硬性門檻,每次改動都必須在本機跑過。
 jobs:
-  build:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '25'
+      - uses: gradle/actions/wrapper-validation@v5
 
-      - uses: gradle/actions/setup-gradle@v5
-
-      - name: Build (compile + unit tests + jar)
+      - name: 說明:完整編譯驗證在本機進行
         run: |
-          chmod +x gradlew
-          ./gradlew build
-
-      - name: Upload test report on failure
-        if: failure()
-        uses: actions/upload-artifact@v6
-        with:
-          name: HanaToki-test-report
-          path: build/reports/tests/test
-          if-no-files-found: ignore
-
-      - uses: actions/upload-artifact@v6
-        with:
-          name: HanaToki-jar
-          path: |
-            build/libs/*.jar
-            !build/libs/*-thin.jar
-          if-no-files-found: error
+          echo "::notice::HanaToki 依賴私有兄弟 repo LycoLib 的原始碼(composite build),CI 環境沒有它,且依專案規則不設定跨 repo secret。"
+          echo "::notice::這裡只驗證 Gradle wrapper 完整性。編譯 + 單元測試 + docs coverage 請在本機 workspace(兄弟 repo 位於同層目錄)執行 ./gradlew build。"

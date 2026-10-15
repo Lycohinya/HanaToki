@@ -24,7 +24,8 @@ libraries:
 # DungeonWorldGuard 透過它的 classloader 反射註冊釋放事件,不需要排在它後面。
 # ⚠ 不能再 softdepend Vessel:Vessel loadafter GriefPrevention、GriefPrevention softdepend
 #   Multiverse,加上下面的 loadbefore 會形成循環(2026-09-25 s01 LoadOrderTree ERROR)。
-softdepend: [ BetterModel ]
+# LycoLib:副本 ActionBar 經它的 HudBridge 排隊,不蓋掉居合等經 ActionBarArbiter 的技能提示;沒裝就直送(hud/ActionBars.kt)。
+softdepend: [ BetterModel, LycoLib ]
 # 副本世界要搶在 Multiverse 之前用虛空生成器載入(見 world/KnownDungeonWorlds.kt):Multiverse 清單裡
 # 若有副本世界,它會用原版生成器載入,副本場地就泡進一般地形(2026-09-25 刀塚)
 loadbefore: [ Multiverse-Core ]

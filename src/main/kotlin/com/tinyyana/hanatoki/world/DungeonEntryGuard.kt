@@ -49,7 +49,7 @@ class DungeonEntryGuard(private val core: HanaTokiCore) : Listener {
         if (!shouldBlock(event.player, world.name)) return
         event.isCancelled = true
         blockedCount.incrementAndGet()
-        event.player.sendActionBar(core.texts.format("dungeon.no-entry", emptyMap()))
+        com.tinyyana.hanatoki.hud.ActionBars.show(event.player, core.texts.format("dungeon.no-entry", emptyMap()))
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
@@ -58,7 +58,7 @@ class DungeonEntryGuard(private val core: HanaTokiCore) : Listener {
         if (!shouldBlock(player, player.world.name)) return
         blockedCount.incrementAndGet()
         core.sendHome(player.uniqueId)
-        player.sendActionBar(core.texts.format("dungeon.no-entry", emptyMap()))
+        com.tinyyana.hanatoki.hud.ActionBars.show(player, core.texts.format("dungeon.no-entry", emptyMap()))
     }
 
     private companion object {
