@@ -342,6 +342,34 @@ interface StageContext {
     fun resolve(resultKey: String)
 
     /**
+     * 逐人結算(1.0.0-rc.17):每位成員各自一個 resultKey,其餘與 [resolve] 完全相同。
+     *
+     * 用在「多人同行,但每個人的結果不同」的內容——例如 Boss 結算時,有效參與的人拿通關 key、
+     * 沒參與到的人拿另一個 key。整局收尾(session 型:結束 session、送人離場、回滾場地、歸還 slot;
+     * 常駐型:只結算這一輪)跟 [resolve] 走同一條路,**不會**個別 kick 任何人。
+     *
+     * ## 語意
+     *
+     * - 跟 [resolve] 共用同一道「這一段 stage 只結算一次」的認領:同一個 stage 裡 [resolve] 與
+     *   [resolveEach] 不論先後、呼叫幾次,只有第一次生效。
+     * - [resultKeyByPlayer] 在呼叫當下複製;之後改 map 不影響這次結算。
+     * - 在場成員**沒列入**(或值為 null/空白)→ 這位成員**不產生任何** `CompletionResult`。引擎不替
+     *   內容發明「沒資格」的 key;要讓 reward 端留下紀錄,就由內容自己列入一個沒有獎勵規則的 key
+     *   (例如 `"<base>-none"`)。
+     * - 列入但已不在場的玩家(離隊、已被個別結算)略過,不補發。
+     * - 每位玩家的 `CompletionResult` 有自己的 completionId,但同一次結算共用**同一份** stats 快照
+     *   ——內容蓋在 stats 裡的 run id 對每個人都一樣。`CompletionResult` 本身沒有 run id 欄位。
+     * - 跟 [resolve] 一樣必須在 [submit] 的執行線上呼叫。
+     *
+     * ## 跨插件型別
+     *
+     * 參數是 `Map<UUID, String>`(bytecode 是 `java.util.Map<java.util.UUID, java.lang.String>`,
+     * JDK mapped type,跨 classloader 安全)。Java 呼叫端可以直接傳 `java.util.HashMap`;Kotlin
+     * 呼叫端照常傳 `mapOf(...)`。不要包成 Kotlin 專屬型別(`Pair` 清單、function type)。
+     */
+    fun resolveEach(resultKeyByPlayer: Map<UUID, String>)
+
+    /**
      * ARCH §9:發一次共鳴檢定請求。缺席(沒有 CheckResolver 註冊)時直接回傳 outcome
      * `"unavailable"`——behavior 的 `when` 分支沒對到已知 outcome 就會落進 else,
      * 這就是「fail-safe 分支」的落地方式(ARCH §9 最後一段)。

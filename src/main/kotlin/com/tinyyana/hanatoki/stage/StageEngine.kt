@@ -620,6 +620,10 @@ private class StageContextImpl(
         core.resolveSession(sessionId, resultKey, state)
     }
 
+    override fun resolveEach(resultKeyByPlayer: Map<UUID, String>) {
+        core.resolveSessionEach(sessionId, resultKeyByPlayer, state)
+    }
+
     override fun requestCheck(playerId: UUID, checkId: String): CompletableFuture<String> =
         core.requestCheck(playerId, checkId)
 

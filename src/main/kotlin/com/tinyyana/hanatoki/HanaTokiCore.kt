@@ -163,10 +163,21 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         override fun isSettling(playerId: UUID): Boolean =
             slotCleanups.hasPendingMember(playerId) || instanceInventory.hasUnsettledRecord(playerId)
 
-        // 內容資格(整備包、門檻、配額)目前只存在 LycoHanaToki/Core 的選單層,引擎沒有可問的 hook,
-        // 也不替內容捏造規則:null = 引擎沒有意見。內容層要擋就得提供 hook(見交接說明)。
-        override fun eligibilityBlock(playerId: UUID, dungeonId: String): String? = null
+        // 內容資格由內容層註冊的 api/EntryEligibility provider 決定(可多個,逐一問,任一擋下即擋);
+        // 引擎自己不替內容捏造規則。沒有 provider = 沒有意見。
+        override fun eligibilityBlock(playerId: UUID, dungeonId: String): String? =
+            entryEligibility.block(playerId, dungeonId)
     })
+
+    /** 內容資格查詢鏈,見 [com.tinyyana.hanatoki.instance.EntryEligibilityChain]。每次都重新取 registration。 */
+    private val entryEligibility = com.tinyyana.hanatoki.instance.EntryEligibilityChain(
+        providers = {
+            plugin.server.servicesManager.getRegistrations(com.tinyyana.hanatoki.api.EntryEligibility::class.java)
+                .map { com.tinyyana.hanatoki.instance.EntryEligibilityChain.Provider(it.plugin.name, it.provider) }
+        },
+        warn = { plugin.logger.warning(it) },
+        errorReason = { texts.rawOrNull(ELIGIBILITY_ERROR_KEY) ?: ELIGIBILITY_ERROR_FALLBACK },
+    )
 
     private inner class CleanupPorts : com.tinyyana.hanatoki.instance.SlotCleanupCoordinator.Ports {
         override fun restore(playerId: UUID, reason: String): CompletableFuture<Boolean> =
@@ -591,54 +602,61 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
      * 派送,再走既有的 session 結束/世界回滾流程(跟 timeout/admin reset 共用同一條路)。
      */
     fun resolveSession(sessionId: UUID, resultKey: String, state: InstanceState) {
-        val session = sessionManager.sessionById(sessionId) ?: return
-        val now = System.currentTimeMillis()
-        // 這一段 stage 只結算一次(見 InstanceState.claimResolution)。對 session 型副本這是
-        // 第一道保險(第二道仍然是下面 endSession 的原子認領);對常駐副本這是**唯一**一道
-        // ——它不結束 session,拿不到那個認領。
-        if (!state.claimResolution()) return
-        val members = session.activeMembers()
-        if (session.persistent) {
-            // MIGRATION_PLAN §5.0 決策 C:常駐 instance 的 Resolution 只結算「這一輪」。
-            // 不結束 session、不送人回家、不回滾場地、不歸還 slot——接下來要做什麼(轉回待機、
-            // 開始重生冷卻)由 behavior 自己 `transition`,引擎不替它決定。
-            // duration 用 **stage 已經過的時間**而不是 instance 壽命:常駐 instance 從開服活到
-            // 關服,`now - startedAtMs` 是沒有意義的數字。
-            val durationMs = state.stageElapsedMs(now)
-            for (playerId in members) {
-                rewardDispatcher.dispatch(
-                    CompletionResult(
-                        completionId = UUID.randomUUID(),
-                        playerId = playerId,
-                        dungeonId = session.dungeonId,
-                        resultKey = resultKey,
-                        durationMs = durationMs,
-                        stats = state.stats.toMap(),
-                    ),
-                )
-            }
-            return
+        resolveWith(sessionId, state) { resultKey }
+    }
+
+    /**
+     * [com.tinyyana.hanatoki.stage.StageContext.resolveEach] 的實作面:跟 [resolveSession] 走
+     * **同一條** [resolveWith](同一道 `claimResolution`、同一套 session 收尾),差別只在每位成員的
+     * resultKey 從 [resultKeyByPlayer] 查。
+     *
+     * - 名單在呼叫當下複製一份,呼叫端之後改 map 不影響這次結算。
+     * - 在場成員沒列入、或值為 null/空白 → 這位成員**不產生** [CompletionResult](引擎不替內容
+     *   發明「無獎勵」key;要留紀錄的話呼叫端自己列入一個沒有獎勵規則的 key)。
+     * - 列入但已不在場的玩家(已離隊、已被 [resolveMember] 結算踢出)略過並記 log,不會補發。
+     */
+    fun resolveSessionEach(sessionId: UUID, resultKeyByPlayer: Map<UUID, String>, state: InstanceState) {
+        val keyFor = com.tinyyana.hanatoki.reward.ResolutionPlan.eachKeyFor(resultKeyByPlayer)
+        val members = sessionManager.sessionById(sessionId)?.activeMembers()?.toSet()
+        val strangers = resultKeyByPlayer.keys.filter { members == null || it !in members }
+        val resolved = resolveWith(sessionId, state, keyFor)
+        if (resolved && strangers.isNotEmpty()) {
+            plugin.logger.info("[HanaToki] resolveEach session=$sessionId 略過 ${strangers.size} 位不在場的玩家:$strangers")
         }
-        val durationMs = now - session.startedAtMs
+    }
+
+    /**
+     * [resolveSession]/[resolveSessionEach] 共用的結算流程。[keyFor] 回 null = 這位成員不產生結果。
+     * 回傳 true = 這次呼叫真的結算了(認領成功並派送);false = session 不在或已經結算過。
+     */
+    private fun resolveWith(sessionId: UUID, state: InstanceState, keyFor: (UUID) -> String?): Boolean {
+        val session = sessionManager.sessionById(sessionId) ?: return false
+        val now = System.currentTimeMillis()
+        // MIGRATION_PLAN §5.0 決策 C:常駐 instance 的 Resolution 只結算「這一輪」。
+        // 不結束 session、不送人回家、不回滾場地、不歸還 slot——接下來要做什麼(轉回待機、
+        // 開始重生冷卻)由 behavior 自己 `transition`,引擎不替它決定。
+        // duration 用 **stage 已經過的時間**而不是 instance 壽命:常駐 instance 從開服活到
+        // 關服,`now - startedAtMs` 是沒有意義的數字。
+        val durationMs = if (session.persistent) state.stageElapsedMs(now) else now - session.startedAtMs
+        // 這一段 stage 只結算一次(見 InstanceState.claimResolution,在 ResolutionPlan.claim 裡認領)。
+        // 對 session 型副本這是第一道保險(第二道仍然是下面 endSession 的原子認領);對常駐副本
+        // 這是**唯一**一道——它不結束 session,拿不到那個認領。產生清單本身沒有副作用。
+        val results = com.tinyyana.hanatoki.reward.ResolutionPlan.claim(
+            state, session.activeMembers(), session.dungeonId, durationMs, keyFor,
+        ) ?: return false
+        if (session.persistent) {
+            results.forEach(rewardDispatcher::dispatch)
+            return true
+        }
         // ⚠ 順序:**先原子認領這個 session**(endSession 內部是 `sessions.remove` 的回傳值),
         // 認領成功才發獎。反過來寫的話,同一局被兩條路徑同時結算(behavior 的 resolve 撞上
         // 逾時 tick,或 behavior 自己不小心呼叫兩次 resolve)會產生**兩組不同的 completionId**,
         // integration 端的 completionId 幂等去重完全擋不住——那是「同一局兩次結算」不是「同一筆
         // 送兩次」。2026-08-23 Phase 4 補測時發現的洞。
-        val ended = sessionManager.endSession(sessionId, EndReason.RESOLVED) ?: return
-        for (playerId in members) {
-            rewardDispatcher.dispatch(
-                CompletionResult(
-                    completionId = UUID.randomUUID(),
-                    playerId = playerId,
-                    dungeonId = ended.dungeonId,
-                    resultKey = resultKey,
-                    durationMs = durationMs,
-                    stats = state.stats.toMap(),
-                ),
-            )
-        }
+        val ended = sessionManager.endSession(sessionId, EndReason.RESOLVED) ?: return false
+        results.forEach(rewardDispatcher::dispatch)
         finishSession(ended)
+        return true
     }
 
     /**
@@ -754,6 +772,10 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
     private val ENTRY_SWEEP_DELAY_TICKS = 60L
 
     private companion object {
+        /** EntryEligibility provider 丟例外時給玩家的原因(純文字,會被塞進 MiniMessage 的 `{reason}`)。 */
+        const val ELIGIBILITY_ERROR_KEY = "session.eligibility-error"
+        const val ELIGIBILITY_ERROR_FALLBACK = "進場資格暫時查不到,稍後再試"
+
         /** drain 等收斂的上限;超過就回報失敗(收斂本身照樣在背景重試,slot 不會被提早歸還)。 */
         const val DRAIN_CLEANUP_TIMEOUT_SECONDS = 30L
 
@@ -1050,11 +1072,8 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
     }
 
     /**
-     * 同 repo 內部用的多人進場入口(`/hanatoki enter <id> [player2] ...` 的驗收指令走這條)。
-     *
-     * 不放進 [DungeonAccess]:那支介面是跨插件的穩定面,而目前**沒有第二個消費者**需要
-     * 「任意人數進場」——刀塚的 party-cap 是 2,已經有 [enterDungeonDuoTracked]。
-     * 有真的案例再擴(ARCH §12「先有案例再抽象」)。
+     * 同 repo 內部用的多人進場入口(`/hanatoki enter <id> [player2] ...` 的驗收指令走這條),
+     * 也是跨插件 [enterDungeonPartyTracked] 的底層(那支只多做 UUID → Player 的轉換)。
      */
     fun enterParty(players: List<Player>, dungeonId: String): CompletableFuture<DungeonEntryOutcome> =
         dungeonEntry.enter(players, dungeonId)
@@ -1088,6 +1107,19 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
             plugin.server.getPlayer(it) ?: return CompletableFuture.completedFuture(offlineOutcome())
         }
         return dungeonEntry.enter(players, dungeonId)
+    }
+
+    override fun enterDungeonPartyTracked(players: List<UUID>, dungeonId: String): CompletableFuture<DungeonEntryOutcome> {
+        // 先複製:呼叫端之後改 list 不影響這筆交易。重複的 UUID 不去重,原樣交給 admission 回 PARTY_INVALID。
+        val ids = players.toList()
+        val online = ids.map { plugin.server.getPlayer(it) }
+        if (online.any { it == null }) {
+            // 有人不在線:照 admission 的檢查順序回報(名單不合法優先於離線,離線原因帶名字)。
+            val rejection = entryAdmission.check(ids, dungeonId)
+                ?: return CompletableFuture.completedFuture(offlineOutcome())
+            return CompletableFuture.completedFuture(rejectedOutcome(rejection))
+        }
+        return enterParty(online.map { it!! }, dungeonId)
     }
 
     override fun isEntryPending(playerId: UUID): Boolean = entryAdmission.isPending(playerId)
@@ -1129,6 +1161,16 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         override fun sessionId(): String? = null
         override fun instanceId(): String? = null
         override fun failureReason(): String = "玩家不在線"
+        override fun rolledBack(): Boolean = true
+    }
+
+    /** admission 同步擋下(還沒建立任何狀態)的結果。 */
+    private fun rejectedOutcome(rejection: EntryAdmission.Rejection): DungeonEntryOutcome = object : DungeonEntryOutcome {
+        override fun status(): String = rejection.status
+        override fun succeeded(): Boolean = false
+        override fun sessionId(): String? = null
+        override fun instanceId(): String? = null
+        override fun failureReason(): String = rejection.reason
         override fun rolledBack(): Boolean = true
     }
 

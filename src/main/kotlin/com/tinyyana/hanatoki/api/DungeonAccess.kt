@@ -15,7 +15,9 @@ import java.util.concurrent.CompletableFuture
  * 跟 [PresenceBridge] 分成兩支介面而不是合併:那支的語意是**唯讀查詢**(音樂/顯示層在用,
  * 每次玩家移動都可能問),這支會改變世界狀態。合起來的話唯讀消費端會拿到一支能傳送玩家的把手。
  *
- * ⚠ 簽章 primitive-only(UUID/String/Boolean),過 `tools/check-cross-plugin-kotlin.py` 的紅線。
+ * ⚠ 簽章只用 JDK 型別(UUID/String/Boolean,以及 `List`/`Map`——Kotlin 的 `List`/`Map` 在 bytecode
+ * 就是 `java.util.List`/`java.util.Map`,是跨 classloader 安全的 mapped type),不用 Kotlin 專屬型別
+ * (`Pair`、function type、`Result`、預設參數),過 `tools/check-cross-plugin-kotlin.py` 的紅線。
  */
 interface DungeonAccess {
 
@@ -51,9 +53,8 @@ interface DungeonAccess {
      * 把三個玩家一起送進副本(2026-09-02 新增:深域 `party-cap: 3` 的組隊入口)。
      * 任一人不在線 / 副本不存在 / 沒有空位都回 false,呼叫端自己決定訊息。
      *
-     * 同 [enterDungeonDuo] 的理由:不做泛型 `List<UUID>` party API(那會破 primitive-only 紅線),
-     * 有 party-cap 3 的實際案例(深域)就加一支 3 人簽章。1 人走 [enterDungeon]、2 人走
-     * [enterDungeonDuo]、3 人走這支。
+     * 當時同 [enterDungeonDuo] 的理由只加 3 人簽章(深域)。1 人走 [enterDungeon]、2 人走
+     * [enterDungeonDuo]、3 人走這支;任意人數的 tracked 版見 [enterDungeonPartyTracked]。
      */
     fun enterDungeonTrio(playerId: UUID, partner1Id: UUID, partner2Id: UUID, dungeonId: String): Boolean
 
@@ -98,6 +99,22 @@ interface DungeonAccess {
     ): CompletableFuture<DungeonEntryOutcome>
 
     /**
+     * [enterDungeonTrioTracked] 的任意人數版(1.0.0-rc.17 新增:Boss 1–4 人的組隊入口)。
+     * 語意與 Trio 相同:全有全無,名單檢查由進場最終 admission 負責,失敗以
+     * `PARTY_INVALID`(空、重複、超過該副本 `party-cap`)/`PLAYER_OFFLINE`/`ALREADY_INSIDE`/
+     * `NOT_ELIGIBLE` 回報,且**不留任何狀態**。
+     *
+     * - [players] 在呼叫當下複製;順序保留(第一位是隊長,與 Duo/Trio 的第一個參數相同)。
+     *   元素必須非 null。
+     * - 有人不在線時,status 依 admission 的檢查順序決定:名單本身不合法(空、重複、超過
+     *   `party-cap`)先回 `PARTY_INVALID`,否則 `PLAYER_OFFLINE`(原因帶玩家名字)。
+     * - 跨插件型別:參數 bytecode 是 `java.util.List<java.util.UUID>`,Java 呼叫端可直接傳
+     *   `java.util.List.of(...)`/`ArrayList`。
+     * - future 在**任意執行緒** complete,同 [enterDungeonTracked]。
+     */
+    fun enterDungeonPartyTracked(players: List<UUID>, dungeonId: String): CompletableFuture<DungeonEntryOutcome>
+
+    /**
      * 這位玩家是不是還有「沒收斂完」的進場相關狀態:進行中的進場交易,或失敗/結束後的回滾、
      * 局內背包保管歸還、送出場地還沒完成。true 時再進場一定會被 admission 以 `ALREADY_INSIDE`
      * 擋下,呼叫端(組隊大廳)應該等它變 false 再重試或拆隊。
@@ -109,7 +126,8 @@ interface DungeonAccess {
     /**
      * 以引擎自己的 admission 預檢單一玩家:回傳玩家可讀的繁中原因,null = 目前沒有擋。
      *
-     * 只涵蓋引擎層條件(副本不存在/停收、不在線、已在局內、pending)與引擎已知的內容資格;
+     * 只涵蓋引擎層條件(副本不存在/停收、不在線、已在局內、pending)與內容資格(所有
+     * [EntryEligibility] provider 的回答,任一擋下就回它的原因);
      * **只讀**,不扣料、不保留名額,所以通過預檢不保證進得去(最終 admission 在進場交易內
      * 重查,客滿也只在那時才知道)。
      */

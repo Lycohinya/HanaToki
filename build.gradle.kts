@@ -41,6 +41,9 @@ tasks {
 
     test { useJUnitPlatform() }
 
+    // src/main/java 的跨插件 Java interface 帶繁中 Javadoc,不依賴平台預設編碼。
+    withType<JavaCompile> { options.encoding = "UTF-8" }
+
     processResources {
         val props = mapOf("version" to version.toString(), "description" to project.description.toString())
         // 沒有這行,改版本後 processResources 會判定 UP-TO-DATE,jar 檔名是新版但內嵌 version 是舊的

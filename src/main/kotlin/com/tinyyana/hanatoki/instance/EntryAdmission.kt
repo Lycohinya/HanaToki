@@ -15,7 +15,8 @@ import java.util.concurrent.ConcurrentHashMap
  * 3. 全員在線 → [DungeonEntryStatus.PLAYER_OFFLINE]
  * 4. 沒有人在任何 session 裡、也沒有人有進行中的進場交易或尚未收斂的回滾/歸還
  *    → [DungeonEntryStatus.ALREADY_INSIDE]
- * 5. 內容資格([Ports.eligibilityBlock]) → [DungeonEntryStatus.NOT_ELIGIBLE]
+ * 5. 內容資格([Ports.eligibilityBlock],名單上每一位逐人問;正式實作是 [EntryEligibilityChain]
+ *    問所有 `api/EntryEligibility` provider) → [DungeonEntryStatus.NOT_ELIGIBLE]
  *
  * ## 為什麼要有 [admitAndReserve]
  *

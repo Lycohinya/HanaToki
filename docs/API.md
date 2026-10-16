@@ -27,7 +27,7 @@
 | 場景物件 | `ActorSpec`、`ActorHandle`、`PropHandle` |
 | 世界生成 | `WorldGeneratorRegistry` |
 | HanaToki 對外提供的 service | `DungeonAccess`、`PresenceBridge` |
-| HanaToki 向外尋找的 service | `CheckResolver`、`MusicCue`、`RewardSink` |
+| HanaToki 向外尋找的 service | `CheckResolver`、`MusicCue`、`RewardSink`、`EntryEligibility` |
 | 內容層提供、其他插件消費的契約 | `RewardQuotaLookup`、`RewardQuotaAdmin` |
 
 ### 目前只有型別，別當成已完成流程
@@ -128,6 +128,7 @@ override fun onDisable() {
 | `CheckResolver` | 內容／integration | HanaToki | 回傳已完成的 `"unavailable"` |
 | `MusicCue` | 內容／integration | HanaToki | 無聲 no-op，不記警告 |
 | `RewardSink` | 內容／integration | HanaToki | 放進 JVM 記憶體 pending queue 並記 warning |
+| `EntryEligibility`（rc.17，可多個 provider） | 內容／integration | HanaToki 進場 admission | 沒有 provider = 不擋；provider 丟例外 = 擋下並記 warning（見 §5「內容資格」） |
 | `RewardQuotaLookup` | 內容／integration | 外部選單／管理工具 | provider 自訂；HanaToki core 不查它 |
 | `RewardQuotaAdmin` | 內容／integration | 外部管理工具 | provider 自訂；HanaToki core 不查它 |
 
@@ -162,6 +163,9 @@ interface DungeonAccess {
     ): CompletableFuture<DungeonEntryOutcome>
     fun isEntryPending(playerId: UUID): Boolean
     fun entryBlockReason(playerId: UUID, dungeonId: String): String?
+
+    // 1.0.0-rc.17 新增：1..party-cap 人，語意同 Trio
+    fun enterDungeonPartyTracked(players: List<UUID>, dungeonId: String): CompletableFuture<DungeonEntryOutcome>
 }
 
 interface DungeonEntryOutcome {
@@ -206,6 +210,7 @@ val access = server.servicesManager
 | `enterDungeonTracked(player, id)` | future complete 時，`succeeded()` 為 true 代表**人已經真的站在場地上**、局內背包（若有開）也換好了 | future 在任意執行緒 complete；接著要對玩家做事請自己派回他的 scheduler |
 | `enterDungeonDuo(a, b, id)` | 兩人在線、definition 存在、通過 admission，且有空位 | 同步可知的失敗（含 UUID 重複、超過 `party-cap`、已在局內、pending）回 false |
 | `enterDungeonTrioTracked(a, b, c, id)` | 同 `enterDungeonDuoTracked`，三人全有全無 | admission 失敗以 status 回報，不留狀態 |
+| `enterDungeonPartyTracked(players, id)` | 同 Trio，人數 1..`party-cap`，全有全無 | 名單在呼叫當下複製、元素須非 null；空／重複／超過 cap 為 `PARTY_INVALID`；有人離線時依 admission 順序回 `PARTY_INVALID` 或 `PLAYER_OFFLINE` |
 | `isEntryPending(player)` | 有進行中的進場交易，或失敗／結束後「送出場地」「局內背包歸還」尚未完成 | 只讀、無鎖、任何執行緒可呼叫；true 時再進場會被擋成 `ALREADY_INSIDE`；plugin 停用時清空 |
 | `entryBlockReason(player, id)` | 引擎 admission 預檢單一玩家：玩家可讀繁中原因，或 null | 只讀，不扣料、不保留名額；通過不保證進得去（客滿、競態以進場交易內重查為準） |
 | `leaveDungeon(player)` | 找到玩家目前的 session，並開始離場 | persistent 返回點缺失時可能回 false；傳送仍非同步 |
@@ -229,7 +234,33 @@ val access = server.servicesManager
 | 4 | 無人在任何 session、無人 pending（進場交易中、或送出場地／背包歸還尚未收斂） | `ALREADY_INSIDE` |
 | 5 | 內容資格 | `NOT_ELIGIBLE`（`failureReason()` 為玩家可讀繁中） |
 
-登記在交易收尾時解除（成功，或失敗回滾完成／最多等 15 秒），因此兩個同時到達的請求不會都通過；回滾逾時仍在背景收斂的部分由 `isEntryPending` 繼續回 true。boolean 入口對上述同步可知的失敗回 false。內容資格目前引擎沒有可問的 hook（資格只存在 LycoHanaToki／Core 選單層），第 5 步恆為通過；`party-cap` 預設 4，定義小於 1 會在載入時丟 `DefinitionError`。
+登記在交易收尾時解除（成功，或失敗回滾完成／最多等 15 秒），因此兩個同時到達的請求不會都通過；回滾逾時仍在背景收斂的部分由 `isEntryPending` 繼續回 true。boolean 入口對上述同步可知的失敗回 false。第 5 步的內容資格來自 `EntryEligibility` provider（見下節，rc.17 起；之前恆為通過）；`party-cap` 預設 4，定義小於 1 會在載入時丟 `DefinitionError`。
+
+### 內容資格 `EntryEligibility`（1.0.0-rc.17）
+
+Package：`com.tinyyana.hanatoki.api`（Java interface，只用 JDK 型別）
+
+```java
+public interface EntryEligibility {
+    String block(UUID player, String dungeonId);   // null 或 "" = 可進；否則玩家可讀原因
+}
+```
+
+內容插件以 ServicesManager 註冊，可以有多個 provider：
+
+```kotlin
+server.servicesManager.register(EntryEligibility::class.java, myEligibility, this, ServicePriority.Normal)
+```
+
+| 規則 | 內容 |
+|---|---|
+| 查詢時機 | 每次 admission（所有進場入口、`entryBlockReason` 預檢）都重新取全部 registration，對名單上**每一位**逐人、逐 provider 詢問 |
+| 判定 | 任一 provider 回非空白字串 → `NOT_ELIGIBLE`，該字串原樣成為 `failureReason()`／`entryBlockReason` 的回傳；第一個擋下的為準（ServicesManager priority 順序） |
+| 例外 | provider 丟 `Exception` 或 `LinkageError` → **擋下**，記 warning（含 provider 所屬插件名），原因用引擎文字 `messages.yml` 的 `session.eligibility-error` |
+| 執行緒 | 在進場臨界區（持有引擎鎖）內、任意執行緒被呼叫：只讀、快速、只查記憶體快取；不做 I/O、不等 future、不碰世界／實體、不回頭呼叫 `DungeonAccess` 進場方法 |
+| 文字 | 純文字繁中（不含 MiniMessage 標籤，引擎會把它塞進 `<red>{reason}</red>`），說明缺什麼、去哪裡補，句尾不加句號 |
+
+`/hanatoki enter` 驗收指令同樣經過這一步。provider 由內容插件 `onDisable` 收回（`unregisterAll(this)`）；之後的 admission 就不再問它。
 
 **2026-08-29 修正（原本的缺陷描述已不成立）**：`enter*` 不再丟掉 `teleportAsync` 的結果。傳送回 false 或 exceptional、進場途中登出、world/slot 失效、局內背包交易失敗時，核心會**完整回滾** session 成員資格、slot 佔用、stage 狀態與排程、bossbar、返回點登記與局內背包 journal，不會留下「`PresenceBridge` 說他在裡面、人卻站在原地」的狀態。布林版 `enterDungeon` 另外會主動對玩家發失敗訊息。
 
@@ -406,12 +437,32 @@ ctx.membersWithin(center, 4.0).thenAccept { members ->
 |---|---|
 | `transition(stageId)` | 呼叫舊 stage exit、取消 stage tasks，再把 state 切到新 id 並呼叫 enter；呼叫端必須保證 id 存在 |
 | `resolve(resultKey)` | session：結算並收場；persistent：只結算當前 stage 的一輪 |
+| `resolveEach(resultKeyByPlayer)` | rc.17：同 `resolve`，但每位成員各自的 resultKey；見下方「逐人結算」 |
 | `requestCheck(playerId, checkId)` | 轉給 `CheckResolver`；缺席回 `"unavailable"` |
 | `musicCue(cueId)` | 對每位 active member 呼叫 `MusicCue`；provider 缺席 no-op |
 | `sessionRemainingSeconds()` | session 剩餘秒數；到期或找不到回 0 |
 | `log(message)` | 以 HanaToki logger 記內容 log |
 
 `transition` 本身不先驗證 stage id。傳入不存在的 id 時，舊 stage 已退出、task 已取消，而且 `currentStageId` 已經被改掉；通常要等後續 `state.stage()` 才拋錯。這不是可恢復的「轉場被拒絕」，內容程式與 YAML 都要在進入 runtime 前驗證 id。
+
+### 逐人結算 `resolveEach`（1.0.0-rc.17）
+
+```kotlin
+fun resolveEach(resultKeyByPlayer: Map<UUID, String>)   // bytecode：java.util.Map<java.util.UUID, java.lang.String>
+```
+
+多人同行、每人結果不同時用（例如 Boss 戰：有效參與者拿通關 key，其餘拿內容自訂的無獎勵 key）。
+
+| 規則 | 內容 |
+|---|---|
+| 一局只結算一次 | 與 `resolve` 共用 `InstanceState.claimResolution`：同一個 stage 內 `resolve`／`resolveEach` 不論先後、呼叫幾次，只有第一次生效；session 型另有 `endSession` 原子認領 |
+| 收尾 | 與 `resolve` 相同（session：結束 session、送人離場、回滾、歸還 slot；persistent：只結算這一輪）；**不會**個別 kick |
+| 未列入的在場成員 | 值為 null／空白也算未列入 → **不產生** `CompletionResult`。引擎不發明 key；要讓 reward 端留紀錄，由內容列入一個沒有獎勵規則的 key（例如 `"<base>-none"`） |
+| 列入但不在場 | 略過並記 info log，不補發 |
+| 快照 | map 在呼叫當下複製；同一次結算的所有結果共用**同一份** stats 快照（內容蓋在 stats 的 run id，例如 LycoHanaToki `run.id_hi/run.id_lo`，每人相同）；completionId 每人各一個 |
+| 執行緒 | 同 `resolve`，在 `submit` 的執行線上呼叫 |
+
+`CompletionResult` 型別不變，沒有新增 run id 欄位。
 
 ### Encounter、actor、prop 與 boss bar
 
@@ -594,7 +645,7 @@ fun interface RewardSink {
 }
 ```
 
-每位 active member 各拿一筆 `CompletionResult`。Provider 應：
+`resolve` 時每位 active member 各拿一筆 `CompletionResult`；`resolveEach` 時只有列入且仍在場的成員各拿一筆（見 §9「逐人結算」）。同一次結算的各筆共用同一份 `stats` 快照。Provider 應：
 
 1. 立刻把 I/O 排到合適的非 region thread；`onCompletion` 是 fire-and-forget。
 2. 以 `completionId` 做持久化冪等，避免同一筆補送時重複發獎。

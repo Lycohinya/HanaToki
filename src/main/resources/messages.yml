@@ -16,6 +16,8 @@ session:
   # 進場最終 admission 擋下:名單不合法(空、重複、超過人數上限)/內容資格不符。{reason} 是 admission 產生的玩家可讀原因。
   party-invalid: "<red>{reason}</red>"
   not-eligible: "<red>{reason}</red>"
+  # 內容資格 provider(api/EntryEligibility)查詢失敗時的擋下原因。**純文字**:它本身會被塞進上面的 {reason}。
+  eligibility-error: "進場資格暫時查不到,稍後再試"
   # 進場交易正在等場地蓋好(只在等超過一小段時間才顯示,見 DungeonEntry)。
   preparing: "<gray>場地準備中</gray>"
 # 局內物品(scope=INSTANCE)的攔截提示。看得到這兩句代表防線有作用,不是錯誤。
