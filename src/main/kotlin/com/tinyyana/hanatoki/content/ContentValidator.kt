@@ -36,6 +36,22 @@ object ContentValidator {
                 }
             }
             if (stage.complete.isEmpty() && stage.next != null) errors += "$where.complete: 有下一段(next)的 stage 必須寫完成條件"
+            // objective 的 until:跟 complete 同一套條件,引用要存在;reach 只有 stage.complete 裡探測得到的 marker 才會達成
+            stage.objective.forEachIndexed { i, step ->
+                when (val c = step.until) {
+                    null -> {}
+                    is Condition.EncounterCleared ->
+                        if (c.encounter !in spec.encounters) errors += "$where.objective[$i].until.encounter: 引用不存在的波次「${c.encounter}」(encounters.yml)"
+                    is Condition.ObjectState -> stateOk(c.objectId, c.state)?.let { errors += "$where.objective[$i].until: $it" }
+                    is Condition.Reach ->
+                        if (stage.complete.none { it is Condition.Reach && it.marker == c.marker }) {
+                            errors += "$where.objective[$i].until.marker: reach 只有寫在這個 stage 的 complete 裡的 marker「${c.marker}」才會被偵測"
+                        }
+                }
+                if (step.until == null && i != stage.objective.lastIndex) {
+                    errors += "$where.objective[$i].until: 沒寫 until 的步驟永遠停在這一步,只能放最後一個"
+                }
+            }
         }
         // stage 鏈:從第一段沿 next 走,不可繞圈,且每個 stage 都走得到
         val seen = LinkedHashSet<String>()
@@ -53,6 +69,8 @@ object ContentValidator {
             if (obj is LanternSpec) {
                 val opens = obj.onLit.opens
                 if (opens != null && spec.objects[opens] !is GateSpec) errors += "$where.on-lit.opens: 「$opens」不是 gate 物件"
+                val needTool = obj.hint?.requiresTool
+                if (needTool != null && needTool !in spec.tools) errors += "$where.hint.requires-tool: 引用不存在的道具「$needTool」(tool.yml)"
             }
         }
 
@@ -86,6 +104,19 @@ object ContentValidator {
         for (hint in spec.hints.values) {
             val where = "${ContentFileNames.HINTS} hints.${hint.id}"
             if (hint.stage != null && hint.stage !in stageIds) errors += "$where.stage: 引用不存在的 stage「${hint.stage}」"
+            if ((hint.trigger is HintTrigger.ToolEmpty || hint.trigger is HintTrigger.UnequippedNearEnemy) && spec.tools.isEmpty()) {
+                errors += "$where.trigger: 這種提示要有局內道具(tool.yml 沒有任何道具)"
+            }
+        }
+        // tool.yml:光源區回補只認 burning／lit(unlit 的燈籠沒有光)
+        for (tool in spec.tools.values) {
+            val zone = tool.zoneRegen ?: continue
+            if (zone.states.isEmpty() && zone.markers.isEmpty()) {
+                errors += "${ContentFileNames.TOOL} tools.${tool.id}.zone-regen: states 與 markers 不可都是空的"
+            }
+            if (zone.states.isNotEmpty() && spec.objects.values.none { it is LanternSpec }) {
+                errors += "${ContentFileNames.TOOL} tools.${tool.id}.zone-regen.states: 沒有任何 lantern 物件可以當光源區(改用 markers 或加燈籠)"
+            }
         }
         return errors.distinct()
     }
@@ -145,6 +176,9 @@ object ContentValidator {
                 errors += "${ContentFileNames.HINTS} hints.${hint.id}.trigger.marker: 場景裡沒有 id=${t.marker} 的 marker"
             }
         }
+        for (tool in spec.tools.values) tool.zoneRegen?.markers?.forEachIndexed { i, id ->
+            if (marker(id) == null) errors += "${ContentFileNames.TOOL} tools.${tool.id}.zone-regen.markers[$i]: 場景裡沒有 id=$id 的 marker"
+        }
         return errors
     }
 
@@ -190,6 +224,8 @@ object ContentValidator {
             check(ContentFileNames.STAGES, "stages.${s.id}.on-start.subtitle", s.onStart.subtitleKey)
             check(ContentFileNames.STAGES, "stages.${s.id}.on-complete.title", s.onComplete.titleKey)
             check(ContentFileNames.STAGES, "stages.${s.id}.on-complete.subtitle", s.onComplete.subtitleKey)
+            s.objective.forEachIndexed { i, step -> check(ContentFileNames.STAGES, "stages.${s.id}.objective[$i].text", step.textKey) }
+            check(ContentFileNames.STAGES, "stages.${s.id}.objective-done", s.objectiveDoneKey)
         }
         for (t in spec.tools.values) {
             check(ContentFileNames.TOOL, "tools.${t.id}.name", t.nameKey)
@@ -209,6 +245,9 @@ object ContentValidator {
             if (rule in EnemyRules.RESERVED) out += "${ContentFileNames.ENEMIES} enemies.${e.id}.rules: 「$rule」是保留標籤,本版沒有行為"
         }
         for (e in spec.enemies.values) if (e.rules.isEmpty()) out += "${ContentFileNames.ENEMIES} enemies.${e.id}.rules: 沒有任何規則標籤,這個敵人就是一般會被打死的怪"
+        for (t in spec.tools.values) if (t.passiveRegenSeconds == null) {
+            out += "${ContentFileNames.TOOL} tools.${t.id}: 沒有 passive-regen-seconds,燈火歸零時只剩打散敵人能補(場上沒有可打的敵人就會卡死)"
+        }
         return out
     }
 }

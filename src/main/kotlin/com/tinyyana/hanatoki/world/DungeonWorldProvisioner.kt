@@ -103,11 +103,17 @@ class DungeonWorldProvisioner(private val plugin: Plugin) {
      *               的情境用,例如既有的常駐副本世界)。
      * @param generatorId 自訂地形生成器 id(見 [WorldGeneratorRegistry]);null = 引擎自帶的
      *               [VoidChunkGenerator] + 整套 void 世界安全網。
+     * @param worldTime 固定的一天內時刻(0..23999),null = 不管。**世界已載入時也會套用**
+     *               (預載入、熱插拔都走這條),且只在 [create]=true 時;見 [applyWorldTime]。
      * @return 世界,或建立失敗時 null(已記 severe log,呼叫端只要跳過該副本的 slot 登記)。
      */
-    fun ensureWorld(worldName: String, create: Boolean, autoSave: Boolean, generatorId: String?): World? {
+    fun ensureWorld(worldName: String, create: Boolean, autoSave: Boolean, generatorId: String?, worldTime: Long? = null): World? {
         Bukkit.getWorld(worldName)?.let {
-            if (create) { warnIfForeignGenerator(it, generatorId); remember(worldName, autoSave, generatorId) }
+            if (create) {
+                warnIfForeignGenerator(it, generatorId)
+                remember(worldName, autoSave, generatorId)
+                if (generatorId == null) applyWorldTime(it, worldTime)
+            }
             return it
         }
         if (!create) return null
@@ -147,6 +153,7 @@ class DungeonWorldProvisioner(private val plugin: Plugin) {
         remember(worldName, autoSave, generatorId)
         if (generatorId == null) {
             applyVoidWorldSettings(world, autoSave)
+            applyWorldTime(world, worldTime)
             buildSpawnPlatform(world)
             plugin.logger.info("[HanaToki] 副本世界就緒:$worldName(void 生成,auto-save=$autoSave)")
         } else {
@@ -203,7 +210,7 @@ class DungeonWorldProvisioner(private val plugin: Plugin) {
         SpawnCategory.entries.forEach { runCatching { world.setSpawnLimit(it, 0) } }
 
         // 固定成傍晚:刀塚的「戰事剛結束的那個下午」與其他副本的演出都靠世界時間定調,
-        // 由內容層自己再覆寫 setTime 即可,這裡只保證它不會自己往前跑。
+        // dungeons.yml 的 `world-time` 會在 [applyWorldTime] 設定想要的時刻(例如午夜),這裡只保證它不會自己往前跑。
         world.setGameRule(GameRule.DO_DAYLIGHT_CYCLE, false)
         world.setGameRule(GameRule.DO_WEATHER_CYCLE, false)
         world.setStorm(false)
@@ -219,6 +226,28 @@ class DungeonWorldProvisioner(private val plugin: Plugin) {
         world.setGameRule(GameRule.DO_INSOMNIA, false)
         world.setGameRule(GameRule.ANNOUNCE_ADVANCEMENTS, false)
         world.setGameRule(GameRule.SPAWN_RADIUS, 0)
+    }
+
+    /**
+     * 把副本世界停在 [time](一天內的 tick,0..23999)。26.x 的時間是 world clock:`advance_time`
+     * (DO_DAYLIGHT_CYCLE)在 [applyVoidWorldSettings] 已經關掉,時鐘不會自己走,所以設一次就固定。
+     *
+     * - 用 `World#setTime`:它只改這個世界自己的 clock(Paper per-world time),而且對 NORMAL 環境的
+     *   世界(維度型態 overworld 帶 `default_clock`)可用。Nether 型態的世界沒有 default clock,
+     *   會丟 IllegalArgumentException "Cannot set time in world without world clock"(這裡不會碰到,
+     *   [ensureWorld] 一律建 NORMAL),照樣 catch 並記 log。
+     * - Folia 要求在 global region tick thread 呼叫;不在的話派到 global region scheduler。
+     * - 世界存檔關閉(`world-auto-save: false`)時 clock 不保證落地,所以每次註冊／開機都重設。
+     */
+    private fun applyWorldTime(world: World, time: Long?) {
+        if (time == null) return
+        val apply = Runnable {
+            runCatching { world.setTime(time) }
+                .onSuccess { plugin.logger.info("[HanaToki] 副本世界 ${world.name} 固定在 $time tick(world-time)") }
+                .onFailure { plugin.logger.warning("[HanaToki] 副本世界 ${world.name} 設定 world-time=$time 失敗:${it.message}") }
+        }
+        if (Bukkit.getServer().isGlobalTickThread || startupThread) apply.run()
+        else Bukkit.getGlobalRegionScheduler().execute(plugin, apply)
     }
 
     /**

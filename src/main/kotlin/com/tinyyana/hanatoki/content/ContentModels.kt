@@ -32,7 +32,16 @@ data class StageSpec(
     val onComplete: StageEffects,
     /** null = 最後一段:完成後播 on-complete、打 `slice-end` log,不結算、不發獎。 */
     val next: String?,
+    /** 目前目標(ActionBar 一行字):依序第一個「until 還沒達成」的步驟;空 = 這個 stage 不顯示目標。 */
+    val objective: List<ObjectiveStep> = emptyList(),
+    /** 所有步驟的 until 都達成後顯示的文案 key;null = 不顯示。 */
+    val objectiveDoneKey: String? = null,
+    /** 目標定時重播的間隔秒數;0 = 只在進 stage、步驟換了、燈火變了時顯示。 */
+    val objectiveEverySeconds: Double = 0.0,
 )
+
+/** 一步目標:[textKey] 是 texts key(參數 {charges} {max} {pips});[until] 達成就換下一步,null = 一直停在這步。 */
+data class ObjectiveStep(val textKey: String, val until: Condition?)
 
 /** stage 開始/完成時的演出:cue、音樂、對話、標題。 */
 data class StageEffects(
@@ -85,6 +94,19 @@ data class LanternLit(
 )
 data class ProgressBar(val textKey: String, val color: String)
 
+/**
+ * 未點亮燈籠的世界標示(只放給該玩家看的持續 cue,LycoLib 端實作成 loop 光效)。
+ * 玩家距離 ≤ [radius] 播 [cue];≤ [readyRadius] 換成 [readyCue](「現在閃一下一定點得著」)。
+ */
+data class ObjectHint(
+    val cue: String,
+    val readyCue: String?,
+    val radius: Double,
+    val readyRadius: Double,
+    /** 只有主手拿著這個道具時才顯示;null = 不限。 */
+    val requiresTool: String?,
+)
+
 data class LanternSpec(
     override val id: String,
     override val markerId: String,
@@ -101,6 +123,9 @@ data class LanternSpec(
     val resumeCues: List<String>,
     val onLit: LanternLit,
     val progressBar: ProgressBar?,
+    /** > 0:閃光時持有者離燈籠 ≤ 這個距離就點燃,不必瞄準(仍可用錐形從更遠點燃);0 = 只認錐形。 */
+    val igniteRadius: Double = 0.0,
+    val hint: ObjectHint? = null,
 ) : ObjectSpec
 
 data class GateSpec(
@@ -146,6 +171,10 @@ data class NeedsFlashSpec(
     val dissolveTicks: Int,
     val whiffCooldownTicks: Int,
     val glowOnStun: Boolean,
+    /** 活著(可被照)時跟著敵人的持續 cue;null = 沒有標示。 */
+    val aliveCue: String? = null,
+    /** 僵直中(現在可以打)跟著敵人的持續 cue,取代 [aliveCue];null = 僵直時不留標示。 */
+    val stunnedCue: String? = null,
 )
 
 data class EnemySpec(
@@ -222,7 +251,20 @@ data class ToolSpec(
     val emptyCues: List<String>,
     /** 燈火變動時顯示在 ActionBar 的文案 key(參數 {charges}、{max});null = 只用物品耐久條。 */
     val hudTextKey: String?,
+    /** 低於上限時每 N 秒 +1(不論在哪)。這是「燈火 0 也不會卡死」的保底;null = 沒有被動回補。 */
+    val passiveRegenSeconds: Double? = null,
+    val zoneRegen: ZoneRegen? = null,
+    /** 這次閃光把燈火用到 0 時播給持有者的 cue。 */
+    val drainedCues: List<String> = emptyList(),
+    /** 自動回補(被動或光源區)+1 時播給持有者的 cue。 */
+    val gainCues: List<String> = emptyList(),
 )
+
+/**
+ * 光源區回補:持有者站在[處於 [states] 的燈籠]或[指定 marker]半徑 [radius] 內,
+ * 回補改成每 [seconds] 秒 +1(取被動與光源區較快的一個,不相加)。
+ */
+data class ZoneRegen(val seconds: Double, val radius: Double, val states: Set<String>, val markers: List<String>)
 
 // ---- hints.yml ----
 
@@ -231,6 +273,10 @@ sealed interface HintTrigger {
     /** 距上次進展 N 秒。 */
     data class NoProgress(val seconds: Double) : HintTrigger
     data class NearMarker(val marker: String, val radius: Double) : HintTrigger
+    /** 某位成員的燈火是 0 時(用盡那一下或空揮)。個人提示,只播給當事人。 */
+    data object ToolEmpty : HintTrigger
+    /** 某位成員主手沒拿局內道具、卻在還沒僵直的敵人 [radius] 格內。個人提示,只播給當事人。 */
+    data class UnequippedNearEnemy(val radius: Double) : HintTrigger
 }
 
 data class HintSpec(

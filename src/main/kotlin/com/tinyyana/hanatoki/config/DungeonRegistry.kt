@@ -118,7 +118,7 @@ class DungeonRegistry(
             // 專屬副本世界不存在就在這裡建起來(ARCH §6 的世界層,見 DungeonWorldProvisioner)。
             // ⚠ 這條路徑要求呼叫端已在 global region tick thread 上——loadAll/loadAdditional 的
             //   兩個入口都由 HanaTokiCore 包在 `DungeonWorldProvisioner.runOnGlobalRegion` 裡。
-            val world = worlds.ensureWorld(def.worldName, def.worldCreate, def.worldAutoSave, def.worldGeneratorId)
+            val world = worlds.ensureWorld(def.worldName, def.worldCreate, def.worldAutoSave, def.worldGeneratorId, def.worldTime)
             if (world == null) {
                 logger.warning("[HanaToki] 副本 $id 指定的世界 ${def.worldName} 不存在也無法建立,slot 未登記")
                 continue

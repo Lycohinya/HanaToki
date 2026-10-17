@@ -143,6 +143,7 @@ dungeons:
 | `world-generator` | 無 | 世界尚未載入、且要由 HanaToki 建立時使用的 generator id；找不到時拒絕建立，不退回 void |
 | `world-auto-save` | `false` | 只在 HanaToki 建立／載入原本未載入的世界時設定 Bukkit auto-save |
 | `world-border-margin` | `256` | void 世界最遠 slot 外再保留的邊界距離 |
+| `world-time` | 無 | rc.19：void 世界固定在一天內的這個 tick（0..23999；18000 = 午夜、6000 = 正午）。沒寫 = 不管；只接受 `world-create: true` 且沒有 `world-generator` 的副本，其他組合解析報錯。世界已被載入時每次註冊仍會套用 |
 | `slot-count` | `1` | 同時可分配的場地數；必須至少 1，`persistent` 必須等於 1 |
 | `slot-spacing-blocks` | `1024` | 同一 dungeon 的 slot 沿 X 軸分隔距離 |
 | `anchor-offset-x` | `0` | 整組 slot 的 X 基準偏移 |

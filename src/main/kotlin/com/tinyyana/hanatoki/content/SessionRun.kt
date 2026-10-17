@@ -89,6 +89,22 @@ class SessionRun(
     private val portNotes = HashSet<String>()
     private var barPercent = -1
 
+    // 引導與燈火回補(都是內容資料明確啟用才動,舊副本這些欄位全是空的)
+    private val meters = HashMap<UUID, MutableMap<String, ChargeMeter>>()
+    private var lastRegenAt = 0L
+    private var presencePending = false
+    private var presenceAt = 0L
+    private val lanternHintRuns = HashMap<String, LanternHintRun>()
+    private var objectiveKey: String? = null
+    private var objectiveDirty = false
+    private var objectiveNextAt = 0L
+    private val toolSlots: Set<Int> = spec.tools.values.map { it.slot }.toSet()
+
+    /** 需要每 10 tick 抓一次成員快照(位置、主手格)的功能是否有任何一個開著。 */
+    private val presenceNeeded: Boolean = spec.tools.values.any { it.passiveRegenSeconds != null || it.zoneRegen != null } ||
+        spec.objects.values.any { it is LanternSpec && it.hint != null } ||
+        spec.hints.values.any { it.trigger is HintTrigger.UnequippedNearEnemy }
+
     private val mutator = StageWorldMutator { location, data ->
         if (!closed) ctx.mutate(location) { block -> block.blockData = data }
     }
@@ -105,6 +121,9 @@ class SessionRun(
         var milestonesFired = 0
     }
 
+    /** 某位玩家看到的燈籠世界標示:[level] 1 = 遠處提示,2 = 已在可點燃範圍。 */
+    private class LanternHintRun(val level: Int, val run: CueRun?)
+
     private class GateRt(val spec: GateSpec, val machine: GateMachine, val marker: MapMarker, val loc: Location)
 
     private class EncounterRt(val spec: EncounterSpec) {
@@ -120,6 +139,8 @@ class SessionRun(
         @Volatile var model: BossModelHandle? = null
         var lastLoc: Location? = null
         var lastWhiff = -1000L
+        /** 跟著敵人的狀態標示 cue(活著 / 僵直中),換狀態時換掉。 */
+        var markRun: CueRun? = null
     }
 
     private fun log(event: String, detail: String) {
@@ -227,6 +248,8 @@ class SessionRun(
         val stage = spec.stage(stageId) ?: run { warn("stage $stageId 不在 stages.yml"); return }
         currentStage = stage
         markProgress()
+        objectiveKey = null
+        objectiveDirty = false
         log("stage-start", stageId)
         playEffects(stage.onStart, stage, "on-start")
         checkTriggers()
@@ -312,7 +335,9 @@ class SessionRun(
         timers.runDue(now) { warn("計時任務丟出例外:${it.javaClass.simpleName}: ${it.message}") }
         tickLanterns()
         if (now % 10L == 0L) probeMarkers()
+        if (presenceNeeded && now % 10L == 0L) probePresence()
         tickIdleHints()
+        tickObjective()
         evaluateStage()
     }
 
@@ -391,6 +416,7 @@ class SessionRun(
         if (!rt.machine.ignite()) return false
         log("object", "${rt.spec.id} unlit->burning")
         markProgress()
+        clearLanternHints(rt.spec.id)
         rt.nextRepeat = now
         val effect = rt.spec.states[ObjectStates.LANTERN_BURNING]
         effect?.let {
@@ -591,6 +617,7 @@ class SessionRun(
         rt.lastLoc = at
         log("enemy-spawn", "${rt.actorId} enemy=${rt.spec.id} encounter=${rt.encounterId}")
         cues(rt.spec.spawnCues, at, core.actorController.entityOf(sessionId, rt.actorId))
+        setMark(rt, rt.spec.needsFlash?.aliveCue)
         val modelId = rt.spec.model ?: return
         ctx.actors().bindModel(rt.actorId, modelId).whenComplete { handle, _ ->
             ctx.submit {
@@ -608,8 +635,18 @@ class SessionRun(
         }
     }
 
+    /** 把敵人身上的狀態標示換成 [cueId](null = 拿掉)。標示是只放給成員看的 loop 光效,跟著敵人實體。 */
+    private fun setMark(rt: EnemyRt, cueId: String?) {
+        rt.markRun?.cancel()
+        rt.markRun = null
+        if (cueId == null || closed) return
+        val at = rt.lastLoc ?: return
+        rt.markRun = cue(cueId, at, core.actorController.entityOf(sessionId, rt.actorId))
+    }
+
     private fun enemyGone(rt: EnemyRt, reason: String) {
         if (!rt.machine.gone()) return
+        setMark(rt, null)
         enemies.remove(rt.actorId)
         val enc = rt.encounterId?.let { encounters[it] } ?: return
         enc.alive.remove(rt.actorId)
@@ -661,6 +698,7 @@ class SessionRun(
         log("enemy-stun", "${rt.actorId} enemy=${rt.spec.id}${if (wasStunned) " refreshed" else ""}")
         if (!wasStunned) {
             cue(nf.stunCue, loc, core.actorController.entityOf(sessionId, rt.actorId))
+            setMark(rt, nf.stunnedCue)
             ctx.actors().runOnEntity(rt.actorId) { e ->
                 (e as? LivingEntity)?.setAI(false)
                 e.isGlowing = nf.glowOnStun
@@ -673,6 +711,7 @@ class SessionRun(
     private fun recoverEnemy(rt: EnemyRt, epoch: Int) {
         if (closed || !rt.machine.recover(epoch)) return
         log("enemy-recover", rt.actorId)
+        setMark(rt, rt.spec.needsFlash?.aliveCue)
         ctx.actors().runOnEntity(rt.actorId) { e ->
             (e as? LivingEntity)?.setAI(true)
             e.isGlowing = false
@@ -687,6 +726,7 @@ class SessionRun(
         val at = loc ?: rt.lastLoc
         log("enemy-dissolve", "${rt.actorId} enemy=${rt.spec.id} by=${killer?.let(::nameOf) ?: "lantern"}")
         markProgress()
+        setMark(rt, null)
         if (at != null) {
             rt.lastLoc = at
             cue(nf?.dissolveCue, at, core.actorController.entityOf(sessionId, rt.actorId))
@@ -723,6 +763,7 @@ class SessionRun(
     private fun setCharges(playerId: UUID, tool: ToolSpec, value: Int) {
         val v = value.coerceIn(0, tool.maxCharges)
         charges.getOrPut(playerId) { HashMap() }[tool.id] = v
+        objectiveDirty = true
         ctx.runOnMember(playerId) { player -> runtime.toolItems.syncDurability(player, tool, v) }
         tool.hudTextKey?.let { ctx.actionBar(playerId, it, mapOf("charges" to v.toString(), "max" to tool.maxCharges.toString())) }
     }
@@ -743,6 +784,7 @@ class SessionRun(
     /** 給進場成員發 tool。必須等 onMemberReady(進場交易完成、局內背包換好)。 */
     fun onMemberReady(playerId: UUID) {
         if (closed) return
+        objectiveDirty = true
         val items = core.instanceInventory.items
         val instanceId = items.activeInstanceIdOf(playerId)
         for (tool in toolSpecs()) {
@@ -758,15 +800,19 @@ class SessionRun(
 
     fun onMemberLeft(playerId: UUID) {
         charges.remove(playerId)
+        meters.remove(playerId)
         lastFlash.remove(playerId)
+        val suffix = "/$playerId"
+        val gone = lanternHintRuns.keys.filter { it.endsWith(suffix) }
+        gone.forEach { lanternHintRuns.remove(it)?.run?.cancel() }
     }
 
-    /** 事件執行緒呼叫:玩家右鍵 tool。[eye]/[dir] 是事件當下持有者的快照。 */
-    fun onFlash(playerId: UUID, toolId: String, eye: Location, dir: Vector) {
-        ctx.submit { handleFlash(playerId, toolId, eye, dir) }
+    /** 事件執行緒呼叫:玩家右鍵 tool。[eye]/[dir]/[feet] 是事件當下持有者的快照([feet] = `player.location`,點燃半徑與世界標示用同一套量法)。 */
+    fun onFlash(playerId: UUID, toolId: String, eye: Location, dir: Vector, feet: Location) {
+        ctx.submit { handleFlash(playerId, toolId, eye, dir, feet) }
     }
 
-    private fun handleFlash(playerId: UUID, toolId: String, eye: Location, dir: Vector) {
+    private fun handleFlash(playerId: UUID, toolId: String, eye: Location, dir: Vector, feet: Location) {
         if (closed) return
         val tool = spec.tools[toolId] ?: return
         if (playerId !in members()) return
@@ -778,19 +824,40 @@ class SessionRun(
         if (current <= 0) {
             log("flash-empty", "player=${nameOf(playerId)} tool=${tool.id}")
             cues(tool.emptyCues, eye, null, listOfNotNull(player))
+            hintToolEmpty(playerId)
             return
         }
         setCharges(playerId, tool, current - 1)
         cues(tool.flashCues, eye)
+        if (current - 1 == 0) {
+            log("tool-drained", "player=${nameOf(playerId)} tool=${tool.id}")
+            cues(tool.drainedCues, eye, null, listOfNotNull(player))
+            hintToolEmpty(playerId)
+        }
         val direction = dir.clone().normalize()
         val half = Math.toRadians(tool.coneAngle / 2.0)
         var lanternHits = 0
+        val misses = ArrayList<String>()
         for (rt in lanterns.values) {
             if (!stageActive(rt.spec.stage) || rt.machine.state != LanternMachine.State.UNLIT) continue
             val base = rt.loc
-            val hit = inCone(eye, direction, base.clone().add(0.0, 0.5, 0.0), half, tool.range) ||
+            val coneHit = inCone(eye, direction, base.clone().add(0.0, 0.5, 0.0), half, tool.range) ||
                 inCone(eye, direction, base.clone().add(0.0, 2.5, 0.0), half, tool.range)
-            if (hit && igniteLantern(rt)) lanternHits++
+            val center = base.clone().add(0.0, 1.0, 0.0)
+            // 點燃半徑量「腳底到燈籠 marker」:跟守燈範圍(membersWithin)、世界標示亮圈(成員快照)是同一套量法,蹲下也不變
+            val close: Double = if (feet.world == base.world) feet.distance(base) else Double.MAX_VALUE
+            val radiusHit = rt.spec.igniteRadius > 0.0 && close <= rt.spec.igniteRadius
+            if ((coneHit || radiusHit) && igniteLantern(rt)) {
+                lanternHits++
+            } else if (!coneHit && !radiusHit) {
+                // 實測證據:沒點到時記下距離與視線偏角,下次調射程與判定半徑有數據可看
+                val to = center.toVector().subtract(eye.toVector())
+                val angle = if (to.lengthSquared() < 1.0E-6) 0.0 else Math.toDegrees(Math.acos(to.normalize().dot(direction).coerceIn(-1.0, 1.0)))
+                misses += String.format(java.util.Locale.ROOT, "%s:dist=%.1f,angle=%.0f", rt.spec.id, if (close == Double.MAX_VALUE) -1.0 else close, angle)
+            }
+        }
+        if (lanternHits == 0 && misses.isNotEmpty()) {
+            log("flash-miss", "player=${nameOf(playerId)} range=${tool.range} cone=${tool.coneAngle} ${misses.joinToString(" ")}")
         }
         val candidates = enemies.values.filter { it.spec.needsFlash != null && (it.machine.state == EnemyMachine.State.ALIVE || it.machine.stunned) }
         log("flash", "player=${nameOf(playerId)} tool=${tool.id} charges=${current - 1} lanterns=$lanternHits candidates=${candidates.size}")
@@ -825,14 +892,21 @@ class SessionRun(
         }
     }
 
-    private fun fireHint(h: HintSpec) {
-        if (h.once && h.id in firedHints) return
-        val last = hintFiredAt[h.id]
+    /** [only] 非 null = 個人提示(只播給這位玩家,once／repeat 也各算各的)。 */
+    private fun fireHint(h: HintSpec, only: Player? = null) {
+        val key = if (only != null) "${h.id}/${only.uniqueId}" else h.id
+        if (h.once && key in firedHints) return
+        val last = hintFiredAt[key]
         if (!h.once && last != null && now - last < (h.repeatSeconds * 20).toLong()) return
-        firedHints += h.id
-        hintFiredAt[h.id] = now
-        log("hint", h.id)
-        cues(h.cues, hintOrigin(h))
+        firedHints += key
+        hintFiredAt[key] = now
+        log("hint", if (only != null) "${h.id} player=${only.name}" else h.id)
+        cues(h.cues, hintOrigin(h), null, only?.let { listOf(it) })
+    }
+
+    private fun hintToolEmpty(playerId: UUID) {
+        val player = Bukkit.getPlayer(playerId) ?: return
+        for (h in spec.hints.values) if (h.trigger is HintTrigger.ToolEmpty && stageActive(h.stage)) fireHint(h, player)
     }
 
     private fun tickIdleHints() {
@@ -878,6 +952,152 @@ class SessionRun(
         }
     }
 
+    // ---- 目標(ActionBar 一行字)----
+
+    /** 依 stages.yml 的 objective:進 stage、步驟達成換下一步、燈火變了、到定時間隔就重畫。 */
+    private fun tickObjective() {
+        val stage = currentStage ?: return
+        if (stage.objective.isEmpty()) return
+        val key = pickObjective(stage.objective, ::conditionMet)?.textKey ?: stage.objectiveDoneKey
+        val every = stage.objectiveEverySeconds
+        val due = key != objectiveKey || objectiveDirty || (every > 0.0 && now >= objectiveNextAt)
+        if (!due) return
+        objectiveKey = key
+        objectiveDirty = false
+        objectiveNextAt = now + (every * 20).toLong()
+        if (key != null) showObjective(key)
+    }
+
+    private fun showObjective(key: String) {
+        val tool = spec.tools.values.firstOrNull()
+        for (playerId in members()) {
+            val params = if (tool == null) emptyMap() else {
+                val c = chargesOf(playerId, tool)
+                mapOf("charges" to c.toString(), "max" to tool.maxCharges.toString(), "pips" to chargePips(c, tool.maxCharges))
+            }
+            ctx.actionBar(playerId, key, params)
+        }
+    }
+
+    // ---- 成員快照:燈火回補、燈籠世界標示、「沒拿道具靠近敵人」提示 ----
+
+    private fun probePresence() {
+        if (presencePending && now - presenceAt <= PROBE_STALE_TICKS) return
+        presencePending = true
+        presenceAt = now
+        val startedAt = now
+        ctx.memberSnapshots().whenComplete { snap, error ->
+            ctx.submit {
+                if (presenceAt != startedAt) return@submit
+                presencePending = false
+                if (!closed) processPresence(if (error != null) emptyMap() else snap ?: emptyMap())
+            }
+        }
+    }
+
+    private fun processPresence(snap: Map<UUID, DoubleArray>) {
+        val dtSeconds = ((now - lastRegenAt) / 20.0).coerceAtMost(MAX_REGEN_DT_SECONDS)
+        lastRegenAt = now
+        regenCharges(snap, dtSeconds)
+        updateLanternHints(snap)
+        probeUnequipped(snap)
+    }
+
+    private fun distance(pos: DoubleArray, loc: Location): Double {
+        val dx = pos[0] - loc.x
+        val dy = pos[1] - loc.y
+        val dz = pos[2] - loc.z
+        return Math.sqrt(dx * dx + dy * dy + dz * dz)
+    }
+
+    private fun inRegenZone(tool: ToolSpec, pos: DoubleArray): Boolean {
+        val zone = tool.zoneRegen ?: return false
+        for (rt in lanterns.values) {
+            if (!stageActive(rt.spec.stage)) continue
+            if (rt.machine.state.name.lowercase() in zone.states && distance(pos, rt.loc) <= zone.radius) return true
+        }
+        return zone.markers.any { id -> markers[id]?.let { distance(pos, it.location(world)) <= zone.radius } == true }
+    }
+
+    /** 被動／光源區回補。有被動回補的道具,燈火 0 最久 passive-regen-seconds 秒內一定回到 >= 1(不靠敵人)。 */
+    private fun regenCharges(snap: Map<UUID, DoubleArray>, dtSeconds: Double) {
+        if (dtSeconds <= 0.0) return
+        for (playerId in members()) for (tool in toolSpecs()) {
+            if (tool.passiveRegenSeconds == null && tool.zoneRegen == null) continue
+            val before = chargesOf(playerId, tool)
+            val meter = meters.getOrPut(playerId) { HashMap() }
+                .getOrPut(tool.id) { ChargeMeter(tool.passiveRegenSeconds, tool.zoneRegen?.seconds) }
+            val pos = snap[playerId]
+            val inZone = pos != null && inRegenZone(tool, pos)
+            val gained = meter.advance(dtSeconds, before, tool.maxCharges, inZone)
+            if (gained <= 0) continue
+            setCharges(playerId, tool, before + gained)
+            log("regen", "player=${nameOf(playerId)} tool=${tool.id} charges=${(before + gained).coerceAtMost(tool.maxCharges)} zone=$inZone")
+            val player = Bukkit.getPlayer(playerId) ?: continue
+            // origin 帶眼睛位置與朝向(光效 orient: aim 要用);快照沒有時退回入口
+            val at = if (pos != null) Location(world, pos[0], pos[1] + 1.62, pos[2], pos[3].toFloat(), pos[4].toFloat()) else entryLocation()
+            cues(tool.gainCues, at, null, listOf(player))
+        }
+    }
+
+    /** 未點亮燈籠的世界標示:手持道具的玩家走近才出現,只放給他自己;進入可點燃範圍換成較亮的一個。 */
+    private fun updateLanternHints(snap: Map<UUID, DoubleArray>) {
+        for (rt in lanterns.values) {
+            val hint = rt.spec.hint ?: continue
+            val active = stageActive(rt.spec.stage) && rt.machine.state == LanternMachine.State.UNLIT
+            for (playerId in members()) {
+                val key = "${rt.spec.id}/$playerId"
+                val current = lanternHintRuns[key]
+                val pos = snap[playerId]
+                var level = 0
+                if (active && pos != null) {
+                    val holding = hint.requiresTool == null || spec.tools[hint.requiresTool]?.slot == pos[HELD_SLOT].toInt()
+                    if (holding) {
+                        level = lanternHintLevel(distance(pos, rt.loc), current?.level ?: 0, hint.radius, hint.readyRadius, hint.readyCue != null, HINT_SLACK)
+                    }
+                }
+                if (level == (current?.level ?: 0)) continue
+                current?.run?.cancel()
+                if (level == 0) { lanternHintRuns.remove(key); continue }
+                val player = Bukkit.getPlayer(playerId)
+                val cueId = if (level == 2) hint.readyCue else hint.cue
+                val run = if (player != null) cue(cueId, rt.loc, null, listOf(player)) else null
+                lanternHintRuns[key] = LanternHintRun(level, run)
+            }
+        }
+    }
+
+    private fun clearLanternHints(lanternId: String) {
+        val prefix = "$lanternId/"
+        val gone = lanternHintRuns.keys.filter { it.startsWith(prefix) }
+        gone.forEach { lanternHintRuns.remove(it)?.run?.cancel() }
+    }
+
+    /** 主手沒拿局內道具、卻靠近還沒僵直的敵人:個人提示。 */
+    private fun probeUnequipped(snap: Map<UUID, DoubleArray>) {
+        val hints = spec.hints.values.filter { it.trigger is HintTrigger.UnequippedNearEnemy && stageActive(it.stage) }
+        if (hints.isEmpty() || snap.isEmpty() || toolSlots.isEmpty()) return
+        val alive = enemies.values.filter { it.spec.needsFlash != null && it.machine.state == EnemyMachine.State.ALIVE }
+        if (alive.isEmpty()) return
+        val futures = alive.map { rt -> ctx.actors().locationOf(rt.actorId).handle { loc, _ -> loc } }
+        CompletableFuture.allOf(*futures.toTypedArray()).whenComplete { _, _ ->
+            ctx.submit {
+                if (closed) return@submit
+                val locs = futures.mapNotNull { it.getNow(null) }.filter { it.world == world }
+                if (locs.isEmpty()) return@submit
+                val current = members().toSet()
+                for (h in hints) {
+                    val radius = (h.trigger as HintTrigger.UnequippedNearEnemy).radius
+                    for ((playerId, pos) in snap) {
+                        if (playerId !in current || pos[HELD_SLOT].toInt() in toolSlots) continue
+                        if (locs.none { distance(pos, it) <= radius }) continue
+                        Bukkit.getPlayer(playerId)?.let { fireHint(h, it) }
+                    }
+                }
+            }
+        }
+    }
+
     // ---- 收尾 ----
 
     /** 局結束:取消所有 CueRun 與排程、停掉 mutator。場地回滾由引擎在這之後做。 */
@@ -886,6 +1106,7 @@ class SessionRun(
         closed = true
         timers.clear()
         lanterns.values.forEach { it.hold?.cancel(); it.hold = null }
+        lanternHintRuns.clear()
         while (true) {
             val run = cueRuns.pollFirst() ?: break
             try { run.cancel() } catch (t: Throwable) { warn("CueRun.cancel 失敗:${t.message}") }
@@ -897,6 +1118,11 @@ class SessionRun(
     private companion object {
         const val TICK_PERIOD = 2L
         const val PROBE_STALE_TICKS = 40L
+        /** [StageContext.MEMBER_SNAPSHOT_FIELDS] 的 heldSlot 欄位。 */
+        const val HELD_SLOT = 9
+        const val HINT_SLACK = 1.0
+        /** 快照回來太晚時,一次最多補算這麼多秒的回補,不讓卡頓變成一次補滿。 */
+        const val MAX_REGEN_DT_SECONDS = 5.0
 
         fun inCone(eye: Location, direction: Vector, target: Location, halfAngle: Double, range: Double): Boolean {
             if (target.world != eye.world) return false

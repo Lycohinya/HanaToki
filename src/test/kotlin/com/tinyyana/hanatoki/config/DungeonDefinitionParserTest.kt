@@ -283,6 +283,18 @@ class DungeonDefinitionParserTest {
     }
 
     @Test
+    fun `loadout 的 lore 解析成文字清單,沒寫是空的,寫壞是設定錯誤`() {
+        fun loadoutWith(vararg entry: Pair<String, Any?>) = minimal(
+            mapOf("instance-inventory" to mapOf("enabled" to true, "loadout" to listOf(mapOf("material" to "IRON_SWORD") + entry))),
+        )
+        val inv = assertNotNull(loadoutWith("lore" to listOf("<gray>打僵住的幽靈</gray>", "第二行")).instanceInventory)
+        assertEquals(listOf("<gray>打僵住的幽靈</gray>", "第二行"), inv.loadout[0].lore)
+        assertTrue(assertNotNull(loadoutWith().instanceInventory).loadout[0].lore.isEmpty())
+        assertFailsWith<DungeonDefinitionParser.DefinitionError> { loadoutWith("lore" to "不是清單") }
+        assertFailsWith<DungeonDefinitionParser.DefinitionError> { loadoutWith("lore" to listOf("  ")) }
+    }
+
+    @Test
     fun `空的 instance-inventory 是「進去就是空背包」而不是不開`() {
         val inv = assertNotNull(minimal(mapOf("instance-inventory" to mapOf("enabled" to true))).instanceInventory)
         assertTrue(inv.loadout.isEmpty())
@@ -379,6 +391,36 @@ class DungeonDefinitionParserTest {
                     ),
                 ),
             )
+        }
+    }
+    @Test
+    fun `world-time 沒寫就是 null 舊副本不受影響`() {
+        assertNull(minimal(emptyMap()).worldTime)
+    }
+
+    @Test
+    fun `world-time 解析成一天內的 tick`() {
+        assertEquals(18000L, minimal(mapOf("world-time" to 18000)).worldTime)
+        assertEquals(0L, minimal(mapOf("world-time" to 0)).worldTime)
+        assertEquals(23999L, minimal(mapOf("world-time" to 23999L)).worldTime)
+    }
+
+    @Test
+    fun `world-time 超出 0 到 23999 或不是整數是設定錯誤`() {
+        for (bad in listOf<Any>(-1, 24000, 18000.5, "midnight")) {
+            assertFailsWith<DungeonDefinitionParser.DefinitionError>("world-time=$bad") {
+                minimal(mapOf("world-time" to bad))
+            }
+        }
+    }
+
+    @Test
+    fun `world-time 配 world-create false 或 world-generator 是設定錯誤`() {
+        assertFailsWith<DungeonDefinitionParser.DefinitionError> {
+            minimal(mapOf("world-time" to 18000, "world-create" to false))
+        }
+        assertFailsWith<DungeonDefinitionParser.DefinitionError> {
+            minimal(mapOf("world-time" to 18000, "world-generator" to "sakura"))
         }
     }
 }

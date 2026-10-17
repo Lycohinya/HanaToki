@@ -276,15 +276,37 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         val block = root.child("stages", required = true) ?: return emptyList()
         val out = ArrayList<StageSpec>()
         for ((id, node) in block.entries()) {
-            node.only(setOf("on-start", "complete", "on-complete", "next"))
+            node.only(setOf("on-start", "complete", "on-complete", "next", "objective", "objective-done", "objective-every-seconds"))
             val onStart = parseStageEffects(node.child("on-start"))
             val onComplete = parseStageEffects(node.child("on-complete"))
             val complete = node.mapList("complete").mapNotNull { parseCondition(it) }
             val next = node.id("next")
-            out += StageSpec(id, onStart, complete, onComplete, next)
+            val objective = parseObjective(node)
+            val every = node.num("objective-every-seconds", min = 0.5, max = 600.0) ?: 0.0
+            val done = node.str("objective-done")
+            if (objective.isEmpty() && (done != null || node.map["objective-every-seconds"] != null)) {
+                node.err("objective", "有 objective-done 或 objective-every-seconds 就必須寫 objective")
+            }
+            out += StageSpec(id, onStart, complete, onComplete, next, objective, done, every)
         }
         if (out.isEmpty() && block.map.isEmpty()) block.err(null, "至少要有一個 stage")
         return out
+    }
+
+    /** `objective: key`(單一步驟)或 `objective: [{ text: key, until: {條件} }, …]`(依序,until 達成才換下一步)。 */
+    private fun parseObjective(node: Node): List<ObjectiveStep> {
+        val raw = node.map["objective"] ?: return emptyList()
+        if (raw is List<*>) {
+            if (raw.isEmpty()) { node.err("objective", "步驟清單不可為空"); return emptyList() }
+            return node.mapList("objective").mapNotNull { step ->
+                step.only(setOf("text", "until"))
+                val text = step.str("text", required = true)
+                val until = step.child("until")?.let { parseCondition(it) }
+                if (text == null) null else ObjectiveStep(text, until)
+            }
+        }
+        val text = node.str("objective") ?: return emptyList()
+        return listOf(ObjectiveStep(text, null))
     }
 
     private fun parseStageEffects(node: Node?): StageEffects {
@@ -394,7 +416,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         node.only(
             setOf(
                 "type", "marker", "stage", "states", "burn-seconds", "stay-radius", "speed-by-players", "hold-cue", "repeat-cue",
-                "milestones", "pause-cues", "resume-cues", "on-lit", "progress-bar",
+                "milestones", "pause-cues", "resume-cues", "on-lit", "progress-bar", "ignite-radius", "hint",
             ),
         )
         val marker = node.id("marker", required = true)
@@ -441,10 +463,23 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
             if (text != null) ProgressBar(text, color) else null
         }
         val states = parseStates(node, ObjectStates.LANTERN)
+        val igniteRadius = node.num("ignite-radius", min = 0.0, max = 64.0) ?: 0.0
+        val hint = node.child("hint")?.let { h ->
+            h.only(setOf("cue", "ready-cue", "radius", "ready-radius", "requires-tool"))
+            val cue = h.id("cue", required = true)
+            val ready = h.id("ready-cue")
+            val hintRadius = h.num("radius", min = 0.0, max = 128.0, exclusiveMin = true, required = true)
+            val readyRadius = h.num("ready-radius", min = 0.0, max = 128.0, exclusiveMin = true)
+            if (ready != null && readyRadius == null) h.err("ready-radius", "有 ready-cue 就必須寫 ready-radius")
+            if (ready == null && readyRadius != null) h.err("ready-cue", "有 ready-radius 就必須寫 ready-cue")
+            if (readyRadius != null && hintRadius != null && readyRadius > hintRadius) h.err("ready-radius", "不可大於 radius($hintRadius)")
+            val tool = h.id("requires-tool")
+            if (cue != null && hintRadius != null) ObjectHint(cue, ready, hintRadius, readyRadius ?: hintRadius, tool) else null
+        }
         if (marker == null || burn == null || radius == null || onLit == null) return null
         return LanternSpec(
             id, marker, node.id("stage"), states, burn, radius, speed, node.id("hold-cue"), repeat, milestones,
-            node.idList("pause-cues"), node.idList("resume-cues"), onLit, bar,
+            node.idList("pause-cues"), node.idList("resume-cues"), onLit, bar, igniteRadius, hint,
         )
     }
 
@@ -505,12 +540,18 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                 val f = node.child("needs-flash")
                 if (f == null) { node.err("needs-flash", "規則 needs-flash 需要這個區塊(whiff-cue、stun-cue、dissolve-cue…)"); null }
                 else {
-                    f.only(setOf("whiff-cue", "stun-cue", "dissolve-cue", "refill-cue", "dissolve-ticks", "whiff-cooldown-ticks", "glow-on-stun"))
+                    f.only(
+                        setOf(
+                            "whiff-cue", "stun-cue", "dissolve-cue", "refill-cue", "dissolve-ticks", "whiff-cooldown-ticks", "glow-on-stun",
+                            "alive-cue", "stunned-cue",
+                        ),
+                    )
                     NeedsFlashSpec(
                         f.id("whiff-cue"), f.id("stun-cue"), f.id("dissolve-cue"), f.id("refill-cue"),
                         f.int("dissolve-ticks", min = 1, max = 400) ?: 12,
                         f.int("whiff-cooldown-ticks", min = 0, max = 400) ?: 6,
                         f.bool("glow-on-stun") ?: true,
+                        f.id("alive-cue"), f.id("stunned-cue"),
                     )
                 }
             } else {
@@ -580,7 +621,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
             node.only(
                 setOf(
                     "type", "material", "item-model", "name", "lore", "slot", "charges", "start-charges", "cone-angle", "range",
-                    "stun-seconds", "cooldown-ticks", "refill-on-dissolve", "cues", "hud-text",
+                    "stun-seconds", "cooldown-ticks", "refill-on-dissolve", "cues", "hud-text", "passive-regen-seconds", "zone-regen",
                 ),
             )
             val type = node.str("type") ?: "flash"
@@ -594,7 +635,20 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
             val range = node.num("range", min = 0.0, exclusiveMin = true, required = true)
             val stun = node.num("stun-seconds", min = 0.0, exclusiveMin = true, required = true)
             val cues = node.child("cues")
-            cues?.only(setOf("flash", "empty"))
+            cues?.only(setOf("flash", "empty", "drained", "gain"))
+            val passive = node.num("passive-regen-seconds", min = 1.0, max = 600.0)
+            val zone = node.child("zone-regen")?.let { z ->
+                z.only(setOf("seconds", "radius", "states", "markers"))
+                val seconds = z.num("seconds", min = 0.5, max = 600.0, required = true)
+                val zoneRadius = z.num("radius", min = 0.0, max = 64.0, exclusiveMin = true, required = true)
+                val states = LinkedHashSet<String>()
+                if (z.map["states"] == null) states += setOf(ObjectStates.LANTERN_BURNING, ObjectStates.LANTERN_LIT)
+                else z.idList("states").forEach { st ->
+                    if (st != ObjectStates.LANTERN_BURNING && st != ObjectStates.LANTERN_LIT) z.err("states", "「$st」不能當光源區狀態(可用:burning、lit)") else states += st
+                }
+                val markers = z.idList("markers")
+                if (seconds != null && zoneRadius != null) ZoneRegen(seconds, zoneRadius, states, markers) else null
+            }
             if (material != null && !MATERIAL.matches(material)) node.err("material", "材質名稱「$material」格式不合法(例如 LANTERN)")
             if (material != null && name != null && charges != null && cone != null && range != null && stun != null) {
                 out[id] = ToolSpec(
@@ -603,6 +657,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                     node.int("cooldown-ticks", min = 0, max = 1200) ?: 10,
                     node.int("refill-on-dissolve", min = 0, max = 64) ?: 0,
                     cues?.idList("flash") ?: emptyList(), cues?.idList("empty") ?: emptyList(), node.str("hud-text"),
+                    passive, zone, cues?.idList("drained") ?: emptyList(), cues?.idList("gain") ?: emptyList(),
                 )
             }
         }
@@ -629,7 +684,12 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                     val radius = t.num("radius", min = 0.0, exclusiveMin = true, required = true)
                     if (marker != null && radius != null) HintTrigger.NearMarker(marker, radius) else null
                 }
-                else -> { t.err("type", "未知的提示觸發「$type」(可用:first-whiff、no-progress、near-marker)"); null }
+                "tool-empty" -> { t.only(setOf("type")); HintTrigger.ToolEmpty }
+                "unequipped-near-enemy" -> {
+                    t.only(setOf("type", "radius"))
+                    t.num("radius", min = 0.0, max = 64.0, exclusiveMin = true, required = true)?.let(HintTrigger::UnequippedNearEnemy)
+                }
+                else -> { t.err("type", "未知的提示觸發「$type」(可用:first-whiff、no-progress、near-marker、tool-empty、unequipped-near-enemy)"); null }
             }
             val cues = node.idList("cues")
             if (cues.isEmpty() && node.map["cues"] == null) node.err("cues", "缺少必要欄位(要播的 cue ID 清單)")

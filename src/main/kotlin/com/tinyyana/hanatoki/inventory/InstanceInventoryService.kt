@@ -392,6 +392,19 @@ class InstanceInventoryService(
                     )
                 }
             }
+            if (entry.lore.isNotEmpty()) {
+                stack.editMeta { meta ->
+                    val mini = net.kyori.adventure.text.minimessage.MiniMessage.miniMessage()
+                    meta.lore(
+                        entry.lore.map { line ->
+                            mini.deserialize(line).decorationIfAbsent(
+                                net.kyori.adventure.text.format.TextDecoration.ITALIC,
+                                net.kyori.adventure.text.format.TextDecoration.State.FALSE,
+                            )
+                        },
+                    )
+                }
+            }
             // 局內起始裝備一律蓋 instance 標記——沒蓋的話它就是永久物品,玩家帶得出去。
             items.mark(stack, instanceId)
             val slot = entry.slot

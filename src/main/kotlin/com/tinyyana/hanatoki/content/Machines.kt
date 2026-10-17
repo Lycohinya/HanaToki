@@ -154,3 +154,56 @@ fun <T> pickByPlayers(table: Map<Int, T>, players: Int, default: T): T {
 /** 燒燈速度倍率:沒人 = 0(暫停),有人查表(沒寫 = 1.0)。 */
 fun lanternMultiplier(speedByPlayers: Map<Int, Double>, peopleInRadius: Int): Double =
     if (peopleInRadius <= 0) 0.0 else pickByPlayers(speedByPlayers, peopleInRadius, 1.0)
+
+/**
+ * 局內道具燈火的自動回補計量(純邏輯,不碰 Bukkit)。不變式:
+ * - 回補後燈火不超過 [advance] 傳入的上限;已滿時進度歸零(不存著等下一次扣燈火就立刻補);
+ * - 有被動回補([passiveSeconds])時,燈火 0 最久 [passiveSeconds] 秒內一定回到 >= 1,不依賴場上有沒有可打的敵人;
+ * - 光源區內改用 [zoneSeconds](取被動與光源區較快的一個,不相加);沒有任何來源時永遠回 0。
+ */
+class ChargeMeter(private val passiveSeconds: Double?, private val zoneSeconds: Double?) {
+    /** 0 <= progress < 1:離下一格還差多少。 */
+    var progress: Double = 0.0
+        private set
+
+    init {
+        require(passiveSeconds == null || passiveSeconds > 0.0) { "passiveSeconds 必須 > 0" }
+        require(zoneSeconds == null || zoneSeconds > 0.0) { "zoneSeconds 必須 > 0" }
+    }
+
+    /** 往前走 [dtSeconds]。回傳這段時間補了幾格(0 以上,且 [charges] + 回傳值 <= [max])。 */
+    fun advance(dtSeconds: Double, charges: Int, max: Int, inZone: Boolean): Int {
+        if (charges >= max) { progress = 0.0; return 0 }
+        val passive = passiveSeconds?.let { 1.0 / it } ?: 0.0
+        val zone = if (inZone) zoneSeconds?.let { 1.0 / it } ?: 0.0 else 0.0
+        val rate = maxOf(passive, zone)
+        if (rate <= 0.0 || dtSeconds <= 0.0) return 0
+        progress += dtSeconds * rate
+        val gained = minOf(progress.toInt(), max - charges)
+        progress -= progress.toInt()
+        if (charges + gained >= max) progress = 0.0
+        return gained
+    }
+
+    fun reset() { progress = 0.0 }
+}
+
+/**
+ * 燈籠世界標示等級:0 = 不顯示,1 = 遠處提示,2 = 已在可點燃範圍。
+ * ready 這級**向內遲滯**:進入要 <= readyRadius - slack,離開才 > readyRadius,所以只要等級是 2,
+ * 快照當下人一定在 readyRadius 內(把 0.5 秒快照延遲與走動吸收在 slack 裡);far 這級向外遲滯,站在線上不會一直開關。
+ */
+fun lanternHintLevel(distance: Double, current: Int, radius: Double, readyRadius: Double, hasReady: Boolean, slack: Double): Int {
+    if (hasReady && distance <= (if (current == 2) readyRadius else readyRadius - slack)) return 2
+    return if (distance <= (if (current > 0) radius + slack else radius)) 1 else 0
+}
+
+/** 燈火條:「●●○○○」。[charges] 超出 0..[max] 的部分夾住。 */
+fun chargePips(charges: Int, max: Int): String {
+    val full = charges.coerceIn(0, max)
+    return "●".repeat(full) + "○".repeat(max - full)
+}
+
+/** 目前目標:依序第一個 until 還沒達成的步驟(沒寫 until 的步驟永遠停在那一步);全部達成 = null。 */
+fun pickObjective(steps: List<ObjectiveStep>, met: (Condition) -> Boolean): ObjectiveStep? =
+    steps.firstOrNull { step -> step.until == null || !met(step.until) }

@@ -610,7 +610,7 @@ override fun onDisable() {
 - `isRegistered(id)` 可做同步存在檢查；它只代表 registry 有 supplier，不代表 supplier 能成功產生 generator。
 - `create(id)` 每次呼叫 supplier 取得新實例；supplier 丟例外時吞掉並回 null。
 - 世界尚未載入、需要 HanaToki 建立時，generator id 無法 create 會拒絕建立，不退回 void，以免後續 chunk 變成虛空。
-- 如果 Bukkit 已經載入同名世界，provisioner 會直接沿用，不再驗證 generator，也不重新套用 `world-auto-save`。內容插件必須把預載入順序與既有 world 設定納入驗收。
+- 如果 Bukkit 已經載入同名世界，provisioner 會直接沿用，不再驗證 generator，也不重新套用 `world-auto-save`（例外：`world-time` 每次註冊都會套用）。內容插件必須把預載入順序與既有 world 設定納入驗收。
 
 內容插件通常只需要 `register`／`unregister`；`isRegistered` 與 `create` 主要是 bootstrap introspection／引擎實作面，不承諾為穩定 SPI。
 
@@ -972,7 +972,7 @@ override fun prepareStage(ctx: StageContext, stageId: String): CompletableFuture
 
 `test-structure`（`test-only`）與 `/hanatoki admin mapprobe <slotId> <fixed|jigsaw|foreign|fail|cancel> [seed]` 使用 jar 內 `map-assets/hanatoki_probe`，第一次使用時複製到 `plugins/HanaToki/map-assets/`。2026-09-16 真 Lecithin 26.2 驗收：固定模組 245/245 格讀回符合、3 模組組裝 900/900、跨 2 個 region section；陌生修改保留 2 格；注入失敗與取消後場地回到放置前；bot 走完 session 後回收 573/573 格並釋放 slot，log 無 region ownership 違規。
 
-## 26. 資料驅動副本內容與 port（1.0.0-rc.18）
+## 26. 資料驅動副本內容與 port（1.0.0-rc.19）
 
 內容插件只給一個資料夾（`dungeons.yml` + `stages.yml`／`scene.yml`／`objects.yml`／`enemies.yml`／`encounters.yml`／`tool.yml`／`hints.yml` + `map-assets/`）和 texts，由框架內建的 `DataDrivenBehavior` 執行，不需要內容端 Kotlin。完整 schema、範例、驗證規則與證據 log 見 [CONTENT-DATA.md](CONTENT-DATA.md)。
 
@@ -1000,6 +1000,10 @@ interface DialogPort {
 - `onDone` 用 `IntConsumer` 而不是 Kotlin `(Int) -> Unit`：Kotlin 函式型別跨 classloader 會 `LinkageError`（見 `StageContext` KDoc）。1..N = 選項；0 = 取消／斷線／無選項；可能在任意執行緒回呼。
 - `StageWorldMutator` 由 HanaToki 以 `StageContext.mutate` 實作（寫入記 diff，局結束回滾；局結束後 no-op）。`CueRun` 在局結束時全部 `cancel()`。
 - `audience` 是副本成員的 `Player` 參考；HanaToki 不碰它，實作端自行派到各玩家的 EntityScheduler。
+
+### rc.19：`world-time`
+
+`dungeons.yml` 新增可選欄位 `world-time`（0..23999，一天內的 tick；沒寫 = 維持原行為）。`DungeonWorldProvisioner.ensureWorld(..., worldTime)` 在 void 世界建立後、以及世界已載入時（預載入、熱插拔）呼叫 `World#setTime`；`advance_time`（DO_DAYLIGHT_CYCLE）本來就被 provisioner 關掉，所以時間固定。在 global region tick thread 以外會派到 `GlobalRegionScheduler`。解析規則：`world-create: false` 或有 `world-generator` 時報錯（那種世界的日夜循環不受 HanaToki 鎖定）。
 
 ### 其他 rc.18 變更
 

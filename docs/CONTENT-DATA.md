@@ -1,4 +1,4 @@
-# 資料驅動副本內容（1.0.0-rc.18）
+# 資料驅動副本內容（1.0.0-rc.20）
 
 內容插件只給 **一個資料夾 + texts**，行為由框架內建的 `DataDrivenBehavior` 依資料執行，內容端不寫 Kotlin。另做一座副本只換設定檔與資產。判準：加第 N+1 盞燈籠、第 N+1 種幽靈、第 N+1 段提示，只改一筆 YAML。
 
@@ -28,7 +28,9 @@ content/
   map-assets/<namespace>/structure/<path>.nbt   資料夾沒有的資產退回內容插件 jar 內同路徑的 map-assets/
 ```
 
-`dungeons.yml` 必須：`stages.start/list` 與 stages.yml 一致（引擎沒有 stage 圖就不執行任何 stage）；`spawn-offset-x/y/z` 的整數部分等於 `player_spawn id=<scene.entry>` 相對 slot anchor 的位置（引擎用它傳送，對不上註冊時拒絕，不會讓玩家掉進虛空）；有 `tool.yml` 就必須 `instance-inventory: { enabled: true, loadout: [] }`（局內道具要蓋 instance 章）。
+`instance-inventory.loadout[]` 可寫 `lore: ["<MiniMessage>", …]`（rc.20，每行一筆，預設正體不斜體），讓局內起始物品（例如短刀）自己說明用法。
+
+`dungeons.yml` 必須：`stages.start/list` 與 stages.yml 一致（引擎沒有 stage 圖就不執行任何 stage）；`spawn-offset-x/y/z` 的整數部分等於 `player_spawn id=<scene.entry>` 相對 slot anchor 的位置（引擎用它傳送，對不上註冊時拒絕，不會讓玩家掉進虛空）；可選 `world-time`（0..23999；18000 = 午夜，rc.19）：副本世界固定在這個一天內時刻，沒寫就維持原狀；`world-create: false` 或有 `world-generator` 時報錯。有 `tool.yml` 就必須 `instance-inventory: { enabled: true, loadout: [] }`（局內道具要蓋 instance 章）。
 
 ## ID 規則
 
@@ -57,6 +59,23 @@ stages:                       # 宣告順序；第一個 = 起始 stage
 
 stage 鏈不可繞圈，每個 stage 都要沿 `next` 走得到；有 `next` 的 stage 必須寫 `complete`。
 
+### 目前目標 objective（rc.20，選填）
+
+玩家要知道「現在該做什麼」。每個 stage 可以宣告一行 ActionBar 目標文字（走 `ActionBars`／LycoLib HudBridge 的 `hanatoki.stage` 組，不碰 BetterHud 字型）：
+
+```yaml
+  lantern_court:
+    objective-every-seconds: 1        # 選填 0.5–600；重畫間隔。0／省略 = 只在進 stage、步驟換了、燈火變了時畫
+    objective:                        # 單一 texts key，或依序的步驟清單
+      - { text: mist-patrol.goal.lantern-flash, until: { type: object-state, object: lantern_a, state: burning } }
+      - { text: mist-patrol.goal.lantern-hold,  until: { type: object-state, object: lantern_a, state: lit } }
+    objective-done: mist-patrol.goal.done   # 選填；所有 until 都達成後顯示
+```
+
+- 顯示「第一個 until 還沒達成」的步驟；`until` 沿用 `complete` 的條件（`encounter-cleared`／`object-state`／`reach`）。沒寫 `until` 的步驟永遠停在那一步，只能放最後一個。`reach` 只有寫在**同一個 stage 的 `complete`** 裡的 marker 才偵測得到，其他的載入時拒絕。
+- 文字是 texts key（同 `title`），參數 `{charges}` `{max}` `{pips}`（`●●○○○` 燈火條）取 tool.yml 第一個道具、每位玩家各自的值。燈火條要一直看得見，就用 `objective-every-seconds: 1`，不再另用 tool 的 `hud-text`（同一個 ActionBar 組，後送的蓋掉先送的）。
+- 沒寫 `objective` 的 stage（以及整個舊副本）完全不經過這段。
+
 ## scene.yml
 
 ```yaml
@@ -84,6 +103,8 @@ pieces:                       # 一塊 piece 一筆；key = piece ID
 | `pause-cues`／`resume-cues` | 無人暫停／有人回來 |
 | `on-lit` | 必填。`cues`、`light-radius`（0 = 不放光）、`light-level`（1–15，預設 12）、`light-spacing`（預設 4，光源方塊格距）、`clears-enemies`（光圈內敵人打散、不補燈；這個 stage 還沒開始的波次取消）、`opens`（gate 物件 ID） |
 | `progress-bar` | `{ text: texts key（含 {percent}）, color }`，燒燈時的 boss bar |
+| `ignite-radius` | 選填（rc.20，預設 0 = 只認錐形）。閃光時持有者離燈籠 ≤ 這個距離就點燃，**不必瞄準**；更遠的仍可用錐形（`range`）點燃。建議 ≤ `stay-radius`，點燃的位置本來就在守燈範圍內 |
+| `hint` | 選填（rc.20）。未點亮燈籠的世界標示：`{ cue, ready-cue, radius, ready-radius, requires-tool }`。玩家距離 ≤ `radius` 播 `cue`、≤ `ready-radius` 換成 `ready-cue`（「現在閃一下一定點得著」）；`requires-tool` 填 tool ID = 只有主手拿著那個道具才顯示。**只放給該玩家自己**（audience = 他一人），cue 要寫成 loop 光效（LycoLib `vfx` 的 `loop: true`）；點燃、換 stage、離開範圍、離場都會取消。位置與主手格取自成員快照（每 10 tick 一次，不跨 region 讀玩家座標），邊界留 1.5 格遲滯 |
 
 **gate**（marker 必須是 `door`，要有水平 `facing` 與 `w`／`h`）：狀態 `closed → open`。`facing` = 門面朝的方向；站在門前（facing 那一側）看過去，marker 在**左下角**，寬往右延伸（右手邊 = facing 逆時針轉 90 度）。`column-ticks`（預設 4）每隔幾 tick 把一欄（h 格高）換成空氣做滑開；`slide-from`：`left`（從 marker 端）｜`right`。
 
@@ -110,6 +131,8 @@ enemies:
       dissolve-ticks: 12      # 打散到實體移除（要蓋住模型 dissolve 動畫）
       whiff-cooldown-ticks: 6
       glow-on-stun: true
+      alive-cue: ghost_aura   # 選填（rc.20）：活著（可被照）時跟著敵人實體的持續 cue（loop 光效，follow: entity）
+      stunned-cue: ghost_marked   # 選填：僵直中（現在可以打）換成這個，取代 alive-cue；打散或消失時拿掉
 ```
 
 規則標籤：**已實作** `needs-flash`；**保留**（接受、不實作、註冊時 WARN）`frozen-when-watched`、`flees-when-powered`；其他標籤報錯。needs-flash 行為：所有傷害一律取消（牠不會被打死，只會被打散；虛空與 `/kill` 放行）。未僵直時玩家攻擊 → 取消、播 whiff cue、觸發 `first-whiff` 提示。被閃光命中 → 僵直 `stun-seconds`（tool.yml）：停 AI、發光、模型播 `stunned`；僵直中受擊 → 打散（`dissolve` 動畫、cue、延遲移除），擊殺者補燈火（tool.yml `refill-on-dissolve`）。載體是原版怪物（有 `model` 時隱形），自動免疫日曬與火。
@@ -149,11 +172,22 @@ tools:
     stun-seconds: 3
     cooldown-ticks: 14
     refill-on-dissolve: 1      # 打散敵人給擊殺者補幾格
-    cues: { flash: flash, empty: flash_empty }   # 純量或清單
+    cues: { flash: flash, empty: flash_empty, drained: lamp_drained, gain: lamp_gain }   # 純量或清單；drained／gain 選填
     hud-text: tool.night-lantern.hud    # 選填；ActionBar 提示 {charges} {max}
+    passive-regen-seconds: 8            # 選填（rc.20）；低於上限時每 N 秒 +1（1–600）。這是「燈火 0 不會卡死」的保底
+    zone-regen: { seconds: 2, radius: 7, states: [burning, lit], markers: [] }   # 選填；光源區回補
 ```
 
-進場（`onMemberReady`）發給每位成員，經 `InstanceItems.mark` 蓋 instance 章（局內物，離場帶不出去）；不能放置；PDC `hanatoki:tool_id` 辨識。燈火數量顯示在物品**耐久條**（最大耐久 = 格數），另可用 hud-text。只認主手事件（主副手事件去重）；右鍵一律拒絕原版互動。閃光：事件當下取持有者眼睛位置與視線快照 → 一次判定錐形內的 needs-flash 敵人（實體位置經 `ActorHandle.locationOf` 取，不跨 region 讀）與 `unlit` 燈籠（→ burning，點燃目標取 marker 上方 0.5 與 2.5 格兩點）。沒燈火 → 播 `empty` cue 不扣；有冷卻。
+### 燈火自動回補（rc.20）
+
+只靠「打散敵人補燈火」有死鎖：燈火 0、場上沒有可打的僵直敵人 → 照不到 → 打不散 → 不補。（2026-10-18 霧頁巡夜實測就是點燈用掉最後一格、5 隻幽靈衝出來。）
+
+- `passive-regen-seconds`：低於上限時每 N 秒 +1，不論在哪、不依賴敵人，燈火 0 最久 N 秒（加一個 0.5 秒探測間隔）回到可用。`ChargeMeter` 純邏輯；已滿進度歸零，回補後不超過 `charges`。
+- `zone-regen`：持有者站在**處於 `states` 的燈籠**（`burning`／`lit`，預設兩者）或**指定 `markers`** 半徑 `radius` 內，改成每 `seconds` 秒 +1（取被動與光源區較快的一個，不相加）。契約的「安全區每秒補燈」就是這個。站在燃燒中的燈籠旁補燈，同時也把人留在 `stay-radius` 內讓燈繼續燒。
+- `drained` cue：這一下把燈火用到 0 時只播給持有者（悶聲）。`gain` cue：自動回補 +1 時只播給持有者（origin = 眼睛位置與朝向，光效可 `orient: aim`）。擊殺補燈火仍播敵人的 `refill-cue`。
+- 都沒寫 = 行為與 rc.19 相同。沒有 `passive-regen-seconds` 的道具載入時打一行 WARN（有卡死風險），不擋註冊。
+
+進場（`onMemberReady`）發給每位成員，經 `InstanceItems.mark` 蓋 instance 章（局內物，離場帶不出去）；不能放置；PDC `hanatoki:tool_id` 辨識。燈火數量顯示在物品**耐久條**（最大耐久 = 格數；原版只在「用掉至少一格」時才畫條，滿格看不到），要一直看得見就用 stage 的 `objective`（`{pips}`）或 `hud-text`。只認主手事件（主副手事件去重）；右鍵一律拒絕原版互動。閃光：事件當下取持有者眼睛位置與視線快照 → 一次判定錐形內的 needs-flash 敵人（實體位置經 `ActorHandle.locationOf` 取，不跨 region 讀）與 `unlit` 燈籠（→ burning，點燃目標取 marker 上方 0.5 與 2.5 格兩點）。沒燈火 → 播 `empty` cue 不扣；有冷卻。
 
 ## hints.yml
 
@@ -164,7 +198,17 @@ hints:
   hint_point:       { trigger: { type: near-marker, marker: lantern_a, radius: 12 }, stage: lantern_court, cues: [hint_lantern] }
 ```
 
-`once`（預設 true）；`once: false` 時以 `repeat-seconds`（預設 30）限頻。`stage` 可省略。「進展」= stage 開始、敵人打散、物件換狀態、柵門開、閃光命中、到達 marker。
+`once`（預設 true）；`once: false` 時以 `repeat-seconds`（預設 30）限頻。`stage` 可省略。「進展」= stage 開始、敵人打散、物件換狀態、柵門開、閃光命中、到達 marker。**`once` 是整局一次**（換 stage 不重置）：卡關提示要持續提醒就寫 `once: false`。
+
+個人提示（rc.20，**只播給當事人**，once／repeat 也各算各的；沒有任何 tool 時載入拒絕）：
+
+```yaml
+  hint_empty:   { trigger: { type: tool-empty }, once: false, repeat-seconds: 25, cues: [hint_empty] }
+  hint_unarmed: { trigger: { type: unequipped-near-enemy, radius: 8 }, once: false, repeat-seconds: 20, cues: [hint_unarmed] }
+```
+
+- `tool-empty`：某位成員閃光把燈火用到 0，或在 0 燈火時再按右鍵。
+- `unequipped-near-enemy`：某位成員主手格不是任何 tool 的 `slot`，且 `radius` 格內有還沒僵直的 needs-flash 敵人（成員快照的 `heldSlot` 加敵人位置，每 10 tick 一次）。
 
 ## Port（`com.tinyyana.hanatoki.api.port`）
 
@@ -186,7 +230,7 @@ HanaToki 追蹤每局播出的所有 `CueRun`（不設上限），局結束全�
 
 ## 證據 log
 
-每次狀態轉移一行 INFO：`[HanaToki/<dungeon>] <事件> <id…> slot=<slotId>`。事件：`scene-placed`、`stage-start <stage>`、`stage-complete <stage>`、`slice end <stage>`、`object <id> <from>-><to>`（含 `burning paused/resumed`、`milestone`）、`gate-open <id>`、`light`、`wave-start <id> count=N players=N`、`wave-clear <id>`、`wave-cancel <id>`、`enemy-spawn`、`enemy-stun`、`enemy-recover`、`enemy-dissolve <actor> by=<玩家|lantern>`、`enemy-gone`、`enemies-cleared`、`whiff`、`flash`、`flash-hit`、`flash-empty`、`refill`、`tool-give`、`hint <id>`、`reach <marker>`、`dialog <id> player= choice=`、`port-missing`、`session-end`。
+每次狀態轉移一行 INFO：`[HanaToki/<dungeon>] <事件> <id…> slot=<slotId>`。事件：`scene-placed`、`stage-start <stage>`、`stage-complete <stage>`、`slice end <stage>`、`object <id> <from>-><to>`（含 `burning paused/resumed`、`milestone`）、`gate-open <id>`、`light`、`wave-start <id> count=N players=N`、`wave-clear <id>`、`wave-cancel <id>`、`enemy-spawn`、`enemy-stun`、`enemy-recover`、`enemy-dissolve <actor> by=<玩家|lantern>`、`enemy-gone`、`enemies-cleared`、`whiff`、`flash`、`flash-hit`、`flash-empty`、`refill`、`tool-give`、`regen player= tool= charges= zone=`、`tool-drained`、`flash-miss player= range= cone= <燈籠>:dist=,angle=`（閃光沒點到未點亮燈籠時的距離與視線偏角）、`hint <id> [player=]`、`reach <marker>`、`dialog <id> player= choice=`、`port-missing`、`session-end`。
 
 ## 執行緒
 

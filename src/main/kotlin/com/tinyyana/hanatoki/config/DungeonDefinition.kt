@@ -67,6 +67,16 @@ data class DungeonDefinition(
      * 大小不隨遊玩次數增長。常駐型副本(場地要跨重開機保留)設 true。
      */
     val worldAutoSave: Boolean = false,
+    /**
+     * 副本世界固定的時刻(0..23999 tick 的一天內時間;18000 = 午夜、6000 = 正午、13000 = 日落後)。
+     * **null = 不管**(維持 provisioner 原有行為:void 世界停在建立當下的時間)。
+     *
+     * 只對 HanaToki 自己建立的 void 世界有意義(`world-create: true` 且沒有 `world-generator`):
+     * 只有那種世界的日夜循環被 provisioner 鎖住,時間才會停在這個值。其他組合解析時直接報錯。
+     * 世界已經被別人載入(熱插拔、預載入)時每次註冊仍會套用,不受 `world-auto-save` 那種
+     * 「只在新載入時設定」的限制。
+     */
+    val worldTime: Long? = null,
     /** 世界邊界在最遠的 slot 之外再留幾格。虛空世界最怕有人一路往外走把空 chunk 全生出來。 */
     val worldBorderMargin: Int = 256,
     val slotCount: Int,
@@ -209,6 +219,8 @@ data class LoadoutEntry(
     val amount: Int = 1,
     val slot: Int? = null,
     val displayName: String? = null,
+    /** MiniMessage 說明文字,一行一筆;空 = 不加說明。 */
+    val lore: List<String> = emptyList(),
 )
 
 /**
@@ -220,6 +232,31 @@ data class LoadoutEntry(
  */
 object DungeonDefinitionParser {
     class DefinitionError(message: String) : IllegalArgumentException(message)
+
+    /** 一天的 tick 數(MC 26.x `minecraft:day` timeline 週期)。 */
+    const val TICKS_PER_DAY = 24000L
+
+    /**
+     * `world-time`:沒寫 = null。寫了必須是 0..23999 的整數,而且世界要是 HanaToki 自己建的 void 世界
+     * (見 [DungeonDefinition.worldTime]),否則報錯而不是靜默忽略——作者以為鎖了夜晚、實際沒鎖,
+     * 是最難查的那種錯。
+     */
+    internal fun parseWorldTime(id: String, raw: Map<String, Any?>): Long? {
+        if (!raw.containsKey("world-time")) return null
+        val v = raw["world-time"]
+        val n = v as? Number ?: throw DefinitionError("dungeons.$id.world-time 必須是 0..23999 的整數(目前是 $v)")
+        val t = n.toLong()
+        if (n.toDouble() != t.toDouble() || t !in 0 until TICKS_PER_DAY) {
+            throw DefinitionError("dungeons.$id.world-time=$v 必須是 0..23999 的整數(18000 = 午夜)")
+        }
+        if ((raw["world-create"] as? Boolean) == false) {
+            throw DefinitionError("dungeons.$id.world-time 只對 HanaToki 自己建立的世界有效,但 world-create=false")
+        }
+        if (!(raw["world-generator"] as? String).isNullOrBlank()) {
+            throw DefinitionError("dungeons.$id.world-time 只對 void 世界有效(日夜循環被鎖住才會停在這個時間),但指定了 world-generator")
+        }
+        return t
+    }
 
     fun parse(id: String, raw: Map<String, Any?>): DungeonDefinition {
         fun str(key: String, default: String? = null): String =
@@ -275,6 +312,8 @@ object DungeonDefinitionParser {
             encId to parseEncounter(id, encId, m)
         }
 
+        val worldTime = parseWorldTime(id, raw)
+
         return DungeonDefinition(
             id = id,
             display = str("display", id),
@@ -283,6 +322,7 @@ object DungeonDefinitionParser {
             mode = mode,
             worldGeneratorId = (raw["world-generator"] as? String)?.takeIf { it.isNotBlank() },
             worldAutoSave = (raw["world-auto-save"] as? Boolean) ?: false,
+            worldTime = worldTime,
             worldBorderMargin = int("world-border-margin", 256),
             slotCount = slotCount,
             slotSpacingBlocks = int("slot-spacing-blocks", 1024),
@@ -370,7 +410,12 @@ object DungeonDefinitionParser {
             if (slot != null && slot !in 0..40) {
                 throw DefinitionError("dungeons.$id.instance-inventory.loadout[$index].slot 必須在 0..40")
             }
-            LoadoutEntry(material, amount, slot, (e["name"] as? String)?.takeIf { it.isNotBlank() })
+            val loreRaw = e["lore"]
+            if (loreRaw != null && (loreRaw !is List<*> || loreRaw.any { it !is String || it.isBlank() })) {
+                throw DefinitionError("dungeons.$id.instance-inventory.loadout[$index].lore 必須是非空白文字的清單")
+            }
+            val lore = (loreRaw as? List<*>)?.map { it as String } ?: emptyList()
+            LoadoutEntry(material, amount, slot, (e["name"] as? String)?.takeIf { it.isNotBlank() }, lore)
         }
         val carryInRaw = m["carry-in"] as? List<*> ?: emptyList<Any?>()
         val carryIn = carryInRaw.mapIndexed { index, entry ->

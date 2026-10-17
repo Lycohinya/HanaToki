@@ -40,7 +40,7 @@ class DataContentListener(private val core: HanaTokiCore, private val runtime: D
         val player = event.player
         val run = runtime.runOfPlayer(player.uniqueId) ?: return
         // 持有者快照:事件當下的眼睛位置與視線方向(玩家自己的 region 執行緒上讀)。
-        run.onFlash(player.uniqueId, toolId, player.eyeLocation.clone(), player.eyeLocation.direction.clone())
+        run.onFlash(player.uniqueId, toolId, player.eyeLocation.clone(), player.eyeLocation.direction.clone(), player.location.clone())
     }
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
