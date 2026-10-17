@@ -106,8 +106,13 @@ class HanaTokiListener(private val core: HanaTokiCore) : Listener {
         if (reconnected) {
             val session = core.sessionManager.sessionOf(player.uniqueId) ?: return
             val anchor = core.slotPool.anchorOf(session.slotId) ?: return
-            val display = core.registry.definitions[session.dungeonId]?.display ?: session.dungeonId
-            player.teleportAsync(anchor)
+            val definition = core.registry.definitions[session.dungeonId]
+            val display = definition?.display ?: session.dungeonId
+            // 資料驅動副本(registerDataContent)的重連落點 = 進場落點(anchor + spawn-offset),不是 anchor 本身:
+            // 場景是從 anchor 往外蓋的,anchor 那一格在地表之下(2026-10-17 s01-263 實測:重連玩家被傳進霧頁巡夜的土裡後掉出世界)。
+            // 其他副本維持原行為(傳到 anchor),新能力對舊副本零影響。
+            val dataDriven = core.dataContent.runOfPlayer(player.uniqueId) != null
+            player.teleportAsync(if (dataDriven && definition != null) core.entryLocationFor(definition, anchor) else anchor)
             PlayerOp.message(core.plugin, player.uniqueId, core.texts.format("session.reconnected", mapOf("dungeon" to display)))
             return
         }

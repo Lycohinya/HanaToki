@@ -15,6 +15,7 @@
 | Check、Reward、Music 與額度 service | [§14–18](#14-check-api) |
 | 失敗語意與驗證清單 | [§19–20](#19-失敗與執行緒速查) |
 | Structure/Jigsaw 地圖資產、marker 與 generation 回收 | [§25](#25-map-asset-layer060) |
+| 資料驅動副本內容（資料夾即內容）與 `CuePort`／`DialogPort` | [§26](#26-資料驅動副本內容與-port1-0-0-rc18) |
 
 ## 1. API 範圍與相容性
 
@@ -127,6 +128,8 @@ override fun onDisable() {
 | `PresenceBridge` | HanaToki | 音樂、UI、保護等唯讀消費端 | service 不存在時由消費端 fail closed |
 | `CheckResolver` | 內容／integration | HanaToki | 回傳已完成的 `"unavailable"` |
 | `MusicCue` | 內容／integration | HanaToki | 無聲 no-op，不記警告 |
+| `CuePort`（rc.18） | integration（LycoHanaToki → LycoLib） | HanaToki 資料驅動內容 | no-op；每局每個 port 打一行 INFO `port-missing`（見 §26） |
+| `DialogPort`（rc.18） | integration | HanaToki 資料驅動內容 | 同上 |
 | `RewardSink` | 內容／integration | HanaToki | 放進 JVM 記憶體 pending queue 並記 warning |
 | `EntryEligibility`（rc.17，可多個 provider） | 內容／integration | HanaToki 進場 admission | 沒有 provider = 不擋；provider 丟例外 = 擋下並記 warning（見 §5「內容資格」） |
 | `RewardQuotaLookup` | 內容／integration | 外部選單／管理工具 | provider 自訂；HanaToki core 不查它 |
@@ -535,6 +538,9 @@ ctx.actors().spawn("keeper", location, spec)
 | `immovable`／`invulnerable` | `true`／`true` | 演出 actor 的安全預設 |
 | `maxHealth` | `null` | 同時設定 max 與 current health |
 | `gravity`／`silent` | `false`／`true` | 重力與實體原生音效 |
+| `movementSpeed`／`attackDamage` | `null` | rc.18：`movement_speed`／`attack_damage` 屬性基礎值；null 不動 |
+| `fireResistant` | `false` | rc.18：true 時殭屍系關日曬燃燒並給無限火焰抗性 |
+| `randomizeData` | `true` | rc.18：false 時生成不套用原版隨機資料（小殭屍、騎雞、隨機裝備、領袖殭屍）；資料驅動敵人載體一律設 false |
 
 非 Mannequin entity 會略過 Mannequin-only 欄位。
 
@@ -557,6 +563,7 @@ ctx.actors().spawn("keeper", location, spec)
 | `swingMainHand`／`playHurtAnimation` | 原版客戶端動畫 |
 | `setPose`／`validPoseNames` | 設定／查詢核心接受的 Mannequin pose |
 | `setRotation` | 直接設定 yaw／pitch |
+| `runOnEntity(id, Consumer<Entity>)` | rc.18：在 actor 自己的 EntityScheduler 上做一件事（關 AI、發光、播模型動畫）；找不到／retired 不執行 |
 
 `locationOf` 要以 nullable-in-practice 使用：
 
@@ -964,4 +971,38 @@ override fun prepareStage(ctx: StageContext, stageId: String): CompletableFuture
 ### Executable contract
 
 `test-structure`（`test-only`）與 `/hanatoki admin mapprobe <slotId> <fixed|jigsaw|foreign|fail|cancel> [seed]` 使用 jar 內 `map-assets/hanatoki_probe`，第一次使用時複製到 `plugins/HanaToki/map-assets/`。2026-09-16 真 Lecithin 26.2 驗收：固定模組 245/245 格讀回符合、3 模組組裝 900/900、跨 2 個 region section；陌生修改保留 2 格；注入失敗與取消後場地回到放置前；bot 走完 session 後回收 573/573 格並釋放 slot，log 無 region ownership 違規。
+
+## 26. 資料驅動副本內容與 port（1.0.0-rc.18）
+
+內容插件只給一個資料夾（`dungeons.yml` + `stages.yml`／`scene.yml`／`objects.yml`／`enemies.yml`／`encounters.yml`／`tool.yml`／`hints.yml` + `map-assets/`）和 texts，由框架內建的 `DataDrivenBehavior` 執行，不需要內容端 Kotlin。完整 schema、範例、驗證規則與證據 log 見 [CONTENT-DATA.md](CONTENT-DATA.md)。
+
+| 入口 | 簽章 |
+|---|---|
+| 註冊 | `HanaTokiCore.registerDataContent(owner: Plugin, dataDir: File, textEntries: Map<String, String>): CompletableFuture<ContentRegistration>`。資料有任何錯誤 → future 以 `com.tinyyana.hanatoki.content.ContentDataException`（`errors: List<String>`，每筆「檔名 路徑: 訊息」）失敗，整份拒絕、不半載入 |
+| 規則實作 | 敵人規則 `needs-flash`；物件 `lantern`、`gate`；局內道具 `flash`；其他規則標籤 `frozen-when-watched`／`flees-when-powered` 只保留（接受、不實作、WARN） |
+| 純資料層（可單測） | `ContentYaml.parse`、`ContentParser`、`ContentValidator`、`LanternMachine`／`GateMachine`／`EnemyMachine`／`TimerQueue`（`com.tinyyana.hanatoki.content`） |
+
+### Port（`com.tinyyana.hanatoki.api.port`）
+
+```kotlin
+fun interface StageWorldMutator { fun setBlock(location: Location, data: BlockData) }
+fun interface CueRun { fun cancel() }
+interface CuePort {
+    fun play(namespace: String, cueId: String, origin: Location, audience: Collection<Player>,
+             follow: Entity?, mutator: StageWorldMutator?): CueRun
+}
+interface DialogPort {
+    fun open(player: Player, namespace: String, dialogId: String, onDone: java.util.function.IntConsumer)
+}
+```
+
+- 註冊慣例同 `MusicCue`：實作者 `servicesManager.register(CuePort::class.java, impl, plugin, priority)`；HanaToki **每次使用都查**，沒有實作者 no-op。
+- `onDone` 用 `IntConsumer` 而不是 Kotlin `(Int) -> Unit`：Kotlin 函式型別跨 classloader 會 `LinkageError`（見 `StageContext` KDoc）。1..N = 選項；0 = 取消／斷線／無選項；可能在任意執行緒回呼。
+- `StageWorldMutator` 由 HanaToki 以 `StageContext.mutate` 實作（寫入記 diff，局結束回滾；局結束後 no-op）。`CueRun` 在局結束時全部 `cancel()`。
+- `audience` 是副本成員的 `Player` 參考；HanaToki 不碰它，實作端自行派到各玩家的 EntityScheduler。
+
+### 其他 rc.18 變更
+
+- `ActorSpec`：`movementSpeed`、`attackDamage`、`fireResistant`（預設不動，既有內容零影響）。
+- `ActorHandle.runOnEntity(actorId, Consumer<Entity>)`：介面新增方法，內容插件要與 HanaToki 一起重編。
 

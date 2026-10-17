@@ -55,6 +55,18 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
     fun registerContent(owner: Plugin, definitions: java.io.File, textEntries: Map<String, String>, behaviors: Map<String, com.tinyyana.hanatoki.stage.DungeonBehavior>): CompletableFuture<com.tinyyana.hanatoki.api.ContentRegistration> =
         contentLifecycle.register(owner, definitions, textEntries, behaviors)
 
+    /**
+     * 資料驅動內容入口(rc.18):內容插件只給一個資料夾(dungeons.yml + 七個 YAML + map-assets/)和 texts,
+     * 行為由框架內建的 [com.tinyyana.hanatoki.content.DataDrivenBehavior] 依資料執行,內容端不寫 Kotlin。
+     * 任何資料錯誤 → future 以 [com.tinyyana.hanatoki.content.ContentDataException] 失敗,整份拒絕、不半載入。
+     * 其餘生命週期(drain、熱插拔)與 [registerContent] 完全相同。見 docs/CONTENT-DATA.md。
+     */
+    fun registerDataContent(owner: Plugin, dataDir: java.io.File, textEntries: Map<String, String>): CompletableFuture<com.tinyyana.hanatoki.api.ContentRegistration> =
+        com.tinyyana.hanatoki.content.DataContentRegistrar.register(this, owner, dataDir, textEntries)
+
+    /** 資料驅動內容的執行期(port 查找、tool 物品、每局的 SessionRun)。 */
+    val dataContent: com.tinyyana.hanatoki.content.DataContentRuntime by lazy { com.tinyyana.hanatoki.content.DataContentRuntime(this) }
+
     fun closeContentOwner(ownerName: String): CompletableFuture<Void> = contentLifecycle.closeOwner(ownerName)
     fun isContentOwner(ownerName: String): Boolean = contentLifecycle.isKnownOwner(ownerName)
     fun isContentAccepting(dungeonId: String): Boolean = contentLifecycle.accepting(dungeonId)

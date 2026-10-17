@@ -61,6 +61,8 @@ class HanaTokiPlugin : JavaPlugin() {
         getCommand("hanatoki")?.tabCompleter = command
 
         server.pluginManager.registerEvents(HanaTokiListener(core), this)
+        // 資料驅動副本內容(content/)的事件:局內道具右鍵閃光、needs-flash 敵人的受擊攔截
+        server.pluginManager.registerEvents(com.tinyyana.hanatoki.content.DataContentListener(core, core.dataContent), this)
         // 局內物品的洩漏防線(丟棄/拾取/容器/漏斗)。跟主 listener 分開註冊:它只在有副本
         // 開了局內背包時才會真的擋東西,而且規則自成一組,混進主 listener 會讓兩邊都難讀。
         server.pluginManager.registerEvents(core.instanceItemGuard, this)

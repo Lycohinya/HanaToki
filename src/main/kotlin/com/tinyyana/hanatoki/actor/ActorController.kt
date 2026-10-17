@@ -52,6 +52,9 @@ class ActorController(private val plugin: Plugin, private val sessionActive: jav
         CompletableFuture.allOf(*futures.toTypedArray())
     }
 
+    /** 某個 actor 目前綁定的實體(給 cue 的 follow 參數用,呼叫端不得在非所屬 region 上碰它)。 */
+    fun entityOf(sessionId: UUID, actorId: String): Entity? = actors[key(sessionId, actorId)]
+
     /** 實體是否是某個 session 的 actor(EntityDeathEvent/EntityDamageEvent handler 反查用)。 */
     fun actorIdOf(entityId: UUID): Pair<UUID, String>? {
         for ((k, entity) in actors) {
@@ -82,7 +85,8 @@ class ActorController(private val plugin: Plugin, private val sessionActive: jav
                     plugin.logger.warning("[HanaToki] actor $actorId 的 entity-type=${spec.entityType} 不能被生成,略過")
                     return@dispatchAt
                 }) as Class<Entity>
-                val entity = world.spawn(loc, entityClass) { e: Entity -> applySpec(e, spec) }
+                val entity = if (spec.randomizeData) world.spawn(loc, entityClass) { e: Entity -> applySpec(e, spec) }
+                else world.spawn(loc, entityClass, false) { e: Entity -> applySpec(e, spec) }
                 synchronized(actors) { if (sessionActive.test(sessionId)) actors[k] = entity else entity.remove() }
             }
         }
@@ -214,6 +218,9 @@ class ActorController(private val plugin: Plugin, private val sessionActive: jav
             return out
         }
 
+        override fun runOnEntity(actorId: String, action: java.util.function.Consumer<Entity>): CompletableFuture<Void> =
+            withActor(actorId) { action.accept(it) }
+
         private fun withActor(actorId: String, action: (Entity) -> Unit): CompletableFuture<Void> {
             val entity = actors[key(sessionId, actorId)] ?: return CompletableFuture.completedFuture(null)
             return WorldOp.dispatch(plugin, entity, action)
@@ -241,6 +248,14 @@ class ActorController(private val plugin: Plugin, private val sessionActive: jav
         living?.isCollidable = spec.collidable
         spec.removeWhenFarAway?.let { living?.setRemoveWhenFarAway(it) }
         spec.scale?.let { value -> living?.getAttribute(Attribute.SCALE)?.baseValue = value }
+        spec.movementSpeed?.let { value -> living?.getAttribute(Attribute.MOVEMENT_SPEED)?.baseValue = value }
+        spec.attackDamage?.let { value -> living?.getAttribute(Attribute.ATTACK_DAMAGE)?.baseValue = value }
+        if (spec.fireResistant) {
+            (entity as? org.bukkit.entity.Zombie)?.setShouldBurnInDay(false)
+            living?.addPotionEffect(
+                org.bukkit.potion.PotionEffect(org.bukkit.potion.PotionEffectType.FIRE_RESISTANCE, org.bukkit.potion.PotionEffect.INFINITE_DURATION, 0, false, false, false),
+            )
+        }
         spec.maxHealth?.let { hp ->
             living?.getAttribute(Attribute.MAX_HEALTH)?.baseValue = hp
             living?.health = hp

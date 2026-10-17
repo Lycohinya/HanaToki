@@ -154,4 +154,13 @@ interface ActorHandle {
      * ⚠ handle 的 `close()` 會連同載體實體一起移除(BossModelHandle 的既有語意)。
      */
     fun bindModel(actorId: String, modelId: String): CompletableFuture<com.tinyyana.hanatoki.presentation.BossModelHandle>
+
+    /**
+     * 在 actor 實體**自己的 EntityScheduler** 上對它做一件事(關 AI、發光、播模型動畫…)。
+     * 找不到 actor 或實體已 retired 時不執行。[action] 只能在回呼內使用實體,不能帶出去存。
+     *
+     * 存在理由(rc.18):每種單點操作各開一支方法不划算(同 `StageContext.runOnMember`),
+     * 資料驅動內容的敵人規則(僵直、打散)需要的操作五花八門。
+     */
+    fun runOnEntity(actorId: String, action: java.util.function.Consumer<org.bukkit.entity.Entity>): CompletableFuture<Void>
 }

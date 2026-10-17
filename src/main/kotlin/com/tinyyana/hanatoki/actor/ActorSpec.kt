@@ -103,4 +103,26 @@ class ActorSpec {
      * scale 會同時放大 hitbox,所以載體隱形之後「砍她身上任何看得到的地方都算數」。
      */
     var scale: Double? = null
+
+    /**
+     * 移動速度(`minecraft:movement_speed` 基礎值)。null = 不動。僅對有 AI 的載體有意義。
+     * 存在理由(rc.18,資料驅動內容的小幽靈):載體是原版怪物,追人的速度要能依資料調。
+     */
+    var movementSpeed: Double? = null
+
+    /** 近戰傷害(`minecraft:attack_damage` 基礎值)。null = 不動。 */
+    var attackDamage: Double? = null
+
+    /**
+     * 免疫火與日曬。預設 false = 既有行為。true 時載體若是殭屍系會關掉日曬燃燒,並給無限火焰抗性。
+     * 存在理由:副本世界的天空/時間不一定是夜晚,不免疫的話白天一到幽靈自己燒掉。
+     */
+    var fireResistant: Boolean = false
+
+    /**
+     * 生成時是否套用原版的隨機資料(`RegionAccessor.spawn(..., randomizeData, ...)`)。預設 true = 既有行為。
+     * false 時殭屍系不會變成小殭屍/騎雞/帶隨機裝備或武器/領袖殭屍——資料驅動的敵人載體
+     * (隱形的殭屍)必須設 false,否則隱形載體身上的隨機裝備仍然看得見、血量與速度被隨機修飾蓋掉。
+     */
+    var randomizeData: Boolean = true
 }
