@@ -1,4 +1,4 @@
-# 資料驅動副本內容（1.0.0-rc.20）
+# 資料驅動副本內容（1.0.0-rc.21）
 
 內容插件只給 **一個資料夾 + texts**，行為由框架內建的 `DataDrivenBehavior` 依資料執行，內容端不寫 Kotlin。另做一座副本只換設定檔與資產。判準：加第 N+1 盞燈籠、第 N+1 種幽靈、第 N+1 段提示，只改一筆 YAML。
 
@@ -135,7 +135,42 @@ enemies:
       stunned-cue: ghost_marked   # 選填：僵直中（現在可以打）換成這個，取代 alive-cue；打散或消失時拿掉
 ```
 
-規則標籤：**已實作** `needs-flash`；**保留**（接受、不實作、註冊時 WARN）`frozen-when-watched`、`flees-when-powered`；其他標籤報錯。needs-flash 行為：所有傷害一律取消（牠不會被打死，只會被打散；虛空與 `/kill` 放行）。未僵直時玩家攻擊 → 取消、播 whiff cue、觸發 `first-whiff` 提示。被閃光命中 → 僵直 `stun-seconds`（tool.yml）：停 AI、發光、模型播 `stunned`；僵直中受擊 → 打散（`dissolve` 動畫、cue、延遲移除），擊殺者補燈火（tool.yml `refill-on-dissolve`）。載體是原版怪物（有 `model` 時隱形），自動免疫日曬與火。
+規則標籤：**已實作** `needs-flash`、`seeks-object`、`harasses-players`；**保留**（接受、不實作、註冊時 WARN）`frozen-when-watched`、`flees-when-powered`；其他標籤報錯。needs-flash 行為：所有傷害一律取消（牠不會被打死，只會被打散；虛空與 `/kill` 放行）。未僵直時玩家攻擊 → 取消、播 whiff cue、觸發 `first-whiff` 提示。被閃光命中 → 僵直 `stun-seconds`（tool.yml）：停 AI、發光、模型播 `stunned`；僵直中受擊 → 打散（`dissolve` 動畫、cue、延遲移除），擊殺者補燈火（tool.yml `refill-on-dissolve`）。載體是原版怪物（有 `model` 時隱形），自動免疫日曬與火。
+
+### 敵人規則 seeks-object／harasses-players（rc.21，選填）
+
+兩者都是**加在 needs-flash 敵人上的行為**，沒有標籤的敵人（其他副本）完全不經過；規則標籤要有對應區塊，區塊也要有標籤，否則整份拒絕。分工建議用**兩種敵人定義**各自一個波次（「啃燈的」只朝燈、「搗蛋的」追玩家），不是同一隻身上疊兩種。
+
+```yaml
+    rules: [needs-flash, seeks-object]
+    seeks-object:
+      object: lantern_a            # 必填，必須是 lantern 物件
+      states: [burning]            # 預設 [burning]；燈籠不在這些狀態時規則不動作
+      repath-ticks: 10             # 4..100；多久補一次往燈的路，也是這一輪掃描的週期
+      speed: 1.0                   # Pathfinder.moveTo 的速度倍率 0.1..3
+      contest-radius: 2.5          # 離燈籠（marker，高度差 <= 3）多近算在啃
+      drain-per-second: 0.45       # 每隻每秒扣幾個 burn-second 的進度（不受範圍內人數倍率影響）
+      max-drainers: 3              # 同一種敵人同時有效的上限
+      ignores-players: true        # true = 拿掉原版鎖定目標與移動目標 AI，不理玩家（玩家站燈旁也一樣啃燈）
+      contest-cues: [lantern_gnawed]       # 有人在啃時每 contest-cue-every-seconds 在燈籠上播
+      contest-cue-every-seconds: 1.0
+    rules: [needs-flash, harasses-players]
+    harasses-players:
+      contact-radius: 1.8          # 碰到玩家的水平距離（高度差 <= 2）
+      cooldown-ticks: 50           # 每位玩家各算，不分是哪隻敵人碰的
+      scan-ticks: 10               # 4..100；掃描週期取所有規則敵人中最小的
+      cues: [ghost_gust]           # 觸發時在敵人身上播
+      suppress-melee: true         # 預設 false；true = 這種敵人的原版近戰（傷害與擊退）一律取消，只剩 effects，避免推擊與近戰疊加
+      effects:                     # 至少一個，依序套用
+        - { type: push, strength: 0.45, lift: 0.2 }          # 水平遠離敵人
+        - { type: tool-charges, tool: night_lantern, delta: -1 }   # 扣（負）或補（正）燈火，夾在 0..max
+        - { type: potion, effect: "minecraft:slowness", duration-ticks: 40, amplifier: 0 }
+        - { type: damage, amount: 1.0, min-health: 6.0 }     # 玩家血量 <= min-health 時不扣（不致死）
+```
+
+啃燈語意（`LanternMachine.drain`）：只在 `burning` 生效（暫停中也扣，離開燈籠不能躲掉）；進度可退、**夾在 0**、不退回 `unlit`、不觸發完成，所以只有「站著撐住」而沒有打散她們就完成不了，但沒有失敗或倒數；燈亮後不再扣；milestone 只觸發一次（退回再升不重播）。**僵直中的敵人不啃、不碰人**——閃光把她們照住就是解法。啃燈速率每輪掃描發布，超過 60 tick 沒更新視為 0。
+
+掃描：每 `scan-ticks` 一輪（單輪最多 24 隻、在 session 的 anchor region 執行緒用 `locationOf` 與 `memberSnapshots` 的結果一次處理完），全程走既有的 EntityScheduler／PlayerOp，沒有新增跨插件介面方法；來不及回來的一輪不會疊加，也不會覆蓋較新的結果。
 
 ## encounters.yml
 
@@ -150,6 +185,7 @@ encounters:
     counts: { 1: 3, 2: 4, 4: 5 }       # 人數 → 隻數（必含 1；n 人用 ≤ n 的最大 key）
     interval-ticks: 20                 # 每隻之間
     start-cues: [wave_start]
+    marker-offset: 0                   # 選填（rc.21，0..64）：第 i 隻用該組排序後第 (offset + i) % 組大小 個 marker，讓同一組出生點的不同波次出生在不同位置
 ```
 
 全部生出且全數消失（打散或死亡）→ 波次清空，打 `wave-clear` log，並可成為其他波次的 `encounter-cleared` 觸發與 stage 完成條件。
@@ -228,9 +264,13 @@ interface DialogPort {
 
 HanaToki 追蹤每局播出的所有 `CueRun`（不設上限），局結束全部 `cancel()`；燈籠的持續 cue 另外持有，暫停／完成時 cancel。cue 播放失敗只記 WARN，不影響狀態機。`audience` 是副本成員的 `Player` 參考，HanaToki 不碰它們；實作端自行派到各玩家的 EntityScheduler。
 
+### 提示觸發 lantern-contested（rc.21）
+
+`hints.yml` 的 `trigger: { type: lantern-contested, seconds: 8 }`：有 seeks-object 的敵人**連續**啃燈 `seconds` 秒（中間降到 0 隻就重算）時觸發，全隊提示；至少要有一種敵人有 seeks-object，否則整份拒絕。想讓站著看她們啃燈的人得到「照住她們再打散」的提醒，用它，不用 no-progress（燈沒點燃前也會算進去）。
+
 ## 證據 log
 
-每次狀態轉移一行 INFO：`[HanaToki/<dungeon>] <事件> <id…> slot=<slotId>`。事件：`scene-placed`、`stage-start <stage>`、`stage-complete <stage>`、`slice end <stage>`、`object <id> <from>-><to>`（含 `burning paused/resumed`、`milestone`）、`gate-open <id>`、`light`、`wave-start <id> count=N players=N`、`wave-clear <id>`、`wave-cancel <id>`、`enemy-spawn`、`enemy-stun`、`enemy-recover`、`enemy-dissolve <actor> by=<玩家|lantern>`、`enemy-gone`、`enemies-cleared`、`whiff`、`flash`、`flash-hit`、`flash-empty`、`refill`、`tool-give`、`regen player= tool= charges= zone=`、`tool-drained`、`flash-miss player= range= cone= <燈籠>:dist=,angle=`（閃光沒點到未點亮燈籠時的距離與視線偏角）、`hint <id> [player=]`、`reach <marker>`、`dialog <id> player= choice=`、`port-missing`、`session-end`。
+每次狀態轉移一行 INFO：`[HanaToki/<dungeon>] <事件> <id…> slot=<slotId>`。事件：`scene-placed`、`stage-start <stage>`、`stage-complete <stage>`、`slice end <stage>`、`object <id> <from>-><to>`（含 `burning paused/resumed`、`milestone`）、`gate-open <id>`、`light`、`wave-start <id> count=N players=N offset=N`、`wave-clear <id>`、`wave-cancel <id>`、`enemy-spawn`、`enemy-seek <actor> enemy= target= path=ok|none`（每隻第一次下往燈的路徑指令）、`enemy-contest <燈籠> ghosts=N progress=0.00`（有隻數變化時與每秒一次；降到 0 再打一行）、`enemy-touch <actor> player= effect=push+charges-1…`、`enemy-stun`、`enemy-recover`、`enemy-dissolve <actor> by=<玩家|lantern>`、`enemy-gone`、`enemies-cleared`、`whiff`、`flash`、`flash-hit`、`flash-empty`、`refill`、`tool-give`、`regen player= tool= charges= zone=`、`tool-drained`、`flash-miss player= range= cone= <燈籠>:dist=,angle=`（閃光沒點到未點亮燈籠時的距離與視線偏角）、`hint <id> [player=]`、`reach <marker>`、`dialog <id> player= choice=`、`port-missing`、`session-end`。
 
 ## 執行緒
 

@@ -15,6 +15,7 @@ import com.tinyyana.hanatoki.map.PlacedMap
 import com.tinyyana.hanatoki.map.PlacedPiece
 import com.tinyyana.hanatoki.presentation.BossModelHandle
 import com.tinyyana.hanatoki.stage.StageContext
+import com.destroystokyo.paper.entity.ai.GoalType
 import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.Material
@@ -23,6 +24,7 @@ import org.bukkit.block.BlockFace
 import org.bukkit.block.structure.StructureRotation
 import org.bukkit.entity.Entity
 import org.bukkit.entity.LivingEntity
+import org.bukkit.entity.Mob
 import org.bukkit.entity.Player
 import org.bukkit.util.Vector
 import java.util.UUID
@@ -105,6 +107,14 @@ class SessionRun(
         spec.objects.values.any { it is LanternSpec && it.hint != null } ||
         spec.hints.values.any { it.trigger is HintTrigger.UnequippedNearEnemy }
 
+    // 敵人規則 seeks-object／harasses-players:兩者共用同一輪有界掃描。內容沒有任何敵人用到時 scanPeriod = 0,整套不動。
+    private val touch = TouchCooldowns()
+    private val scanPeriod: Long = spec.enemies.values
+        .flatMap { listOfNotNull(it.seeksObject?.repathTicks, it.harassesPlayers?.scanTicks) }.minOrNull()?.toLong() ?: 0L
+    private var scanPending = false
+    private var scanAt = 0L
+    private var lastScanAt = -1000L
+
     private val mutator = StageWorldMutator { location, data ->
         if (!closed) ctx.mutate(location) { block -> block.blockData = data }
     }
@@ -119,6 +129,14 @@ class SessionRun(
         var hold: CueRun? = null
         var nextRepeat = 0L
         var milestonesFired = 0
+        /** 被啃:各組啃燈速率總和(burn-second / 秒),由掃描發布;超過 [DRAIN_STALE_TICKS] 沒更新視為 0。 */
+        var drainRate = 0.0
+        var drainers = 0
+        var drainAt = -1000L
+        var nextContestCue = 0L
+        var nextContestLog = 0L
+        /** 連續被啃的起點 tick;沒被啃 = -1。lantern-contested 提示用。 */
+        var contestedSince = -1L
     }
 
     /** 某位玩家看到的燈籠世界標示:[level] 1 = 遠處提示,2 = 已在可點燃範圍。 */
@@ -141,6 +159,9 @@ class SessionRun(
         var lastWhiff = -1000L
         /** 跟著敵人的狀態標示 cue(活著 / 僵直中),換狀態時換掉。 */
         var markRun: CueRun? = null
+        /** seeks-object:上次下尋路指令的 tick;[seekLogged] 讓 enemy-seek log 每隻只打一次。 */
+        var lastRepath = -1000L
+        @Volatile var seekLogged = false
     }
 
     private fun log(event: String, detail: String) {
@@ -334,6 +355,7 @@ class SessionRun(
         now += TICK_PERIOD
         timers.runDue(now) { warn("計時任務丟出例外:${it.javaClass.simpleName}: ${it.message}") }
         tickLanterns()
+        tickEnemyRules()
         if (now % 10L == 0L) probeMarkers()
         if (presenceNeeded && now % 10L == 0L) probePresence()
         tickIdleHints()
@@ -348,6 +370,10 @@ class SessionRun(
             if (!stageActive(rt.spec.stage) || rt.machine.state != LanternMachine.State.BURNING) continue
             val spec = rt.spec
             val people = if (rt.people < 0) 1 else rt.people
+            // 被啃:先扣再前進(暫停中也扣;見 LanternMachine.drain)。啃燈速率由掃描發布,過期視為 0
+            if (rt.drainRate > 0.0 && now - rt.drainAt <= DRAIN_STALE_TICKS) {
+                rt.machine.drain(drainTicks(rt.drainRate, TICK_PERIOD.toInt()))
+            }
             when (rt.machine.advance(TICK_PERIOD.toInt(), lanternMultiplier(spec.speedByPlayers, people))) {
                 LanternMachine.Outcome.PAUSED -> {
                     log("object", "${spec.id} burning paused")
@@ -433,6 +459,7 @@ class SessionRun(
         val spec = rt.spec
         log("object", "${spec.id} burning->lit")
         markProgress()
+        rt.drainRate = 0.0; rt.drainers = 0
         rt.hold?.cancel(); rt.hold = null
         if (spec.progressBar != null) { ctx.hideBossBar(); barPercent = -1 }
         spec.states[ObjectStates.LANTERN_LIT]?.let {
@@ -565,7 +592,7 @@ class SessionRun(
         val players = members().size.coerceAtLeast(1)
         enc.phase = EncounterRt.Phase.SPAWNING
         enc.target = pickByPlayers(enc.spec.counts, players, enc.spec.counts.getValue(1))
-        log("wave-start", "${enc.spec.id} count=${enc.target} players=$players")
+        log("wave-start", "${enc.spec.id} count=${enc.target} players=$players offset=${enc.spec.markerOffset}")
         markProgress()
         group.firstOrNull()?.let { cues(enc.spec.startCues, it.location(world)) }
         for (i in 0 until enc.target) {
@@ -582,7 +609,7 @@ class SessionRun(
         val rt = EnemyRt(actorId, enemySpec, enc.spec.id)
         enemies[actorId] = rt
         enc.alive += actorId
-        val at = group[index % group.size].location(world)
+        val at = group[(enc.spec.markerOffset + index) % group.size].location(world)
         val players = members().size.coerceAtLeast(1)
         val m = pickByPlayers(enemySpec.byPlayers, players, EnemyMultipliers())
         val actorSpec = ActorSpec().apply {
@@ -618,6 +645,10 @@ class SessionRun(
         log("enemy-spawn", "${rt.actorId} enemy=${rt.spec.id} encounter=${rt.encounterId}")
         cues(rt.spec.spawnCues, at, core.actorController.entityOf(sessionId, rt.actorId))
         setMark(rt, rt.spec.needsFlash?.aliveCue)
+        if (rt.spec.seeksObject?.ignoresPlayers == true) {
+            // 啃燈的不理玩家:拿掉原版的鎖定目標與移動目標(近戰、閒晃),之後只聽掃描給的路徑。導航本身仍然會走
+            ctx.actors().runOnEntity(rt.actorId) { e -> (e as? Mob)?.let { stripPlayerAi(rt, it) } }
+        }
         val modelId = rt.spec.model ?: return
         ctx.actors().bindModel(rt.actorId, modelId).whenComplete { handle, _ ->
             ctx.submit {
@@ -754,6 +785,165 @@ class SessionRun(
         enemyGone(rt, "death")
     }
 
+    // ---- 敵人規則:seeks-object / harasses-players ----
+
+    private fun stripPlayerAi(rt: EnemyRt, mob: Mob) {
+        try {
+            val goals = Bukkit.getMobGoals()
+            goals.removeAllGoals(mob, GoalType.TARGET)
+            goals.removeAllGoals(mob, GoalType.MOVE)
+            mob.target = null
+        } catch (t: Throwable) {
+            warn("敵人 ${rt.actorId} 拿掉原版 AI 失敗,退回每輪清掉目標:${t.javaClass.simpleName}: ${t.message}")
+            runCatching { mob.target = null }
+        }
+    }
+
+    /** 每 [scanPeriod] tick 一輪:取還活著的規則敵人位置(各自的 EntityScheduler)與成員快照,回 anchor 執行緒一次處理完。單輪最多 [MAX_SCAN_ENEMIES] 隻。 */
+    private fun tickEnemyRules() {
+        if (scanPeriod <= 0L || closed || now - lastScanAt < scanPeriod) return
+        if (scanPending && now - scanAt <= PROBE_STALE_TICKS) return
+        lastScanAt = now
+        val candidates = enemies.values
+            .filter { (it.spec.seeksObject != null || it.spec.harassesPlayers != null) && it.machine.state == EnemyMachine.State.ALIVE }
+            .take(MAX_SCAN_ENEMIES)
+        if (candidates.isEmpty()) { publishDrain(emptyMap()); return }
+        scanPending = true
+        scanAt = now
+        val startedAt = now
+        val locations = candidates.map { rt -> ctx.actors().locationOf(rt.actorId).handle { loc, _ -> rt to loc } }
+        val snapshots: CompletableFuture<Map<UUID, DoubleArray>> =
+            if (candidates.any { it.spec.harassesPlayers != null }) ctx.memberSnapshots().handle { m, e -> if (e != null) emptyMap() else m ?: emptyMap() }
+            else CompletableFuture.completedFuture(emptyMap())
+        CompletableFuture.allOf(snapshots, *locations.toTypedArray()).whenComplete { _, _ ->
+            ctx.submit {
+                if (scanAt != startedAt) return@submit // 較新的一輪已取代(這輪回得太晚)
+                scanPending = false
+                if (closed) return@submit
+                applyEnemyScan(locations.mapNotNull { it.getNow(null) }, snapshots.getNow(emptyMap()))
+            }
+        }
+    }
+
+    private fun applyEnemyScan(found: List<Pair<EnemyRt, Location?>>, snap: Map<UUID, DoubleArray>) {
+        // (燈籠 id, 敵人定義 id) -> 這輪在啃的隻數
+        val contest = LinkedHashMap<Pair<String, String>, Int>()
+        for ((rt, loc) in found) {
+            if (loc == null || loc.world != world || rt.machine.state != EnemyMachine.State.ALIVE) continue
+            rt.lastLoc = loc
+            rt.spec.seeksObject?.let { seekStep(rt, loc, it, contest) }
+            rt.spec.harassesPlayers?.let { harassStep(rt, loc, it, snap) }
+        }
+        publishDrain(contest)
+    }
+
+    private fun seekStep(rt: EnemyRt, loc: Location, seek: SeeksObjectSpec, contest: MutableMap<Pair<String, String>, Int>) {
+        val lantern = lanterns[seek.objectId] ?: return
+        if (!stageActive(lantern.spec.stage) || lantern.machine.state.name.lowercase() !in seek.states) return
+        val near = withinContact(loc.x - lantern.loc.x, loc.y - lantern.loc.y, loc.z - lantern.loc.z, seek.contestRadius, CONTEST_HEIGHT)
+        if (near) {
+            contest.merge(lantern.spec.id to rt.spec.id, 1, Int::plus)
+            return
+        }
+        if (now - rt.lastRepath < seek.repathTicks) return
+        rt.lastRepath = now
+        val target = lantern.loc.clone()
+        ctx.actors().runOnEntity(rt.actorId) { e ->
+            val mob = e as? Mob ?: return@runOnEntity
+            if (seek.ignoresPlayers) mob.target = null
+            val ok = mob.pathfinder.moveTo(target, seek.speed)
+            if (!rt.seekLogged) {
+                rt.seekLogged = true
+                log("enemy-seek", "${rt.actorId} enemy=${rt.spec.id} target=${seek.objectId} path=${if (ok) "ok" else "none"}")
+            }
+        }
+    }
+
+    /** 把這輪的啃燈結果發布到各燈籠(掃描沒看到的燈籠歸零),並節流播 cue 與 log。 */
+    private fun publishDrain(contest: Map<Pair<String, String>, Int>) {
+        for (rt in lanterns.values) {
+            val groups = ArrayList<DrainGroup>()
+            var contestCues: List<String> = emptyList()
+            var cueEvery = 1.0
+            for ((key, count) in contest) {
+                if (key.first != rt.spec.id) continue
+                val seek = spec.enemies[key.second]?.seeksObject ?: continue
+                groups += DrainGroup(count, seek.maxDrainers, seek.drainPerSecond)
+                if (seek.contestCues.isNotEmpty()) { contestCues = seek.contestCues; cueEvery = seek.contestCueEverySeconds }
+            }
+            val before = rt.drainers
+            rt.drainRate = drainRate(groups)
+            rt.drainers = groups.sumOf { it.inRange.coerceIn(0, it.max) }
+            rt.drainAt = now
+            if (rt.drainers > 0) {
+                if (rt.contestedSince < 0) rt.contestedSince = now
+                val contestedSeconds = (now - rt.contestedSince) / 20.0
+                for (h in spec.hints.values) {
+                    val t = h.trigger as? HintTrigger.LanternContested ?: continue
+                    if (stageActive(h.stage) && contestedSeconds >= t.seconds) fireHint(h)
+                }
+                if (contestCues.isNotEmpty() && now >= rt.nextContestCue) {
+                    rt.nextContestCue = now + (cueEvery * 20).toLong()
+                    cues(contestCues, rt.loc)
+                }
+                if (now >= rt.nextContestLog || rt.drainers != before) {
+                    rt.nextContestLog = now + 20
+                    log("enemy-contest", "${rt.spec.id} ghosts=${rt.drainers} progress=${fmt2(rt.machine.fraction)}")
+                }
+            } else if (before > 0) {
+                rt.contestedSince = -1
+                rt.nextContestLog = 0
+                log("enemy-contest", "${rt.spec.id} ghosts=0 progress=${fmt2(rt.machine.fraction)}")
+            }
+        }
+    }
+
+    private fun fmt2(v: Double): String = String.format(java.util.Locale.ROOT, "%.2f", v)
+
+    private fun harassStep(rt: EnemyRt, loc: Location, h: HarassSpec, snap: Map<UUID, DoubleArray>) {
+        if (snap.isEmpty()) return
+        val current = members().toSet()
+        for ((playerId, pos) in snap) {
+            if (playerId !in current) continue
+            if (!withinContact(pos[0] - loc.x, pos[1] - loc.y, pos[2] - loc.z, h.contactRadius)) continue
+            if (!touch.tryTouch(playerId, now, h.cooldownTicks)) continue
+            applyHarass(rt, loc, h, playerId, pos)
+        }
+    }
+
+    private fun applyHarass(rt: EnemyRt, loc: Location, h: HarassSpec, playerId: UUID, pos: DoubleArray) {
+        val applied = ArrayList<String>()
+        for (effect in h.effects) when (effect) {
+            is HarassEffect.Push -> {
+                val v = pushAway(loc.x, loc.z, pos[0], pos[2], effect.strength)
+                ctx.pushMember(playerId, v[0], effect.lift, v[1])
+                applied += "push"
+            }
+            is HarassEffect.ToolCharges -> {
+                val tool = spec.tools[effect.tool] ?: continue
+                val before = chargesOf(playerId, tool)
+                val after = (before + effect.delta).coerceIn(0, tool.maxCharges)
+                if (after != before) {
+                    setCharges(playerId, tool, after)
+                    applied += "charges${if (after > before) "+" else ""}${after - before}"
+                }
+            }
+            is HarassEffect.Potion -> {
+                ctx.applyEffectToMember(playerId, effect.effect, effect.durationTicks, effect.amplifier)
+                applied += "potion"
+            }
+            is HarassEffect.Damage -> {
+                val amount = minOf(effect.amount, pos[HEALTH] - effect.minHealth)
+                if (amount > 0.0) {
+                    ctx.damageMember(playerId, amount, "")
+                    applied += "damage"
+                }
+            }
+        }
+        log("enemy-touch", "${rt.actorId} player=${nameOf(playerId)} effect=${if (applied.isEmpty()) "none" else applied.joinToString("+")}")
+        cues(h.cues, loc, core.actorController.entityOf(sessionId, rt.actorId))
+    }
+
     // ---- 局內道具 ----
 
     private fun toolSpecs(): Collection<ToolSpec> = spec.tools.values
@@ -799,6 +989,7 @@ class SessionRun(
     }
 
     fun onMemberLeft(playerId: UUID) {
+        touch.forget(playerId)
         charges.remove(playerId)
         meters.remove(playerId)
         lastFlash.remove(playerId)
@@ -1105,6 +1296,7 @@ class SessionRun(
         if (closed) return
         closed = true
         timers.clear()
+        touch.clear()
         lanterns.values.forEach { it.hold?.cancel(); it.hold = null }
         lanternHintRuns.clear()
         while (true) {
@@ -1120,6 +1312,12 @@ class SessionRun(
         const val PROBE_STALE_TICKS = 40L
         /** [StageContext.MEMBER_SNAPSHOT_FIELDS] 的 heldSlot 欄位。 */
         const val HELD_SLOT = 9
+        /** [StageContext.MEMBER_SNAPSHOT_FIELDS] 的 health 欄位。 */
+        const val HEALTH = 5
+        /** 敵人規則掃描單輪上限,以及啃燈判定允許的高度差、啃燈速率過期時間。 */
+        const val MAX_SCAN_ENEMIES = 24
+        const val CONTEST_HEIGHT = 3.0
+        const val DRAIN_STALE_TICKS = 60L
         const val HINT_SLACK = 1.0
         /** 快照回來太晚時,一次最多補算這麼多秒的回補,不讓卡頓變成一次補滿。 */
         const val MAX_REGEN_DT_SECONDS = 5.0

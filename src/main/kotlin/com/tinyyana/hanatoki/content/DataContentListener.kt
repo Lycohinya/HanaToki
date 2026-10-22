@@ -60,6 +60,15 @@ class DataContentListener(private val core: HanaTokiCore, private val runtime: D
             EntityDamageEvent.DamageCause.VOID, EntityDamageEvent.DamageCause.KILL, EntityDamageEvent.DamageCause.WORLD_BORDER -> return
             else -> {}
         }
+        // harasses-players 的 suppress-melee:這種敵人打到玩家的原版近戰整個取消(只剩資料裡的效果)
+        if (event.entity is Player) {
+            val hit = (event as? EntityDamageByEntityEvent)?.damager ?: return
+            if (hit is Player) return
+            val (hitSession, hitActor) = core.actorController.actorIdOf(hit.uniqueId) ?: return
+            val spec = runtime.runOf(hitSession)?.enemy(hitActor)?.spec ?: return
+            if (spec.harassesPlayers?.suppressMelee == true) event.isCancelled = true
+            return
+        }
         val (sessionId, actorId) = core.actorController.actorIdOf(event.entity.uniqueId) ?: return
         val run = runtime.runOf(sessionId) ?: return
         val enemy = run.enemy(actorId) ?: return

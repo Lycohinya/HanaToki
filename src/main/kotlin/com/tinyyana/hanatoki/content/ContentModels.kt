@@ -184,7 +184,7 @@ data class EnemySpec(
     /** BetterModel 模型 id;null = 不綁模型(載體保持可見)。 */
     val model: String?,
     val animations: EnemyAnimations,
-    /** 規則標籤。已實作:needs-flash。保留(接受但不實作):frozen-when-watched、flees-when-powered。 */
+    /** 規則標籤。已實作:needs-flash、seeks-object、harasses-players。保留(接受但不實作):frozen-when-watched、flees-when-powered。 */
     val rules: Set<String>,
     val health: Double,
     val speed: Double?,
@@ -193,14 +193,71 @@ data class EnemySpec(
     val byPlayers: Map<Int, EnemyMultipliers>,
     val spawnCues: List<String>,
     val needsFlash: NeedsFlashSpec?,
+    /** 規則 seeks-object 的設定;沒有該標籤 = null。 */
+    val seeksObject: SeeksObjectSpec? = null,
+    /** 規則 harasses-players 的設定;沒有該標籤 = null。 */
+    val harassesPlayers: HarassSpec? = null,
 )
+
+/**
+ * 規則 seeks-object:這種敵人朝某個燈籠物件移動;到了 [contestRadius] 內就「啃」它(扣燃燒進度)。
+ *
+ * - 只有處於 [states] 的燈籠才算目標(例如 burning);其他狀態時這個規則不動作。
+ * - 啃燈的計數只算**活著、沒僵直**的敵人(被閃光照住的不啃),最多 [maxDrainers] 隻同時有效;
+ *   每隻每秒扣 [drainPerSecond] 秒的燃燒進度(單位 = burn-seconds 的秒,不受範圍內人數倍率影響)。
+ * - [ignoresPlayers] = true 時拿掉原版的鎖定目標 AI,她不理玩家(站在燈旁也一樣被威脅燈);
+ *   false = 仍保留原版 AI,只是每 [repathTicks] 補一次往燈的路。
+ */
+data class SeeksObjectSpec(
+    val objectId: String,
+    val states: Set<String>,
+    val repathTicks: Int,
+    /** 尋路速度倍率(`Pathfinder.moveTo` 的 speed)。 */
+    val speed: Double,
+    val contestRadius: Double,
+    val drainPerSecond: Double,
+    val maxDrainers: Int,
+    val ignoresPlayers: Boolean,
+    /** 有敵人在啃時,每 [contestCueEverySeconds] 秒在燈籠位置播一次。 */
+    val contestCues: List<String>,
+    val contestCueEverySeconds: Double,
+)
+
+/**
+ * 規則 harasses-players:這種敵人碰到玩家([contactRadius] 內)就對他做 [effects],不致死。
+ * 冷卻是**每位玩家各算**([cooldownTicks]):幾隻同時貼上來也不會連續連推。
+ * 掃描週期 [scanTicks] 與 seeks-object 的 repath 共用同一輪(取所有敵人中最小者)。
+ */
+data class HarassSpec(
+    val contactRadius: Double,
+    val cooldownTicks: Int,
+    val scanTicks: Int,
+    val effects: List<HarassEffect>,
+    /** 觸發時在敵人身上播(所有成員聽得到看得到)。 */
+    val cues: List<String>,
+    /** true = 這種敵人對玩家的原版近戰一律取消(傷害與擊退都不發生),只剩 [effects];避免推擊與近戰疊加。 */
+    val suppressMelee: Boolean = false,
+)
+
+sealed interface HarassEffect {
+    /** 水平往遠離敵人的方向推 [strength],垂直 [lift]。 */
+    data class Push(val strength: Double, val lift: Double) : HarassEffect
+    /** 扣(負)或補(正)某個局內道具的燈火,夾在 0..max。 */
+    data class ToolCharges(val tool: String, val delta: Int) : HarassEffect
+    /** 原版藥水效果([effect] 是 namespaced key,例如 minecraft:slowness)。 */
+    data class Potion(val effect: String, val durationTicks: Int, val amplifier: Int) : HarassEffect
+    /** 傷害 [amount];玩家血量 <= [minHealth] 時不扣(不致死)。 */
+    data class Damage(val amount: Double, val minHealth: Double) : HarassEffect
+}
 
 object EnemyRules {
     const val NEEDS_FLASH = "needs-flash"
+    const val SEEKS_OBJECT = "seeks-object"
+    const val HARASSES_PLAYERS = "harasses-players"
     const val FROZEN_WHEN_WATCHED = "frozen-when-watched"
     const val FLEES_WHEN_POWERED = "flees-when-powered"
 
-    val IMPLEMENTED = setOf(NEEDS_FLASH)
+    val IMPLEMENTED = setOf(NEEDS_FLASH, SEEKS_OBJECT, HARASSES_PLAYERS)
 
     /** 標籤擴充點:載入器接受(內容可以先寫上),但本版沒有行為。註冊時打 WARN。 */
     val RESERVED = setOf(FROZEN_WHEN_WATCHED, FLEES_WHEN_POWERED)
@@ -226,6 +283,8 @@ data class EncounterSpec(
     val counts: Map<Int, Int>,
     val intervalTicks: Int,
     val startCues: List<String>,
+    /** 第 i 隻出生在該組排序後第 `(markerOffset + i) % 組大小` 個 marker;讓同一組出生點的不同波次用不同位置。 */
+    val markerOffset: Int = 0,
 )
 
 // ---- tool.yml ----
@@ -277,6 +336,8 @@ sealed interface HintTrigger {
     data object ToolEmpty : HintTrigger
     /** 某位成員主手沒拿局內道具、卻在還沒僵直的敵人 [radius] 格內。個人提示,只播給當事人。 */
     data class UnequippedNearEnemy(val radius: Double) : HintTrigger
+    /** 有敵人連續啃燈 [seconds] 秒(seeks-object 的啃燈沒有中斷過)。全隊提示。 */
+    data class LanternContested(val seconds: Double) : HintTrigger
 }
 
 data class HintSpec(

@@ -502,7 +502,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
             node.only(
                 setOf(
                     "base-entity", "model", "animations", "rules", "health", "speed", "damage", "scale", "by-players", "spawn-cues",
-                    "needs-flash",
+                    "needs-flash", "seeks-object", "harasses-players",
                 ),
             )
             val base = node.str("base-entity", required = true)?.uppercase()
@@ -558,14 +558,87 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                 if (node.map["needs-flash"] != null) node.err("needs-flash", "這個敵人沒有 needs-flash 規則標籤,不應有這個區塊")
                 null
             }
+            val seeks = if (EnemyRules.SEEKS_OBJECT in rules) parseSeeksObject(node) else {
+                if (node.map["seeks-object"] != null) node.err("seeks-object", "這個敵人沒有 seeks-object 規則標籤,不應有這個區塊")
+                null
+            }
+            val harass = if (EnemyRules.HARASSES_PLAYERS in rules) parseHarass(node) else {
+                if (node.map["harasses-players"] != null) node.err("harasses-players", "這個敵人沒有 harasses-players 規則標籤,不應有這個區塊")
+                null
+            }
             if (base != null && health != null) {
                 out[id] = EnemySpec(
                     id, base, node.str("model"), animations, rules, health, speed, damage, scale, byPlayers,
-                    node.idList("spawn-cues"), flash,
+                    node.idList("spawn-cues"), flash, seeks, harass,
                 )
             }
         }
         return out
+    }
+
+    private fun parseSeeksObject(enemy: Node): SeeksObjectSpec? {
+        val n = enemy.child("seeks-object")
+        if (n == null) { enemy.err("seeks-object", "規則 seeks-object 需要這個區塊(object、contest-radius、drain-per-second…)"); return null }
+        n.only(
+            setOf(
+                "object", "states", "repath-ticks", "speed", "contest-radius", "drain-per-second", "max-drainers", "ignores-players",
+                "contest-cues", "contest-cue-every-seconds",
+            ),
+        )
+        val obj = n.id("object", required = true)
+        val states = LinkedHashSet<String>()
+        if (n.map["states"] == null) states += ObjectStates.LANTERN_BURNING else n.idList("states").forEach { states += it }
+        if (states.isEmpty()) n.err("states", "不可為空")
+        val repath = n.int("repath-ticks", min = MIN_SCAN_TICKS, max = MAX_SCAN_TICKS) ?: 10
+        val speed = n.num("speed", min = 0.1, max = 3.0) ?: 1.0
+        val radius = n.num("contest-radius", min = 0.5, max = 16.0, required = true)
+        val drain = n.num("drain-per-second", min = 0.0, max = 60.0, exclusiveMin = true, required = true)
+        val maxDrainers = n.int("max-drainers", min = 1, max = 32) ?: 3
+        val ignores = n.bool("ignores-players") ?: false
+        val every = n.num("contest-cue-every-seconds", min = 0.2, max = 30.0) ?: 1.0
+        if (obj == null || radius == null || drain == null) return null
+        return SeeksObjectSpec(obj, states, repath, speed, radius, drain, maxDrainers, ignores, n.idList("contest-cues"), every)
+    }
+
+    private fun parseHarass(enemy: Node): HarassSpec? {
+        val n = enemy.child("harasses-players")
+        if (n == null) { enemy.err("harasses-players", "規則 harasses-players 需要這個區塊(contact-radius、effects…)"); return null }
+        n.only(setOf("contact-radius", "cooldown-ticks", "scan-ticks", "effects", "cues", "suppress-melee"))
+        val radius = n.num("contact-radius", min = 0.5, max = 8.0, required = true)
+        val cooldown = n.int("cooldown-ticks", min = 0, max = 1200) ?: 40
+        val scan = n.int("scan-ticks", min = MIN_SCAN_TICKS, max = MAX_SCAN_TICKS) ?: 10
+        val effects = ArrayList<HarassEffect>()
+        n.mapList("effects").forEach { e ->
+            when (val type = e.str("type", required = true)) {
+                null -> {}
+                "push" -> {
+                    e.only(setOf("type", "strength", "lift"))
+                    effects += HarassEffect.Push(e.num("strength", min = 0.0, max = 2.0, required = true) ?: 0.0, e.num("lift", min = 0.0, max = 1.0) ?: 0.0)
+                }
+                "tool-charges" -> {
+                    e.only(setOf("type", "tool", "delta"))
+                    val tool = e.id("tool", required = true)
+                    val delta = e.int("delta", min = -20, max = 20, required = true)
+                    if (tool != null && delta != null) effects += HarassEffect.ToolCharges(tool, delta)
+                }
+                "potion" -> {
+                    e.only(setOf("type", "effect", "duration-ticks", "amplifier"))
+                    val effect = e.str("effect", required = true)
+                    val duration = e.int("duration-ticks", min = 1, max = 1200, required = true)
+                    if (effect != null && !effect.contains(':')) e.err("effect", "必須是 namespaced key(例如 minecraft:slowness,目前 $effect)")
+                    else if (effect != null && duration != null) effects += HarassEffect.Potion(effect, duration, e.int("amplifier", min = 0, max = 9) ?: 0)
+                }
+                "damage" -> {
+                    e.only(setOf("type", "amount", "min-health"))
+                    val amount = e.num("amount", min = 0.0, max = 20.0, exclusiveMin = true, required = true)
+                    if (amount != null) effects += HarassEffect.Damage(amount, e.num("min-health", min = 0.0, max = 20.0) ?: 4.0)
+                }
+                else -> e.err("type", "未知的效果「$type」(可用:push、tool-charges、potion、damage)")
+            }
+        }
+        if (n.map["effects"] == null || effects.isEmpty()) n.err("effects", "至少要有一個效果")
+        if (radius == null || effects.isEmpty()) return null
+        return HarassSpec(radius, cooldown, scan, effects, n.idList("cues"), n.bool("suppress-melee") ?: false)
     }
 
     // ---- encounters.yml ----
@@ -573,7 +646,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
     private fun parseEncounters(block: Node?): Map<String, EncounterSpec> {
         val out = LinkedHashMap<String, EncounterSpec>()
         block?.entries()?.forEach { (id, node) ->
-            node.only(setOf("stage", "enemy", "marker-group", "trigger", "delay-ticks", "counts", "interval-ticks", "start-cues"))
+            node.only(setOf("stage", "enemy", "marker-group", "trigger", "delay-ticks", "counts", "interval-ticks", "start-cues", "marker-offset"))
             val stage = node.id("stage", required = true)
             val enemy = node.id("enemy", required = true)
             val group = node.id("marker-group", required = true)
@@ -589,7 +662,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
             if (stage != null && enemy != null && group != null && trigger != null && counts.isNotEmpty()) {
                 out[id] = EncounterSpec(
                     id, stage, enemy, group, trigger, node.int("delay-ticks", min = 0, max = 6000) ?: 0, counts, interval,
-                    node.idList("start-cues"),
+                    node.idList("start-cues"), node.int("marker-offset", min = 0, max = 64) ?: 0,
                 )
             }
         }
@@ -689,7 +762,11 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                     t.only(setOf("type", "radius"))
                     t.num("radius", min = 0.0, max = 64.0, exclusiveMin = true, required = true)?.let(HintTrigger::UnequippedNearEnemy)
                 }
-                else -> { t.err("type", "未知的提示觸發「$type」(可用:first-whiff、no-progress、near-marker、tool-empty、unequipped-near-enemy)"); null }
+                "lantern-contested" -> {
+                    t.only(setOf("type", "seconds"))
+                    t.num("seconds", min = 0.0, max = 600.0, exclusiveMin = true, required = true)?.let(HintTrigger::LanternContested)
+                }
+                else -> { t.err("type", "未知的提示觸發「$type」(可用:first-whiff、no-progress、near-marker、tool-empty、unequipped-near-enemy、lantern-contested)"); null }
             }
             val cues = node.idList("cues")
             if (cues.isEmpty() && node.map["cues"] == null) node.err("cues", "缺少必要欄位(要播的 cue ID 清單)")
@@ -707,6 +784,8 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         val ASSET = Regex("[a-z0-9_.-]+:[a-z0-9_.-]+(/[a-z0-9_.-]+)*")
         val MATERIAL = Regex("[A-Za-z0-9_:]+")
         const val MAX_LIGHT_CELLS = 2500
+        const val MIN_SCAN_TICKS = 4
+        const val MAX_SCAN_TICKS = 100
         val BAR_COLORS = setOf("BLUE", "GREEN", "PINK", "PURPLE", "RED", "WHITE", "YELLOW")
     }
 }

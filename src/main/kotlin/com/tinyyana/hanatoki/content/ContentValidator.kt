@@ -74,7 +74,23 @@ object ContentValidator {
             }
         }
 
-        // enemies.yml(reference-free)
+        // enemies.yml:seeks-object 要指向 lantern、狀態合法;harasses-players 的 tool-charges 要指向存在的道具
+        for (enemy in spec.enemies.values) {
+            val where = "${ContentFileNames.ENEMIES} enemies.${enemy.id}"
+            enemy.seeksObject?.let { seek ->
+                val obj = spec.objects[seek.objectId]
+                if (obj == null) errors += "$where.seeks-object.object: 引用不存在的物件「${seek.objectId}」(objects.yml)"
+                else if (obj !is LanternSpec) errors += "$where.seeks-object.object: 「${seek.objectId}」不是 lantern 物件(只有燈籠能被啃)"
+                else {
+                    for (st in seek.states) if (st !in ObjectStates.LANTERN) errors += "$where.seeks-object.states: 燈籠沒有狀態「$st」(可用:${ObjectStates.LANTERN.joinToString()})"
+                }
+            }
+            enemy.harassesPlayers?.effects?.forEachIndexed { i, effect ->
+                if (effect is HarassEffect.ToolCharges && effect.tool !in spec.tools) {
+                    errors += "$where.harasses-players.effects[$i].tool: 引用不存在的道具「${effect.tool}」(tool.yml)"
+                }
+            }
+        }
 
         // encounters.yml
         for (enc in spec.encounters.values) {
@@ -104,6 +120,9 @@ object ContentValidator {
         for (hint in spec.hints.values) {
             val where = "${ContentFileNames.HINTS} hints.${hint.id}"
             if (hint.stage != null && hint.stage !in stageIds) errors += "$where.stage: 引用不存在的 stage「${hint.stage}」"
+            if (hint.trigger is HintTrigger.LanternContested && spec.enemies.values.none { it.seeksObject != null }) {
+                errors += "$where.trigger: lantern-contested 需要至少一種敵人有 seeks-object 規則"
+            }
             if ((hint.trigger is HintTrigger.ToolEmpty || hint.trigger is HintTrigger.UnequippedNearEnemy) && spec.tools.isEmpty()) {
                 errors += "$where.trigger: 這種提示要有局內道具(tool.yml 沒有任何道具)"
             }

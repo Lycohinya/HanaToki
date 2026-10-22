@@ -4,7 +4,9 @@ package com.tinyyana.hanatoki.content
  * 燈籠狀態機(純邏輯,不碰 Bukkit)。不變式:
  * - 狀態只往前走 UNLIT → BURNING → LIT,**不倒退**;
  * - LIT 只會達成一次([Outcome.COMPLETED] 整個生命週期最多回一次);
- * - 無人在 stay-radius 內時進度暫停(不倒扣),有人回來繼續。
+ * - 無人在 stay-radius 內時 [advance] 暫停(不因為沒人而倒扣),有人回來繼續;
+ * - 被啃([drain],seeks-object 敵人造成):進度可退,夾在 0,**不退回 UNLIT**、不觸發完成;
+ *   暫停中照樣生效(離開燈籠不能讓燈免疫,否則「離開」就成了躲壓力的辦法);LIT 之後不再扣。
  */
 class LanternMachine(private val burnTicks: Double) {
     enum class State { UNLIT, BURNING, LIT }
@@ -20,6 +22,20 @@ class LanternMachine(private val burnTicks: Double) {
 
     /** 0.0–1.0 */
     val fraction: Double get() = if (state == State.LIT) 1.0 else (progress / burnTicks).coerceIn(0.0, 1.0)
+
+    /** 目前進度(燃燒 tick),測試與 log 用。 */
+    val progressTicks: Double get() = progress
+
+    /**
+     * 啃掉 [ticks] 燃燒 tick 的進度。只有 BURNING 生效(暫停中也算);結果夾在 0 以上;回傳實際扣掉的量。
+     * 不改 [state]、不回傳 Outcome:被啃永遠不會讓燈完成或回到 UNLIT。
+     */
+    fun drain(ticks: Double): Double {
+        if (state != State.BURNING || ticks <= 0.0 || progress <= 0.0) return 0.0
+        val taken = minOf(ticks, progress)
+        progress -= taken
+        return taken
+    }
 
     /** 只有 UNLIT 點得起來;已在燒或已亮回 false(不重置進度)。 */
     fun ignite(): Boolean {
@@ -207,3 +223,44 @@ fun chargePips(charges: Int, max: Int): String {
 /** 目前目標:依序第一個 until 還沒達成的步驟(沒寫 until 的步驟永遠停在那一步);全部達成 = null。 */
 fun pickObjective(steps: List<ObjectiveStep>, met: (Condition) -> Boolean): ObjectiveStep? =
     steps.firstOrNull { step -> step.until == null || !met(step.until) }
+
+/** 同一種敵人在同一座燈籠旁的啃燈情況:[inRange] 隻(活著、沒僵直、在 contest-radius 內),最多 [max] 隻有效,每隻每秒 [perSecond] 個 burn-second。 */
+data class DrainGroup(val inRange: Int, val max: Int, val perSecond: Double)
+
+/** 這一輪的總啃燈速率(burn-second / 秒)。各組各自套上限,沒有敵人 = 0。 */
+fun drainRate(groups: Collection<DrainGroup>): Double =
+    groups.sumOf { it.inRange.coerceIn(0, it.max.coerceAtLeast(0)) * it.perSecond }
+
+/** 速率 [ratePerSecond] 在 [dtTicks] 個 tick 內造成的燃燒進度損失(1 個 burn-second 的進度 = 20 燃燒 tick,所以速率與 tick 數直接相乘)。 */
+fun drainTicks(ratePerSecond: Double, dtTicks: Int): Double = if (ratePerSecond <= 0.0 || dtTicks <= 0) 0.0 else ratePerSecond * dtTicks
+
+/** 碰到玩家的判定:水平距離 <= [radius] 且高度差不超過 [maxHeight](站在不同層不算碰到)。 */
+fun withinContact(dx: Double, dy: Double, dz: Double, radius: Double, maxHeight: Double = 2.0): Boolean =
+    Math.abs(dy) <= maxHeight && Math.hypot(dx, dz) <= radius
+
+/**
+ * 碰到玩家效果的冷卻(**每位玩家各算**,不分是哪隻敵人):幾隻同時貼上來,同一個人在 [cooldownTicks] 內只吃一次。
+ * 只在 session 的 anchor region 執行緒使用。
+ */
+class TouchCooldowns {
+    private val last = HashMap<java.util.UUID, Long>()
+
+    /** 冷卻已過(或第一次)回 true 並記下 [now];否則 false。 */
+    fun tryTouch(playerId: java.util.UUID, now: Long, cooldownTicks: Int): Boolean {
+        val before = last[playerId]
+        if (before != null && now - before < cooldownTicks) return false
+        last[playerId] = now
+        return true
+    }
+
+    fun forget(playerId: java.util.UUID) { last.remove(playerId) }
+    fun clear() = last.clear()
+}
+
+/** 遠離敵人的水平推力向量 `[vx, vz]`;正好重疊時回 `[0, 0]`(只剩 lift),不挑隨機方向。 */
+fun pushAway(fromX: Double, fromZ: Double, toX: Double, toZ: Double, strength: Double): DoubleArray {
+    val dx = toX - fromX
+    val dz = toZ - fromZ
+    val d = Math.hypot(dx, dz)
+    return if (d < 1.0E-4) doubleArrayOf(0.0, 0.0) else doubleArrayOf(dx / d * strength, dz / d * strength)
+}
