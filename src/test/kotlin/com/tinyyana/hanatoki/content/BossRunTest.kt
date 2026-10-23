@@ -121,6 +121,16 @@ class BossRunTest {
         override fun cueFor(cueId: String, at: Pt, player: UUID) { cuesFor += cueId to player }
         override fun sampleCue(cueId: String, at: Pt) { sampled += Triple(clock, cueId, at) }
         override fun healMembers(ids: List<UUID>) { healed += ids }
+        // rc.30
+        val boosts = ArrayList<Pair<String, Double>>()
+        var lighters: Set<UUID> = emptySet()
+        val fractions = HashMap<String, Double>()
+        val barTexts = ArrayList<Triple<UUID, String, Map<String, String>>>()
+        override fun lampFraction(lamp: String): Double = fractions[lamp] ?: 0.0
+        override fun lampBurning(lamp: String): Boolean = lamp in burningLamps
+        override fun lampLighters(): Set<UUID> = lighters
+        override fun boostLamp(lamp: String, fraction: Double): Boolean { if (lamp in litLamps) return false; boosts += lamp to fraction; return true }
+        override fun actionBarText(player: UUID, key: String, params: Map<String, String>) { barTexts += Triple(player, key, params) }
         var auraOn = 0
         var auraOff = 0
         override fun followBossCue(cueId: String): Runnable { auraOn++; return Runnable { auraOff++ } }
@@ -998,6 +1008,176 @@ class BossRunTest {
         // 沒在等的出場再叫 releaseIntro 什麼都不做
         run.releaseIntro()
         assertEquals(1, host.logs.count { it.startsWith("boss-intro-release") })
+    }
+
+
+    // ---- rc.30:跪下連擊、倒數、落雷與掃地點燈、熄燈燒著的燈、偏向照燈的人 ----
+
+    private fun comboSpec(): BossSpec = baseSpec.copy(
+        kneel = baseSpec.kneel.copy(combo = KneelCombo(0.25, 2.0, 1.0, listOf("kneel_hit"), "k.combo", 3.0, listOf("kneel_tick"), "k.count")),
+    )
+
+    @Test
+    fun `rc29 跪下連擊：窗口內越打倍率越高到上限，停手超過窗口重算，每下有聲光與文字`() {
+        val (host, run) = setup(spec = comboSpec())
+        begin(host, run)
+        kneel(host, run)
+        repeat(4) { run.onHit(alice, Pt(0.0, 0.0, 0.0)); host.advance(10) }
+        assertEquals(listOf("n=1 mult=1", "n=2 mult=1.25", "n=3 mult=1.5", "n=4 mult=1.75"), host.logged("boss-combo").map { it.substringAfter("boss-combo ").substringBeforeLast(" player") })
+        assertEquals(4, host.cuesPlayed.count { it == "kneel_hit" })
+        assertEquals(listOf("1", "2", "3", "4"), host.barTexts.filter { it.second == "k.combo" }.map { it.third.getValue("combo") })
+        // 血條掉的是 1 + 1.25 + 1.5 + 1.75 = 5.5 下(基準 40 下)
+        assertEquals(1.0 - 5.5 / 40.0, host.barFractions.last(), 1.0E-9)
+        // 停手超過窗口(1 秒)重算
+        host.advance(40)
+        run.onHit(alice, Pt(0.0, 0.0, 0.0))
+        assertEquals("n=1 mult=1", host.logged("boss-combo").last().substringAfter("boss-combo ").substringBeforeLast(" player"))
+        // 倍率有上限(2.0)
+        repeat(8) { host.advance(10); run.onHit(alice, Pt(0.0, 0.0, 0.0)) }
+        assertTrue(host.logged("boss-combo").all { Regex("mult=(\\d+(\\.\\d+)?)").find(it)!!.groupValues[1].toDouble() <= 2.0 })
+        assertTrue(host.logged("boss-combo").any { "mult=2 " in it }, host.logged("boss-combo").toString())
+    }
+
+    @Test
+    fun `rc29 沒設連擊的 boss 每下一樣重，不記 boss-combo`() {
+        val (host, run) = setup()
+        begin(host, run)
+        kneel(host, run)
+        repeat(3) { run.onHit(alice, Pt(0.0, 0.0, 0.0)); host.advance(10) }
+        assertTrue(host.logged("boss-combo").isEmpty())
+        assertEquals(1.0 - 3.0 / 40.0, host.barFractions.last(), 1.0E-9)
+    }
+
+    @Test
+    fun `rc29 跪下窗口最後三秒每秒倒數一次，窗口結束後不再倒數`() {
+        val (host, run) = setup(spec = comboSpec())
+        begin(host, run)
+        kneel(host, run)
+        host.advance(100) // 5 秒:還沒到倒數
+        assertEquals(0, host.cuesPlayed.count { it == "kneel_tick" })
+        host.advance(100) // 10 秒
+        assertEquals(3, host.cuesPlayed.count { it == "kneel_tick" })
+        assertEquals(listOf("3", "2", "1"), host.barTexts.filter { it.second == "k.count" }.map { it.third.getValue("seconds") })
+        host.advance(400)
+        assertEquals(3, host.cuesPlayed.count { it == "kneel_tick" })
+    }
+
+    @Test
+    fun `rc29 落雷圈碰到場邊燈就把那盞燈推進，圈外的燈不動，每盞每招一次`() {
+        val base = only(baseSpec, "strike").copy(gapSeconds = 0.5)
+        val spec = base.copy(moves = base.moves.mapValues { it.value.copy(lampBoost = 1.0, lampRadius = 1.5, lampBoostCues = listOf("bolt_lit")) })
+        val (host, run) = setup(spec = spec)
+        host.positions[alice] = Pt(-4.0, 1.0, 5.0) // boss_lamp_1 在 (-4,1,4)，離圈中心 1 格
+        begin(host, run)
+        assertTrue(host.advanceUntil(600) { host.boosts.isNotEmpty() })
+        assertEquals(listOf("boss_lamp_1" to 1.0), host.boosts.distinct())
+        assertTrue("bolt_lit" in host.cuesPlayed)
+        assertTrue(host.logged("boss-lamp-boost").first().startsWith("boss-lamp-boost boss_lamp_1 by=circle"))
+        // 一招一次
+        assertEquals(1, host.boosts.count { it.first == "boss_lamp_1" } .coerceAtMost(1))
+    }
+
+    @Test
+    fun `rc29 沒設 lamp-boost 的落雷不動燈`() {
+        val spec = only(baseSpec, "strike").copy(gapSeconds = 0.5)
+        val (host, run) = setup(spec = spec)
+        host.positions[alice] = Pt(-4.0, 1.0, 5.0)
+        begin(host, run)
+        assertTrue(host.advanceUntil(600) { host.logged("boss-hit").isNotEmpty() })
+        assertTrue(host.boosts.isEmpty())
+    }
+
+    @Test
+    fun `rc29 掃地的環形波掃過場邊燈就把燈推進，波到不了的燈不動`() {
+        val base = only(baseSpec, "sweep").copy(gapSeconds = 0.5)
+        val spec = base.copy(moves = base.moves.mapValues { it.value.copy(lampBoost = 0.5, lampRadius = 1.5, lampBoostCues = listOf("wave_lit")) })
+        val (host, run) = setup(spec = spec)
+        host.positions[alice] = Pt(3.0, 0.0, 0.0)
+        begin(host, run)
+        assertTrue(host.advanceUntil(600) { host.logged("boss-move-end").isNotEmpty() })
+        val boosted = host.boosts.map { it.first }.toSet()
+        // max-radius 9:lamp_1 距離 5.7、lamp_2 距離 8.9 在範圍內，lamp_3 距離 12.6 到不了
+        assertEquals(setOf("boss_lamp_1", "boss_lamp_2"), boosted)
+        assertTrue(host.boosts.all { it.second == 0.5 })
+    }
+
+    private fun snuffBurningSpec(fraction: Double?, stop: Double = 0.0): BossSpec {
+        val base = only(baseSpec, "snuff").copy(gapSeconds = 0.5)
+        return base.copy(moves = base.moves.mapValues { (_, m) ->
+            m.copy(cooldownSeconds = 300.0, shape = (m.shape as MoveShape.Snuff).copy(burningMinFraction = fraction, burningWeight = 3, glideStopDistance = stop, glideSpeed = 10.0))
+        })
+    }
+
+    @Test
+    fun `rc29 熄燈也會點名燒到一半以上的燈，吹熄 = 重置該燈進度`() {
+        val (host, run) = setup(spec = snuffBurningSpec(0.5))
+        host.burningLamps += "boss_lamp_2"
+        host.fractions["boss_lamp_2"] = 0.6
+        begin(host, run)
+        assertTrue(host.advanceUntil(900) { host.logged("boss-snuff-warn").isNotEmpty() })
+        assertEquals(listOf("boss-snuff-warn boss_lamp_2"), host.logged("boss-snuff-warn"))
+        host.advance(80)
+        assertEquals(listOf("boss_lamp_2"), host.resetLamps)
+        assertEquals(listOf("boss-snuff boss_lamp_2"), host.logged("boss-snuff "))
+    }
+
+    @Test
+    fun `rc29 燒不到門檻的燈不會被點名，沒設門檻也不會（同舊版）`() {
+        val (h1, r1) = setup(spec = snuffBurningSpec(0.5))
+        h1.burningLamps += "boss_lamp_2"
+        h1.fractions["boss_lamp_2"] = 0.3
+        begin(h1, r1)
+        h1.advance(1200)
+        assertTrue(h1.logged("boss-snuff-warn").isEmpty())
+        val (h2, r2) = setup(spec = snuffBurningSpec(null))
+        h2.burningLamps += "boss_lamp_2"
+        h2.fractions["boss_lamp_2"] = 0.9
+        begin(h2, r2)
+        h2.advance(1200)
+        assertTrue(h2.logged("boss-snuff-warn").isEmpty())
+    }
+
+    @Test
+    fun `rc29 熄燈預警期間她滑向那盞燈，停在設定的距離，被保住也照樣停`() {
+        val (host, run) = setup(spec = snuffBurningSpec(0.5, stop = 5.0))
+        host.burningLamps += "boss_lamp_2"
+        host.fractions["boss_lamp_2"] = 0.8
+        begin(host, run)
+        assertTrue(host.advanceUntil(900) { host.logged("boss-snuff-warn").isNotEmpty() })
+        host.advance(40)
+        val lamp = host.markers.getValue("boss_lamp_2")
+        val last = host.bossMoves.last()
+        assertTrue(Math.abs(Math.hypot(last.x - lamp.x, last.z - lamp.z) - 5.0) < 0.7, "停在離燈 5 格附近:$last")
+        run.onSnuffFlash(alice)
+        assertEquals(listOf("boss-snuff-saved boss_lamp_2 by=alice"), host.logged("boss-snuff-saved"))
+    }
+
+    @Test
+    fun `rc29 落雷偏向正在照燈的人，lighting-bias 1 時永遠先挑她`() {
+        val base = only(baseSpec, "strike").copy(gapSeconds = 0.5)
+        val spec = base.copy(moves = base.moves.mapValues { (_, m) -> m.copy(lightingBias = 1.0, shape = MoveShape.Circle(2.5, 1)) })
+        val (host, run) = setup(players = listOf(alice, bob, cara), spec = spec)
+        host.lighters = setOf(cara)
+        begin(host, run)
+        host.advance(4000)
+        val targets = host.logged("boss-telegraph").map { it.substringAfter("target=") }
+        assertTrue(targets.size >= 3, "至少三次落雷:$targets")
+        assertTrue(targets.all { it == "cara" }, targets.toString())
+    }
+
+    @Test
+    fun `rc29 沒有人在照燈時落雷照舊隨機，lighting-bias 沒中時改挑離她最近的人`() {
+        val base = only(baseSpec, "strike").copy(gapSeconds = 0.5)
+        val spec = base.copy(moves = base.moves.mapValues { (_, m) -> m.copy(lightingBias = 0.0001, shape = MoveShape.Circle(2.5, 1)) })
+        val (host, run) = setup(players = listOf(alice, bob, cara), spec = spec)
+        host.lighters = setOf(cara)
+        host.positions[alice] = Pt(1.0, 0.0, 0.0)  // 離 boss(0,0,0) 最近
+        host.positions[bob] = Pt(10.0, 0.0, 0.0)
+        host.positions[cara] = Pt(20.0, 0.0, 0.0)
+        begin(host, run)
+        host.advance(3000)
+        val targets = host.logged("boss-telegraph").map { it.substringAfter("target=") }
+        assertTrue(targets.isNotEmpty() && targets.all { it == "alice" }, "沒中偏向就挑最近的:$targets")
     }
 
     @Test

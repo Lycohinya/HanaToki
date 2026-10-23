@@ -64,3 +64,29 @@ class Rc28Test {
         assertTrue(onStart.any { "dialog-delay-seconds" in it && "未知的欄位" in it }, onStart.toString())
     }
 }
+
+/** 速度驅動移動(不經傳送，BetterModel 不會因為載體移除再加入而重送整個模型)。 */
+class BossMoveModeTest {
+    @Test
+    fun `move-mode 解析，預設 teleport，未知值被擋`() {
+        assertEquals(BossMoveMode.TELEPORT, BossFixtures.parse().bosses.getValue("nun").moveMode)
+        val fast = BossFixtures.parseBoss("    wipe: { checkpoint: front_door }" to "    wipe: { checkpoint: front_door }\n    move-mode: velocity")
+        assertEquals(BossMoveMode.VELOCITY, fast.bosses.getValue("nun").moveMode)
+        val bad = BossFixtures.bossErrors("    wipe: { checkpoint: front_door }" to "    wipe: { checkpoint: front_door }\n    move-mode: fly")
+        assertTrue(bad.any { "move-mode" in it && "未知" in it }, bad.toString())
+    }
+
+    @Test
+    fun `速度驅動：兩 tick 後剛好到目標，站地上與空中都一樣`() {
+        for (onGround in listOf(true, false)) {
+            val v = velocityToward(0.0, 5.0, 0.0, 0.1, 5.0, -0.2, onGround)
+            val friction = if (onGround) 0.546 else 0.91
+            // 原版每 tick 先位移再乘摩擦：第一 tick v，第二 tick v × 摩擦
+            assertEquals(0.1, v[0] * (1 + friction), 1.0E-9)
+            assertEquals(-0.2, v[2] * (1 + friction), 1.0E-9)
+            assertEquals(0.0, v[1], 1.0E-9)
+        }
+        val up = velocityToward(0.0, 0.0, 0.0, 0.0, 1.0, 0.0, false)
+        assertEquals(1.0, up[1] * (1 + 0.98), 1.0E-9)
+    }
+}

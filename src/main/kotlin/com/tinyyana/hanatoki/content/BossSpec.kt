@@ -79,6 +79,24 @@ data class BossKneelSpec(
     val riseCues: List<String>,
     val riseSeconds: Double,
     val lampsReset: LampReset,
+    /** rc.30:跪下輸出的連擊；null = 每下一樣重(同舊版)。 */
+    val combo: KneelCombo? = null,
+)
+
+/**
+ * 跪下輸出窗口的連擊(rc.30)。窗口內任何人的有效近戰命中，距上一下 <= [windowSeconds] 秒就連擊 +1，否則從 1 重算；
+ * 傷害倍率 = min([cap], 1 + [step] × (連擊數 − 1))。每下命中播 [hitCues]，並給攻擊者 ActionBar [textKey](參數 `{combo}` `{mult}`)。
+ * 窗口最後 [countdownSeconds] 秒每秒播一次 [countdownCues]，並對全隊 ActionBar [countdownTextKey](參數 `{seconds}` 剩幾秒)。
+ */
+data class KneelCombo(
+    val step: Double,
+    val cap: Double,
+    val windowSeconds: Double,
+    val hitCues: List<String>,
+    val textKey: String?,
+    val countdownSeconds: Double,
+    val countdownCues: List<String>,
+    val countdownTextKey: String?,
 )
 
 /** 吃到這些 power-up 物件可無視光環打她;[fromPhase] 之前它們是「拿走」狀態(看不到也拿不到)。 */
@@ -230,6 +248,14 @@ sealed interface MoveShape {
         val flashCues: List<String>,
         val savedCues: List<String>,
         val snuffCues: List<String>,
+        /** rc.30:非 null = 也可以點名「燒到這個比例以上」的燈(還沒亮的)，吹熄 = 重置燒燈進度。 */
+        val burningMinFraction: Double? = null,
+        /** rc.30:燒著的燈被抽中的權重倍數(亮著的燈權重 1)。 */
+        val burningWeight: Int = 1,
+        /** rc.30:> 0 = 預警期間她滑向那盞燈，停在離燈這麼遠的地方(格)。 */
+        val glideStopDistance: Double = 0.0,
+        /** rc.30:滑向燈的速度(格/秒)。 */
+        val glideSpeed: Double = 6.0,
     ) : MoveShape
 }
 
@@ -251,7 +277,29 @@ data class MoveSpec(
     val push: HarassEffect.Push?,
     val origin: MoveOrigin,
     val shape: MoveShape,
+    /** rc.30:ring／circle 的判定範圍碰到場邊燈([lampRadius] 格內)時，把那盞燈燒進度推進這個比例(1.0 = 直接點亮)；0 = 不影響燈。 */
+    val lampBoost: Double = 0.0,
+    val lampRadius: Double = 1.5,
+    val lampBoostCues: List<String> = emptyList(),
+    /** rc.30:circle 選目標時，正在照燈的人被選中的機率偏向(0..1)；0 = 同舊版隨機。 */
+    val lightingBias: Double = 0.0,
 )
+
+/**
+ * boss 載體怎麼移動(rc.30)。[TELEPORT] = 每步 teleportAsync(舊行為)；[VELOCITY] = 開著 AI(拿掉所有目標)、每步設速度讓原版移動推著走，
+ * 超過 [BossSpec.moveMode] 一步的距離上限才用傳送。
+ *
+ * 為什麼:Folia／Lecithin 的 teleportAsync 在目標周圍 8 個 chunk 不全屬於目前 region 時(玩家離她遠、她在載入範圍邊緣)走「移除、複製、重新加入」，
+ * BetterModel 聽 EntityAddToWorld／EntityRemoveFromWorld 就把整個模型(載體 zombie 加 44 個 item_display)對所有觀看者重送一次——
+ * 滑行每 2 tick 一步 = 玩家看到模型一直消失(bot 封包紀錄 170 秒重送 800 次，最長間隔 1.41 秒)。速度驅動的移動不經過傳送，沒有這個問題。
+ */
+enum class BossMoveMode(val id: String) {
+    TELEPORT("teleport"), VELOCITY("velocity");
+
+    companion object {
+        fun of(id: String): BossMoveMode? = entries.firstOrNull { it.id == id }
+    }
+}
 
 data class BossSpec(
     val id: String,
@@ -298,6 +346,8 @@ data class BossSpec(
     val intro: BossIntroSpec? = null,
     /** rc.25:補血時機;預設不補。 */
     val heal: BossHealSpec = BossHealSpec(false, false),
+    /** rc.30:載體的移動方式；預設 [BossMoveMode.TELEPORT] 同舊版。 */
+    val moveMode: BossMoveMode = BossMoveMode.TELEPORT,
 ) {
     val lampIds: List<String> get() = gems.map { it.lamp }
 }

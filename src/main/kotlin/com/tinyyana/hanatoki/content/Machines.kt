@@ -47,6 +47,22 @@ class LanternMachine(private val burnTicks: Double) {
         paused = false
     }
 
+    /**
+     * rc.30:外力推進燒燈進度 [ticks] 個燃燒 tick(boss 的落雷、掃地打到場邊燈)。只有 BURNING 生效；
+     * 推到滿就 LIT 並回 [Outcome.COMPLETED]，否則 [Outcome.NONE]。不改暫停旗標。
+     */
+    fun boost(ticks: Double): Outcome {
+        if (state != State.BURNING || ticks <= 0.0) return Outcome.NONE
+        progress += ticks
+        if (progress >= burnTicks) {
+            progress = burnTicks
+            state = State.LIT
+            paused = false
+            return Outcome.COMPLETED
+        }
+        return Outcome.NONE
+    }
+
     /** 只有 UNLIT 點得起來;已在燒或已亮回 false(不重置進度)。 */
     fun ignite(): Boolean {
         if (state != State.UNLIT) return false
@@ -222,6 +238,46 @@ class ChargeMeter(private val passiveSeconds: Double?, private val zoneSeconds: 
 fun lanternHintLevel(distance: Double, current: Int, radius: Double, readyRadius: Double, hasReady: Boolean, slack: Double): Int {
     if (hasReady && distance <= (if (current == 2) readyRadius else readyRadius - slack)) return 2
     return if (distance <= (if (current > 0) radius + slack else radius)) 1 else 0
+}
+
+/**
+ * rc.30 光束瞄準:從眼睛 ([ex], [ey], [ez]) 沿視線方向 ([dx], [dy], [dz])(不必正規化)看，目標點 ([tx], [ty], [tz]) 的距離 <= [range]，
+ * 且視線與目標方向的夾角 <= [fullAngleDegrees] 的一半。
+ */
+fun beamAimed(
+    ex: Double, ey: Double, ez: Double, dx: Double, dy: Double, dz: Double,
+    tx: Double, ty: Double, tz: Double, range: Double, fullAngleDegrees: Double,
+): Boolean {
+    val vx = tx - ex
+    val vy = ty - ey
+    val vz = tz - ez
+    val dist = Math.sqrt(vx * vx + vy * vy + vz * vz)
+    if (dist > range) return false
+    if (dist < 1.0E-6) return true
+    val dl = Math.sqrt(dx * dx + dy * dy + dz * dz)
+    if (dl < 1.0E-9) return false
+    val cos = ((vx * dx + vy * dy + vz * dz) / (dist * dl)).coerceIn(-1.0, 1.0)
+    return Math.toDegrees(Math.acos(cos)) <= fullAngleDegrees / 2.0
+}
+
+/**
+ * rc.30 boss 本體擋光:眼睛到目標的線段穿過以 ([cx], [cy], [cz]) 為底面中心、水平半徑 [radius]、高 [height] 的圓柱就算被擋
+ * (線段兩端各 5% 不算，免得眼睛或燈貼著 boss 時誤判)。[radius] <= 0 = 擋不住。
+ */
+fun bodyBlocksSegment(
+    ex: Double, ey: Double, ez: Double, tx: Double, ty: Double, tz: Double,
+    cx: Double, cy: Double, cz: Double, radius: Double, height: Double,
+): Boolean {
+    if (radius <= 0.0) return false
+    val steps = 48
+    for (i in 3..(steps - 3)) {
+        val f = i.toDouble() / steps
+        val x = ex + (tx - ex) * f
+        val y = ey + (ty - ey) * f
+        val z = ez + (tz - ez) * f
+        if (y >= cy && y <= cy + height && Math.hypot(x - cx, z - cz) <= radius) return true
+    }
+    return false
 }
 
 /** 燈火條:「●●○○○」。[charges] 超出 0..[max] 的部分夾住。 */

@@ -540,7 +540,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         node.only(
             setOf(
                 "type", "marker", "stage", "states", "burn-seconds", "stay-radius", "speed-by-players", "hold-cue", "repeat-cue",
-                "milestones", "pause-cues", "resume-cues", "on-lit", "progress-bar", "ignite-radius", "hint",
+                "milestones", "pause-cues", "resume-cues", "on-lit", "progress-bar", "ignite-radius", "hint", "beam",
             ),
         )
         val marker = node.id("marker", required = true)
@@ -600,10 +600,18 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
             val tool = h.id("requires-tool")
             if (cue != null && hintRadius != null) ObjectHint(cue, ready, hintRadius, readyRadius ?: hintRadius, tool) else null
         }
+        val beam = node.child("beam")?.let { b ->
+            b.only(setOf("range", "angle", "sustain-seconds", "speed", "requires-sight", "hit-cues", "blocked-cues", "boss-block-radius"))
+            val range = b.num("range", min = 1.0, max = 64.0, required = true)
+            val angle = b.num("angle", min = 1.0, max = 90.0) ?: 20.0
+            val sustain = b.num("sustain-seconds", min = 0.2, max = 10.0) ?: 1.0
+            val beamSpeed = b.num("speed", min = 0.0, max = 5.0, exclusiveMin = true) ?: 0.7
+            if (range == null) null else LanternBeam(range, angle, sustain, beamSpeed, b.bool("requires-sight") ?: true, b.idList("hit-cues"), b.idList("blocked-cues"), b.num("boss-block-radius", min = 0.0, max = 8.0) ?: 1.8)
+        }
         if (marker == null || burn == null || radius == null || onLit == null) return null
         return LanternSpec(
             id, marker, node.id("stage"), states, burn, radius, speed, node.id("hold-cue"), repeat, milestones,
-            node.idList("pause-cues"), node.idList("resume-cues"), onLit, bar, igniteRadius, hint,
+            node.idList("pause-cues"), node.idList("resume-cues"), onLit, bar, igniteRadius, hint, beam,
         )
     }
 
@@ -657,6 +665,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                 setOf(
                     "base-entity", "model", "animations", "rules", "health", "speed", "damage", "scale", "by-players", "spawn-cues",
                     "needs-flash", "seeks-object", "harasses-players", "frozen-when-watched", "chases-players", "flees-when-powered",
+                    "dispersed-tip",
                 ),
             )
             val base = node.str("base-entity", required = true)?.uppercase()
@@ -743,11 +752,23 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
             if (base != null && health != null) {
                 out[id] = EnemySpec(
                     id, base, node.str("model"), animations, rules, health, speed, damage, scale, byPlayers,
-                    node.idList("spawn-cues"), flash, seeks, harass, frozen, chase, flee,
+                    node.idList("spawn-cues"), flash, seeks, harass, frozen, chase, flee, parseDispersedTip(node),
                 )
             }
         }
         return out
+    }
+
+    /** `dispersed-tip: { text: <texts key>, every: 3, count: 1, hold-seconds: 2 }`;沒寫 = null。 */
+    private fun parseDispersedTip(enemy: Node): DispersedTip? {
+        if (enemy.map["dispersed-tip"] == null) return null
+        val n = enemy.child("dispersed-tip") ?: run { enemy.err("dispersed-tip", "必須是區塊(text、every、count、hold-seconds)"); return null }
+        n.only(setOf("text", "every", "count", "hold-seconds"))
+        val text = n.str("text", required = true)
+        val every = n.int("every", min = 1, max = 64) ?: 1
+        val count = n.int("count", min = 1, max = 64) ?: 1
+        val hold = n.num("hold-seconds", min = 0.0, max = 10.0) ?: 2.0
+        return text?.let { DispersedTip(it, every, count, hold) }
     }
 
     private fun parseSeeksObject(enemy: Node): SeeksObjectSpec? {
@@ -1088,7 +1109,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                 setOf(
                     "stage", "base-entity", "model", "scale", "animations", "health", "by-players", "hit-weight", "powered-hit-weight",
                     "hit-cooldown-ticks", "min-attack-strength", "start-delay-seconds", "spawn-cues", "points", "glide", "gap-seconds", "phase-up-seconds",
-                    "phases", "moves", "shield", "gems", "kneel", "pumpkins", "downed", "wipe", "defeat", "bar", "hit-cues", "intro", "heal",
+                    "phases", "moves", "shield", "gems", "kneel", "pumpkins", "downed", "wipe", "defeat", "bar", "hit-cues", "intro", "heal", "move-mode",
                 ),
             )
             val stage = node.id("stage", required = true)
@@ -1157,6 +1178,8 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
             val shield = parseShield(node)
             val startDelay = node.num("start-delay-seconds", min = 0.0, max = 120.0) ?: 3.0
             val intro = parseIntro(node, startDelay)
+            val moveModeId = node.str("move-mode") ?: BossMoveMode.TELEPORT.id
+            val moveMode = BossMoveMode.of(moveModeId) ?: run { node.err("move-mode", "未知的移動方式「$moveModeId」(可用:${BossMoveMode.entries.joinToString { it.id }})"); BossMoveMode.TELEPORT }
             if (stage != null && health != null && points.isNotEmpty() && movesBlock != null && gems != null && kneel != null && downed != null && wipe != null) {
                 out[id] = BossSpec(
                     id, stage, base, node.str("model"), node.num("scale", min = 0.0, max = 16.0, exclusiveMin = true), animations,
@@ -1168,7 +1191,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                     node.idList("spawn-cues"), points, glide, node.num("gap-seconds", min = 0.0, max = 60.0) ?: 2.5,
                     node.num("phase-up-seconds", min = 0.0, max = 30.0) ?: 2.0,
                     phases, moves, shield, gems, kneel, pumpkins, downed, wipe, defeat, bar,
-                    node.idList("hit-cues"), intro, parseHeal(node),
+                    node.idList("hit-cues"), intro, parseHeal(node), moveMode,
                 )
             }
         }
@@ -1244,7 +1267,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
 
     private fun parseKneel(boss: Node): BossKneelSpec? {
         val n = boss.child("kneel")
-        n?.only(setOf("seconds", "cues", "rise-cues", "rise-seconds", "lamps-reset"))
+        n?.only(setOf("seconds", "cues", "rise-cues", "rise-seconds", "lamps-reset", "combo"))
         val resetId = n?.str("lamps-reset") ?: LampReset.ON_RISE.id
         val reset = LampReset.of(resetId)
         if (reset == null) { n?.err("lamps-reset", "未知的策略「$resetId」(可用:${LampReset.entries.joinToString { it.id }})"); return null }
@@ -1254,6 +1277,16 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
             riseCues = n?.idList("rise-cues") ?: emptyList(),
             riseSeconds = n?.num("rise-seconds", min = 0.0, max = 30.0) ?: 1.5,
             lampsReset = reset,
+            combo = n?.child("combo")?.let { c ->
+                c.only(setOf("step", "cap", "window-seconds", "hit-cues", "text", "countdown-seconds", "countdown-cues", "countdown-text"))
+                val step = c.num("step", min = 0.0, max = 2.0, required = true)
+                val cap = c.num("cap", min = 1.0, max = 10.0) ?: 2.0
+                if (step != null && cap < 1.0) c.err("cap", "不可小於 1")
+                if (step == null) null else KneelCombo(
+                    step, cap, c.num("window-seconds", min = 0.2, max = 10.0) ?: 1.6, c.idList("hit-cues"), c.str("text"),
+                    c.num("countdown-seconds", min = 0.0, max = 10.0) ?: 0.0, c.idList("countdown-cues"), c.str("countdown-text"),
+                )
+            },
         )
     }
 
@@ -1330,12 +1363,12 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
     private fun parseMove(id: String, node: Node, phaseCount: Int): MoveSpec? {
         val shapeId = node.str("shape", required = true) ?: return null
         val specific: Set<String> = when (shapeId) {
-            "ring" -> setOf("max-radius", "band-width", "expand-seconds", "dodge-cues")
-            "circle" -> setOf("radius", "max-targets")
+            "ring" -> setOf("max-radius", "band-width", "expand-seconds", "dodge-cues", "lamp-boost", "lamp-radius", "lamp-boost-cues")
+            "circle" -> setOf("radius", "max-targets", "lamp-boost", "lamp-radius", "lamp-boost-cues", "lighting-bias")
             "cross" -> setOf("length", "half-width", "angle-offset")
             "spin" -> setOf("radius", "inner-radius", "gap-degrees", "degrees-per-second", "duration-seconds", "hit-interval-ticks", "beam-cues", "gap-cues", "sample-ticks", "beams", "points-per-line")
             "summon" -> setOf("enemy", "markers", "count-by-players", "max-alive")
-            "snuff" -> setOf("flash-cues", "saved-cues", "snuff-cues")
+            "snuff" -> setOf("flash-cues", "saved-cues", "snuff-cues", "burning-min-fraction", "burning-weight", "glide-stop-distance", "glide-speed")
             else -> { node.err("shape", "未知的招式形狀「$shapeId」(可用:ring、circle、cross、spin、summon、snuff)"); return null }
         }
         val hurts = shapeId != "summon" && shapeId != "snuff"
@@ -1390,7 +1423,13 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                 if (enemy == null || markers.isEmpty()) return null
                 MoveShape.Summon(enemy, markers, counts, node.int("max-alive", min = 1, max = 32) ?: 4)
             }
-            else -> MoveShape.Snuff(node.idList("flash-cues"), node.idList("saved-cues"), node.idList("snuff-cues"))
+            else -> MoveShape.Snuff(
+                node.idList("flash-cues"), node.idList("saved-cues"), node.idList("snuff-cues"),
+                node.num("burning-min-fraction", min = 0.0, max = 1.0, exclusiveMin = true),
+                node.int("burning-weight", min = 1, max = 20) ?: 1,
+                node.num("glide-stop-distance", min = 0.0, max = 48.0) ?: 0.0,
+                node.num("glide-speed", min = 0.5, max = 40.0) ?: 6.0,
+            )
         }
         val from = node.int("phase", min = 1, max = MAX_PHASES) ?: 1
         if (from > phaseCount) node.err("phase", "不可大於階段數($phaseCount)")
@@ -1405,6 +1444,10 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
             node.num("warn-seconds", min = 0.2, max = 30.0) ?: 2.0, node.num("recovery-seconds", min = 0.0, max = 30.0) ?: 1.0,
             node.str("animation"), node.idList("warn-cues"), node.idList("hit-cues"), damage ?: 0.0, push,
             MoveOrigin(node.id("origin-marker")), shape,
+            lampBoost = node.num("lamp-boost", min = 0.0, max = 1.0) ?: 0.0,
+            lampRadius = node.num("lamp-radius", min = 0.0, max = 16.0) ?: 1.5,
+            lampBoostCues = node.idList("lamp-boost-cues"),
+            lightingBias = node.num("lighting-bias", min = 0.0, max = 1.0) ?: 0.0,
         )
     }
 

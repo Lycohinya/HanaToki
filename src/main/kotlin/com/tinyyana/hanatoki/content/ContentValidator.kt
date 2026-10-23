@@ -378,11 +378,16 @@ object ContentValidator {
             check(ContentFileNames.STAGES, "stages.${s.id}.objective-done", s.objectiveDoneKey)
         }
         for (c in spec.chat.values) check(ContentFileNames.CHAT, "chat.${c.cueId}.text", c.textKey)
+        for (b in spec.bosses.values) {
+            check(ContentFileNames.BOSSES, "bosses.${b.id}.kneel.combo.text", b.kneel.combo?.textKey)
+            check(ContentFileNames.BOSSES, "bosses.${b.id}.kneel.combo.countdown-text", b.kneel.combo?.countdownTextKey)
+        }
         for (t in spec.tools.values) {
             check(ContentFileNames.TOOL, "tools.${t.id}.name", t.nameKey)
             t.loreKeys.forEachIndexed { i, k -> check(ContentFileNames.TOOL, "tools.${t.id}.lore[$i]", k) }
             check(ContentFileNames.TOOL, "tools.${t.id}.hud-text", t.hudTextKey)
         }
+        for (e in spec.enemies.values) check(ContentFileNames.ENEMIES, "enemies.${e.id}.dispersed-tip.text", e.dispersedTip?.textKey)
         for (o in spec.objects.values) if (o is LanternSpec) {
             check(ContentFileNames.OBJECTS, "objects.${o.id}.progress-bar.text", o.progressBar?.textKey)
         }

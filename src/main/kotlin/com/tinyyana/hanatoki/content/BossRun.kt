@@ -92,6 +92,21 @@ interface BossHost {
     fun lampUsed(lamp: String): Boolean
     fun lampPos(lamp: String): Pt?
 
+    /** rc.30:這盞場邊燈目前的燒燈進度(0..1；亮著 = 1)。預設 0。 */
+    fun lampFraction(lamp: String): Double = 0.0
+
+    /** rc.30:這盞場邊燈目前是否正在燒(已點燃、還沒亮)。預設 false。 */
+    fun lampBurning(lamp: String): Boolean = false
+
+    /** rc.30:目前正在照場邊燈的成員(光束續著的，或站在燒著的燈的守燈範圍內)。預設空。 */
+    fun lampLighters(): Set<UUID> = emptySet()
+
+    /** rc.30:外力推進場邊燈的燒燈進度 [fraction](1.0 = 直接點亮)；沒點燃的先點燃。已亮著回 false。預設不做事。 */
+    fun boostLamp(lamp: String, fraction: Double): Boolean = false
+
+    /** rc.30:給一位成員的 ActionBar 文字(texts key，帶參數)。預設忽略參數。 */
+    fun actionBarText(player: UUID, key: String, params: Map<String, String>) { actionBar(player, key) }
+
     /** 把場邊燈重置成未點亮(狀態機、方塊外觀、持續 cue、世界標示)。 */
     fun resetLamp(lamp: String)
 
@@ -188,7 +203,13 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
         var done = false
         val hit = HashSet<UUID>()
         val dodged = HashSet<UUID>()
+        /** rc.30:這一招已經推進過的場邊燈(每盞每招最多一次)。 */
+        val lampsBoosted = HashSet<String>()
     }
+
+    // rc.30 跪下連擊
+    private var comboCount = 0
+    private var comboLastAt = -1000L
 
     // ---- 小工具 ----
 
@@ -471,6 +492,9 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
         host.bossBar(bar.textKey, health.fraction, bar.color, bar.overlay, mapOf("percent" to percent.toString(), "phase" to phase.toString()))
     }
 
+    /** 倍率顯示:最多兩位小數，去掉尾端的 0(1.25、1.5、2)。 */
+    private fun fmtMult(v: Double): String = String.format(java.util.Locale.ROOT, "%.2f", v).trimEnd('0').trimEnd('.')
+
     private fun fmt(v: Double): String = if (v == Math.rint(v)) v.toInt().toString() else String.format(java.util.Locale.ROOT, "%.1f", v)
 
     // ---- 被打 ----
@@ -496,7 +520,19 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
         val last = lastHitAt[attacker]
         if (last != null && now - last < spec.hitCooldownTicks) return
         lastHitAt[attacker] = now
-        health.hit(if (shieldUp) spec.poweredHitWeight else spec.hitWeight)
+        var weight = if (shieldUp) spec.poweredHitWeight else spec.hitWeight
+        val combo = spec.kneel.combo
+        if (combo != null && state == BossState.KNEELING) {
+            // rc.30 連擊:窗口內距上一下 <= windowSeconds 就 +1，否則從 1 重算；倍率 = min(cap, 1 + step × (連擊 − 1))
+            comboCount = if (comboCount > 0 && now - comboLastAt <= ticks(combo.windowSeconds)) comboCount + 1 else 1
+            comboLastAt = now
+            val mult = comboMultiplier(comboCount, combo.step, combo.cap)
+            weight *= mult
+            cues(combo.hitCues, at)
+            combo.textKey?.let { host.actionBarText(attacker, it, mapOf("combo" to comboCount.toString(), "mult" to fmtMult(mult))) }
+            host.log("boss-combo", "n=$comboCount mult=${fmtMult(mult)} player=${name(attacker)}")
+        }
+        health.hit(weight)
         cues(spec.hitCues, at)
         updateBar()
         if (state == BossState.IDLE) shortAnim(spec.animations.hit)
@@ -551,12 +587,32 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
         spec.shield.haloBone?.let { host.setBone(it, false) }
         host.log("boss-kneel", "seconds=${fmt(spec.kneel.seconds)}")
         cues(spec.kneel.cues, pos)
+        comboCount = 0
+        comboLastAt = -1000L
+        scheduleKneelCountdown()
         playAnim(spec.animations.kneel, true)
         reviveAll("kneel")
         if (spec.heal.onKneel) healAll("kneel")
     }
 
+    /** rc.30:跪下窗口最後 countdownSeconds 秒，每秒一次倒數提示(cue 加全隊 ActionBar `{seconds}`)。 */
+    private fun scheduleKneelCountdown() {
+        val combo = spec.kneel.combo ?: return
+        val total = ticks(spec.kneel.seconds)
+        val n = Math.floor(combo.countdownSeconds).toInt()
+        for (k in n downTo 1) {
+            val at = total - k * 20L
+            if (at <= 0L) continue
+            later(at) {
+                if (state != BossState.KNEELING) return@later
+                cues(combo.countdownCues, pos)
+                combo.countdownTextKey?.let { key -> onlineMembers().forEach { host.actionBarText(it, key, mapOf("seconds" to k.toString())) } }
+            }
+        }
+    }
+
     private fun rise() {
+        comboCount = 0
         state = BossState.RISING
         riseEnd = host.now + ticks(spec.kneel.riseSeconds)
         shieldUp = true
@@ -581,7 +637,7 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
     // ---- 排招與施放 ----
 
     private fun available(moveId: String): Boolean = when (val shape = spec.moves.getValue(moveId).shape) {
-        is MoveShape.Snuff -> gems.litLamps().any { it != snuffLamp }
+        is MoveShape.Snuff -> snuffCandidates(shape).isNotEmpty()
         is MoveShape.Summon -> summons.values.count { it == shape.enemy } < shape.maxAlive
         else -> true
     }
@@ -652,7 +708,8 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
             }
             is MoveShape.Circle -> {
                 val pool = snap.keys.toList().shuffled(random)
-                val chosen = if (shape.maxTargets > 0) pool.take(shape.maxTargets) else pool
+                val ordered = if (shape.maxTargets > 0 && move.lightingBias > 0.0) preferLighters(pool, move.lightingBias, origin, snap) else pool
+                val chosen = if (shape.maxTargets > 0) ordered.take(shape.maxTargets) else ordered
                 val begun = chosen.filter { ledger.tryBegin(it, c.id) }
                 if (begun.isEmpty()) { abortCast(c, "telegraph-busy"); return }
                 val centers = begun.associateWith { Pt(snap.getValue(it)[SX], snap.getValue(it)[SY], snap.getValue(it)[SZ]) }
@@ -682,6 +739,33 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
                 later(warn) { summon(c, shape) }
             }
             is MoveShape.Snuff -> startSnuff(c, shape, warn)
+        }
+    }
+
+    /**
+     * rc.30:選落雷目標時偏向正在照燈的人。以機率 [bias] 把「正在照燈的人」排在前面(其餘隨機)；沒中就改成離她最近的人在前
+     * (一個人引開、另一個人點燈要成立)。沒有人在照燈時照舊隨機。
+     */
+    private fun preferLighters(pool: List<UUID>, bias: Double, origin: Pt, snap: Map<UUID, DoubleArray>): List<UUID> {
+        val lighters = host.lampLighters().filter { it in pool }
+        if (lighters.isEmpty()) return pool
+        return if (random.nextDouble() < bias) lighters + pool.filter { it !in lighters }
+        else pool.sortedBy { id -> snap[id]?.let { Math.hypot(it[SX] - origin.x, it[SZ] - origin.z) } ?: Double.MAX_VALUE }
+    }
+
+    /** rc.30:判定範圍(水平距離 [reach] 格內)碰到的場邊燈推進燒燈進度，每盞每招一次；給 [cues] 與 log。 */
+    private fun boostLampsNear(c: Cast, centers: List<Pt>, reach: Double, by: String) {
+        val move = c.move
+        if (move.lampBoost <= 0.0) return
+        for (lamp in spec.lampIds) {
+            if (lamp in c.lampsBoosted) continue
+            val lp = host.lampPos(lamp) ?: continue
+            if (centers.none { it.horizontalDistance(lp) <= reach }) continue
+            c.lampsBoosted += lamp
+            if (host.boostLamp(lamp, move.lampBoost)) {
+                host.log("boss-lamp-boost", "$lamp by=$by move=${move.id} boost=${fmt(move.lampBoost)}")
+                cues(move.lampBoostCues, lp)
+            }
         }
     }
 
@@ -735,6 +819,19 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
             val t = (k * SAMPLE_TICKS).coerceAtMost(total)
             val front = s.maxRadius * t / total
             val prev = s.maxRadius * ((k - 1) * SAMPLE_TICKS).coerceAtLeast(0) / total
+            // rc.30:環形波掃過場邊燈的位置，把那盞燈燒進度推進(lamp-boost)
+            if (c.move.lampBoost > 0.0) {
+                for (lamp in spec.lampIds) {
+                    if (lamp in c.lampsBoosted) continue
+                    val lp = host.lampPos(lamp) ?: continue
+                    if (Math.abs(lp.y - center.y) > BOSS_HEIGHT + 3.0 || !inRingSweep(lp.horizontalDistance(center), prev, front + c.move.lampRadius, s.bandWidth)) continue
+                    c.lampsBoosted += lamp
+                    if (host.boostLamp(lamp, c.move.lampBoost)) {
+                        host.log("boss-lamp-boost", "$lamp by=ring move=${c.move.id} boost=${fmt(c.move.lampBoost)}")
+                        cues(c.move.lampBoostCues, lp)
+                    }
+                }
+            }
             host.snapshots(Consumer { snap ->
                 if (!alive(c)) return@Consumer
                 updatePositions(snap)
@@ -769,6 +866,8 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
                 if (inside && c.hit.add(id)) hitPlayer(c, id, centers.minByOrNull { Math.hypot(p[SX] - it.x, p[SZ] - it.z) })
             }
             centers.forEach { cues(c.move.hitCues, it) }
+            // rc.30:落雷圈碰到場邊燈(圈半徑加 lamp-radius)，把那盞燈直接點亮或大幅推進
+            boostLampsNear(c, centers, s.radius + c.move.lampRadius, "circle")
             later(RESOLVE_PAD_TICKS) { endCast(c) }
         })
     }
@@ -854,19 +953,58 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
     }
 
     // 熄燈
+    /**
+     * rc.30:熄燈能點名的燈:亮著的場邊燈，加上(burning-min-fraction 有寫時)燒進度達標的燈。
+     * 傳回 燈 id → 權重(亮著 1，燒著 [MoveShape.Snuff.burningWeight])。
+     */
+    private fun snuffCandidates(s: MoveShape.Snuff): Map<String, Int> {
+        val out = LinkedHashMap<String, Int>()
+        for (lamp in gems.litLamps()) if (lamp != snuffLamp) out[lamp] = 1
+        val min = s.burningMinFraction
+        if (min != null) {
+            for (lamp in spec.lampIds) {
+                if (lamp == snuffLamp || lamp in out) continue
+                if (host.lampBurning(lamp) && host.lampFraction(lamp) >= min) out[lamp] = s.burningWeight
+            }
+        }
+        return out
+    }
+
     private fun startSnuff(c: Cast, s: MoveShape.Snuff, warn: Long) {
-        val pool = gems.litLamps().filter { it != snuffLamp }
+        val pool = snuffCandidates(s)
         if (pool.isEmpty()) { abortCast(c, "no-lit-lamp"); return }
-        val lamp = pool[random.nextInt(pool.size)]
+        var roll = random.nextInt(pool.values.sum().coerceAtLeast(1))
+        var lamp = pool.keys.first()
+        for ((id, w) in pool) { if (roll < w) { lamp = id; break }; roll -= w }
         val at = host.lampPos(lamp) ?: pos
         snuffLamp = lamp
         snuffSaved = false
+        if (s.glideStopDistance > 0.0) snuffGlide(c, s, lamp, at)
         playAnim(c.move.animation, false)
         cues(c.move.warnCues, pos)
         snuffLoop = s.flashCues.firstOrNull()?.let { host.loopCue(it, at) }
         s.flashCues.drop(1).forEach { host.cue(it, at) }
         host.log("boss-snuff-warn", lamp)
         later(warn) { snuffResolve(c, s, lamp) }
+    }
+
+    /** rc.30:預警期間她滑向被點名的燈，停在離燈 [MoveShape.Snuff.glideStopDistance] 格的地方(招式作廢或結束就停)。 */
+    private fun snuffGlide(c: Cast, s: MoveShape.Snuff, lamp: String, lampAt: Pt) {
+        val dx = pos.x - lampAt.x
+        val dz = pos.z - lampAt.z
+        val d = Math.hypot(dx, dz)
+        if (d <= s.glideStopDistance + 0.5) return
+        val stop = Pt(lampAt.x + dx / d * s.glideStopDistance, pos.y, lampAt.z + dz / d * s.glideStopDistance)
+        val step = s.glideSpeed * TICK_PERIOD / 20.0
+        fun tickGlide() {
+            if (!alive(c) || snuffLamp != lamp) return
+            val (next, arrived) = glideStep(pos, stop, step)
+            pos = next
+            host.moveBoss(next)
+            host.faceBoss(lampAt)
+            if (!arrived) later(TICK_PERIOD) { tickGlide() }
+        }
+        tickGlide()
     }
 
     /** 目前被點名要熄的場邊燈（還沒被保住）;SessionRun 的閃光判定用。 */

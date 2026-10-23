@@ -224,7 +224,26 @@ data class LanternSpec(
     /** > 0:閃光時持有者離燈籠 ≤ 這個距離就點燃,不必瞄準(仍可用錐形從更遠點燃);0 = 只認錐形。 */
     val igniteRadius: Double = 0.0,
     val hint: ObjectHint? = null,
+    /** rc.30:遠距光束。提燈閃光從 [LanternBeam.range] 格內、視線正對、沒被擋住就能點燃，並持續照住(每次閃光續 [LanternBeam.sustainSeconds] 秒)燒燈。 */
+    val beam: LanternBeam? = null,
 ) : ObjectSpec
+
+/**
+ * 場邊燈的遠距光束(rc.30):閃光的視線與燈上方 2.5 格的夾角在 [angle] 度(全角)內、距離 <= [range] 就算照到；[requiresSight] = true 時
+ * 方塊與 boss 本體擋住視線就照不到(播 [blockedCues])。照到時：沒點燃就點燃(照常扣一格)，正在燒就續 [sustainSeconds] 秒(閃光不扣格，見 tool free-on-burning-lamp)，
+ * 續著的期間燒燈速度加 [speed] 倍(每位照燈的人各加一份；近距在守燈範圍內的人照舊)。每次照到播 [hitCues]。
+ */
+data class LanternBeam(
+    val range: Double,
+    val angle: Double,
+    val sustainSeconds: Double,
+    val speed: Double,
+    val requiresSight: Boolean,
+    val hitCues: List<String>,
+    val blockedCues: List<String>,
+    /** boss 本體與光環擋光的圓柱半徑(格)；0 = boss 擋不住光束。 */
+    val bossBlockRadius: Double = 1.8,
+)
 
 data class GateSpec(
     override val id: String,
@@ -312,6 +331,16 @@ data class NeedsFlashSpec(
     val stunnedCue: String? = null,
 )
 
+/**
+ * rc.30 `dispersed-tip`:這位玩家**累計**第 [every]、2×[every]… 隻打散(算入 `dispersed` 統計的那些:玩家閃光後打散、被 powered 的成員碰散)時,
+ * 只對他送一則 ActionBar 短句 [textKey],`{count}` 填 [count]。結算獎勵(例如暖光燈芯)是結算時才發,這句只是預告,不洗聊天室。
+ * [holdSeconds]:送出後這段時間內不重畫目標列(同一格 ActionBar,最新一則贏),否則下一個 tick 就被目標列蓋掉。
+ */
+data class DispersedTip(val textKey: String, val every: Int, val count: Int, val holdSeconds: Double) {
+    /** 這位玩家累計打散到第 [total] 隻時要不要送預告。 */
+    fun due(total: Long): Boolean = total > 0L && total % every == 0L
+}
+
 data class EnemySpec(
     val id: String,
     /** [org.bukkit.entity.EntityType] 常數名;必須是 Mob。 */
@@ -338,6 +367,8 @@ data class EnemySpec(
     val chasesPlayers: ChasesPlayersSpec? = null,
     /** 規則 flees-when-powered 的設定;沒有該標籤 = null。 */
     val fleesWhenPowered: FleesWhenPoweredSpec? = null,
+    /** rc.30:這種敵人被玩家打散時的 ActionBar 短句(`dispersed-tip`);null = 不提示。不是規則標籤,任何敵人都能寫。 */
+    val dispersedTip: DispersedTip? = null,
 ) {
     /** 碰到玩家的效果:harasses-players,或 chases-players 內嵌的 contact。 */
     val contact: HarassSpec? get() = harassesPlayers ?: chasesPlayers?.contact

@@ -6,6 +6,7 @@ import com.tinyyana.hanatoki.api.port.CueRun
 import com.tinyyana.hanatoki.api.port.DialogPort
 import com.tinyyana.hanatoki.api.port.StageWorldMutator
 import com.tinyyana.hanatoki.actor.ActorSpec
+import com.tinyyana.hanatoki.reward.RunStats
 import com.tinyyana.hanatoki.map.MapAssetId
 import com.tinyyana.hanatoki.map.MapLayout
 import com.tinyyana.hanatoki.map.MapMarker
@@ -118,6 +119,8 @@ class SessionRun(
     private var objectiveKey: String? = null
     private var objectiveDirty = false
     private var objectiveNextAt = 0L
+    /** rc.30:打散提示([DispersedTip])送出後到這個 tick 之前不重畫目標列,免得下一個 tick 就把短句蓋掉。 */
+    private var objectiveHoldUntil = 0L
     private val toolSlots: Set<Int> = spec.tools.values.map { it.slot }.toSet()
 
     /** 需要每 10 tick 抓一次成員快照(位置、主手格)的功能是否有任何一個開著。 */
@@ -178,6 +181,8 @@ class SessionRun(
         var hold: CueRun? = null
         var nextRepeat = 0L
         var milestonesFired = 0
+        /** rc.30:遠距光束照著這盞燈的成員 -> 光束續到哪個 tick。 */
+        val beamers = HashMap<UUID, Long>()
         /** 被啃:各組啃燈速率總和(burn-second / 秒),由掃描發布;超過 [DRAIN_STALE_TICKS] 沒更新視為 0。 */
         var drainRate = 0.0
         var drainers = 0
@@ -611,7 +616,14 @@ class SessionRun(
             if (rt.drainRate > 0.0 && now - rt.drainAt <= DRAIN_STALE_TICKS) {
                 rt.machine.drain(drainTicks(rt.drainRate, TICK_PERIOD.toInt()))
             }
-            when (rt.machine.advance(TICK_PERIOD.toInt(), lanternMultiplier(spec.speedByPlayers, people))) {
+            // rc.30:遠距光束續著的每位成員各加 beam.speed 倍；倒下的、過期的不算
+            var beamBonus = 0.0
+            val beam = spec.beam
+            if (beam != null && rt.beamers.isNotEmpty()) {
+                rt.beamers.entries.removeIf { it.value <= now || isDowned(it.key) || it.key !in members() }
+                beamBonus = rt.beamers.size * beam.speed
+            }
+            when (rt.machine.advance(TICK_PERIOD.toInt(), lanternMultiplier(spec.speedByPlayers, people) + beamBonus)) {
                 LanternMachine.Outcome.PAUSED -> {
                     log("object", "${spec.id} burning paused")
                     rt.hold?.cancel(); rt.hold = null
@@ -1044,6 +1056,7 @@ class SessionRun(
         // 玩家打散或 powered 碰散才算「打散過」;光圈／stage 清場(killer 為 null 且不是 reversal)不算
         if (killer != null || reversal) {
             dispersedEnemies += rt.spec.id
+            if (killer != null) recordDispersed(killer)
             fireHints { (it.trigger as? HintTrigger.EnemyDispersed)?.enemy == rt.spec.id }
         }
         markProgress()
@@ -1060,9 +1073,31 @@ class SessionRun(
         }
         // 閃光打散補燈火;powered 時被碰散不補
         if (killer != null && !reversal) refill(killer, nf?.refillCue, at)
+        if (killer != null) showDispersedTip(killer, rt)
         val ticks = if (reversal) flee?.dissolveTicks ?: nf?.dissolveTicks else nf?.dissolveTicks ?: flee?.dissolveTicks
         timers.schedule(now, (ticks ?: 12).toLong()) { removeEnemy(rt) }
         return true
+    }
+
+    /**
+     * rc.30:統計「每人打散幾隻」給結算用(`RunStats.DISPERSED` 整局合計與逐人鍵)。
+     * 只有 [killer] 非 null 的打散會進來(光圈與 stage 清場、Boss 召喚物收場都不算);用 [InstanceState.stats],在 [StageContext.submit] 的執行線上寫。
+     */
+    private fun recordDispersed(killer: UUID) {
+        RunStats.record(ctx.state.stats, RunStats.DISPERSED, killer)
+    }
+
+    /**
+     * 依敵人的 `dispersed-tip` 對這位玩家送 ActionBar 預告(累計第 every 隻、2×every 隻…)。
+     * 必須在補燈火([refill] → 工具 HUD)**之後**送:兩者共用同一格 ActionBar,最新一則贏。
+     */
+    private fun showDispersedTip(killer: UUID, rt: EnemyRt) {
+        val tip = rt.spec.dispersedTip ?: return
+        val mine = ctx.state.stats[RunStats.playerKey(RunStats.DISPERSED, killer)] ?: return
+        if (!tip.due(mine)) return
+        ctx.actionBar(killer, tip.textKey, mapOf("count" to tip.count.toString()))
+        objectiveHoldUntil = maxOf(objectiveHoldUntil, now + (tip.holdSeconds * 20).toLong())
+        log("dispersed-tip", "player=${nameOf(killer)} total=$mine text=${tip.textKey}")
     }
 
     private fun removeEnemy(rt: EnemyRt) {
@@ -1829,10 +1864,36 @@ class SessionRun(
 
     /** 事件執行緒呼叫:玩家右鍵 tool。[eye]/[dir]/[feet] 是事件當下持有者的快照([feet] = `player.location`,點燃半徑與世界標示用同一套量法)。 */
     fun onFlash(playerId: UUID, toolId: String, eye: Location, dir: Vector, feet: Location) {
-        ctx.submit { handleFlash(playerId, toolId, eye, dir, feet) }
+        ctx.submit { handleFlash(playerId, toolId, eye, dir, feet, Double.MAX_VALUE) }
     }
 
-    private fun handleFlash(playerId: UUID, toolId: String, eye: Location, dir: Vector, feet: Location) {
+    /** rc.30:同上，[blockDistance] = 事件執行緒沿視線射線打到方塊的距離(沒打到 = [Double.MAX_VALUE])，遠距光束判視線用。 */
+    fun onFlash(playerId: UUID, toolId: String, eye: Location, dir: Vector, feet: Location, blockDistance: Double) {
+        ctx.submit { handleFlash(playerId, toolId, eye, dir, feet, blockDistance) }
+    }
+
+    private enum class BeamResult { NONE, HIT, BLOCKED }
+
+    /**
+     * rc.30:這次閃光的光束有沒有照到這盞燈。[BeamResult.BLOCKED] = 瞄準了、但方塊([blockDistance])或 boss 本體擋住視線。
+     * 燈的瞄準點是 marker 上方 2.5 格(燈在 marker 上方 2 格)。
+     */
+    private fun beamResult(rt: LanternRt, eye: Location, direction: Vector, blockDistance: Double): BeamResult {
+        val beam = rt.spec.beam ?: return BeamResult.NONE
+        if (!stageActive(rt.spec.stage) || eye.world != rt.loc.world) return BeamResult.NONE
+        val ax = rt.loc.x
+        val ay = rt.loc.y + 2.5
+        val az = rt.loc.z
+        if (!beamAimed(eye.x, eye.y, eye.z, direction.x, direction.y, direction.z, ax, ay, az, beam.range, beam.angle)) return BeamResult.NONE
+        if (!beam.requiresSight) return BeamResult.HIT
+        val dist = Math.sqrt((ax - eye.x) * (ax - eye.x) + (ay - eye.y) * (ay - eye.y) + (az - eye.z) * (az - eye.z))
+        if (blockDistance < dist - 1.0) return BeamResult.BLOCKED
+        val p = bossPos
+        if (p != null && bodyBlocksSegment(eye.x, eye.y, eye.z, ax, ay, az, p.x, p.y, p.z, beam.bossBlockRadius, BOSS_BODY_HEIGHT)) return BeamResult.BLOCKED
+        return BeamResult.HIT
+    }
+
+    private fun handleFlash(playerId: UUID, toolId: String, eye: Location, dir: Vector, feet: Location, blockDistance: Double) {
         if (closed) return
         val tool = effectiveTools[toolId] ?: return
         if (playerId !in members()) return
@@ -1848,8 +1909,8 @@ class SessionRun(
         // rc.28 free-on-burning-lamp:閃光碰到正在燒的燈、又沒點到任何未點燃的燈 = 「繼續照住燈」，不吃燈火(實玩 31 次閃光有 20 次沒點到燈，
         // 多半是對燒著或太遠的燈連按)；這次閃光仍照常判定敵人
         val keepLighting = tool.freeOnBurningLamp &&
-            lanterns.values.any { stageActive(it.spec.stage) && it.machine.state == LanternMachine.State.BURNING && flashTouches(it, eye, direction, half, tool, feet) } &&
-            lanterns.values.none { stageActive(it.spec.stage) && it.machine.state == LanternMachine.State.UNLIT && flashTouches(it, eye, direction, half, tool, feet) }
+            lanterns.values.any { stageActive(it.spec.stage) && it.machine.state == LanternMachine.State.BURNING && flashTouches(it, eye, direction, half, tool, feet, blockDistance) } &&
+            lanterns.values.none { stageActive(it.spec.stage) && it.machine.state == LanternMachine.State.UNLIT && flashTouches(it, eye, direction, half, tool, feet, blockDistance) }
         if (current <= 0 && !keepLighting) {
             log("flash-empty", "player=${nameOf(playerId)} tool=${tool.id}")
             cues(tool.emptyCues, eye, null, listOfNotNull(player))
@@ -1875,19 +1936,42 @@ class SessionRun(
             // 點燃半徑量「腳底到燈籠 marker」:跟守燈範圍(membersWithin)、世界標示亮圈(成員快照)是同一套量法,蹲下也不變
             val close: Double = if (feet.world == base.world) feet.distance(base) else Double.MAX_VALUE
             val radiusHit = rt.spec.igniteRadius > 0.0 && close <= rt.spec.igniteRadius
-            if ((coneHit || radiusHit) && igniteLantern(rt)) {
+            val beamHit = beamResult(rt, eye, direction, blockDistance) == BeamResult.HIT
+            if ((coneHit || radiusHit || beamHit) && igniteLantern(rt)) {
                 lanternHits++
-            } else if (!coneHit && !radiusHit) {
+            } else if (!coneHit && !radiusHit && !beamHit) {
                 // 實測證據:沒點到時記下距離與視線偏角,下次調射程與判定半徑有數據可看
                 val to = center.toVector().subtract(eye.toVector())
                 val angle = if (to.lengthSquared() < 1.0E-6) 0.0 else Math.toDegrees(Math.acos(to.normalize().dot(direction).coerceIn(-1.0, 1.0)))
                 misses += String.format(java.util.Locale.ROOT, "%s:dist=%.1f,angle=%.0f", rt.spec.id, if (close == Double.MAX_VALUE) -1.0 else close, angle)
             }
         }
+        // rc.30 遠距光束:照到正在燒的燈就續著燒(離守燈範圍遠的才算光束)；被方塊或 boss 擋住給擋住回饋
+        for (rt in lanterns.values) {
+            val beam = rt.spec.beam ?: continue
+            if (!stageActive(rt.spec.stage) || rt.machine.state != LanternMachine.State.BURNING) continue
+            when (beamResult(rt, eye, direction, blockDistance)) {
+                BeamResult.HIT -> {
+                    val close: Double = if (feet.world == rt.loc.world) feet.distance(rt.loc) else Double.MAX_VALUE
+                    if (close > rt.spec.stayRadius) {
+                        val fresh = (rt.beamers[playerId] ?: 0L) <= now
+                        rt.beamers[playerId] = now + (beam.sustainSeconds * 20).toLong()
+                        if (fresh) log("beam-hold", "lamp=${rt.spec.id} player=${nameOf(playerId)}")
+                    }
+                    cues(beam.hitCues, rt.loc.clone().add(0.0, 2.0, 0.0), null, listOfNotNull(player))
+                    markProgress()
+                }
+                BeamResult.BLOCKED -> {
+                    log("beam-blocked", "lamp=${rt.spec.id} player=${nameOf(playerId)}")
+                    cues(beam.blockedCues, rt.loc.clone().add(0.0, 2.0, 0.0), null, listOfNotNull(player))
+                }
+                BeamResult.NONE -> {}
+            }
+        }
         // boss 熄燈招式:閃光碰到被點名的場邊燈 = 保住
         boss?.snuffTarget()?.let { lampId ->
             val lamp = lanterns[lampId]
-            if (lamp != null && flashTouches(lamp, eye, direction, half, tool, feet)) boss?.onSnuffFlash(playerId)
+            if (lamp != null && flashTouches(lamp, eye, direction, half, tool, feet, blockDistance)) boss?.onSnuffFlash(playerId)
         }
         if (lanternHits == 0 && misses.isNotEmpty()) {
             log("flash-miss", "player=${nameOf(playerId)} range=${tool.range} cone=${tool.coneAngle} ${misses.joinToString(" ")}")
@@ -2007,6 +2091,7 @@ class SessionRun(
         val stage = currentStage ?: return
         if (stage.objective.isEmpty()) return
         val key = pickObjective(stage.objective, ::conditionMet)?.textKey ?: stage.objectiveDoneKey
+        if (now < objectiveHoldUntil) return
         val every = stage.objectiveEverySeconds
         val due = key != objectiveKey || objectiveDirty || (every > 0.0 && now >= objectiveNextAt)
         if (!due) return
@@ -2271,7 +2356,8 @@ class SessionRun(
     }
 
     /** 熄燈招式:閃光碰得到被點名的場邊燈就保住(與點燃共用同一套錐形／點燃半徑量法)。 */
-    private fun flashTouches(rt: LanternRt, eye: Location, direction: Vector, half: Double, tool: ToolSpec, feet: Location): Boolean {
+    private fun flashTouches(rt: LanternRt, eye: Location, direction: Vector, half: Double, tool: ToolSpec, feet: Location, blockDistance: Double): Boolean {
+        if (beamResult(rt, eye, direction, blockDistance) == BeamResult.HIT) return true
         val base = rt.loc
         val cone = inCone(eye, direction, base.clone().add(0.0, 0.5, 0.0), half, tool.range) ||
             inCone(eye, direction, base.clone().add(0.0, 2.5, 0.0), half, tool.range)
@@ -2367,8 +2453,9 @@ class SessionRun(
             bossPos = at
             val actorSpec = ActorSpec().apply {
                 entityType = bossSpec.baseEntity
-                ai = false
-                collidable = true
+                // VELOCITY 模式要開著 AI(沒有 AI 的 Mob 不會被速度推動)，目標與移動目標在生成後全部拿掉；也不讓玩家把她擠走
+                ai = bossSpec.moveMode == BossMoveMode.VELOCITY
+                collidable = bossSpec.moveMode != BossMoveMode.VELOCITY
                 invisible = bossSpec.model != null
                 removeWhenFarAway = false
                 immovable = false
@@ -2395,7 +2482,25 @@ class SessionRun(
                 val dz = to.z - prev.z
                 if (Math.abs(dx) > 1.0E-6 || Math.abs(dz) > 1.0E-6) bossYaw = Math.toDegrees(Math.atan2(-dx, dz)).toFloat()
             }
-            ctx.actors().teleport(id, Location(world, to.x, to.y, to.z, bossYaw, 0f))
+            if (bossSpec.moveMode != BossMoveMode.VELOCITY) {
+                ctx.actors().teleport(id, Location(world, to.x, to.y, to.z, bossYaw, 0f))
+                return
+            }
+            // rc.30 速度驅動:不經傳送，原版移動推著走(BetterModel 不會因為載體移除再加入而重送整個模型)；差距太大(落地、全滅重來)才傳送
+            val yaw = bossYaw
+            ctx.actors().runOnEntity(id) { e ->
+                val here = e.location
+                val dx = to.x - here.x
+                val dy = to.y - here.y
+                val dz = to.z - here.z
+                if (Math.sqrt(dx * dx + dy * dy + dz * dz) > BOSS_VELOCITY_MAX_STEP) {
+                    e.teleportAsync(Location(world, to.x, to.y, to.z, yaw, 0f))
+                } else {
+                    val v = velocityToward(here.x, here.y, here.z, to.x, to.y, to.z, e.isOnGround)
+                    e.velocity = Vector(v[0], v[1], v[2])
+                    e.setRotation(yaw, 0f)
+                }
+            }
         }
 
         override fun faceBoss(toward: Pt) {
@@ -2489,6 +2594,31 @@ class SessionRun(
 
         override fun lampPos(lamp: String): Pt? = lanterns[lamp]?.loc?.let { Pt(it.x, it.y, it.z) }
 
+        override fun lampFraction(lamp: String): Double = lanterns[lamp]?.machine?.fraction ?: 0.0
+
+        override fun lampBurning(lamp: String): Boolean = lanterns[lamp]?.machine?.state == LanternMachine.State.BURNING
+
+        override fun lampLighters(): Set<UUID> {
+            val out = HashSet<UUID>()
+            for (lamp in bossSpec.lampIds) {
+                val rt = lanterns[lamp] ?: continue
+                if (rt.machine.state != LanternMachine.State.BURNING) continue
+                rt.beamers.filter { it.value > now }.keys.forEach { out += it }
+                for ((id, pos) in lastSnap) if (distance(pos, rt.loc) <= rt.spec.stayRadius) out += id
+            }
+            return out.filter { !isDowned(it) }.toSet()
+        }
+
+        override fun boostLamp(lamp: String, fraction: Double): Boolean {
+            val rt = lanterns[lamp] ?: return false
+            if (rt.machine.state == LanternMachine.State.LIT) return false
+            if (rt.machine.state == LanternMachine.State.UNLIT && !igniteLantern(rt)) return false
+            if (rt.machine.boost(rt.spec.burnSeconds * 20.0 * fraction) == LanternMachine.Outcome.COMPLETED) lanternLit(rt)
+            return true
+        }
+
+        override fun actionBarText(player: UUID, key: String, params: Map<String, String>) { ctx.actionBar(player, key, params) }
+
         override fun resetLamp(lamp: String) {
             val rt = lanterns[lamp] ?: return
             rt.machine.reset()
@@ -2496,6 +2626,7 @@ class SessionRun(
             rt.people = -1
             rt.probing = false
             rt.milestonesFired = 0
+            rt.beamers.clear()
             rt.drainRate = 0.0; rt.drainers = 0; rt.contestedSince = -1
             clearLanternHints(lamp)
             rt.spec.states[ObjectStates.LANTERN_UNLIT]?.let { applyBlocks(marker(rt.spec.markerId), it.blocks) }
@@ -2545,6 +2676,15 @@ class SessionRun(
         if (error != null || ctx.actors().entityIdOf(actorId) == null) {
             warn("boss ${bossSpec.id} 載體生成失敗${error?.let { ":${it.message}" } ?: ""}")
             return
+        }
+        if (bossSpec.moveMode == BossMoveMode.VELOCITY) {
+            ctx.actors().runOnEntity(actorId) { e ->
+                try {
+                    (e as? Mob)?.let { Bukkit.getMobGoals().removeAllGoals(it) }
+                } catch (t: Throwable) {
+                    warn("boss ${bossSpec.id} 拿掉原版 AI 目標失敗:${t.javaClass.simpleName}: ${t.message}")
+                }
+            }
         }
         val modelId = bossSpec.model ?: return
         // alwaysVisible:boss 的大模型不吃 BetterModel 的 sight-trace 剔除
@@ -2613,6 +2753,10 @@ class SessionRun(
         const val MAX_SCAN_ENEMIES = 24
         /** boss 載體的血量上限:傷害一律在事件取消，只是讓它不被一般手段（指令、環境）秒掉。 */
         const val BOSS_CARRIER_HEALTH = 1024.0
+        /** rc.30:boss 本體與光環擋光的圓柱高度(格)。 */
+        const val BOSS_BODY_HEIGHT = 4.5
+        /** rc.30:速度驅動移動一步最遠走多少格，超過就改傳送。 */
+        const val BOSS_VELOCITY_MAX_STEP = 6.0
         const val CONTEST_HEIGHT = 3.0
         const val DRAIN_STALE_TICKS = 60L
         const val HINT_SLACK = 1.0

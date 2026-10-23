@@ -1023,6 +1023,20 @@ interface DialogPort {
 - 目標列的動作列在局結束、成員離場、換到沒有目標的 stage 時清空（`ObjectiveHudTracker`）。
 - 新 log：`boss-heal reason=start｜restart｜kneel players=<n>`。
 
+### rc.30：每人打散統計、敵人 `dispersed-tip`
+
+- 選填資料欄位（預設零影響；schema 見 [CONTENT-DATA.md](CONTENT-DATA.md)）：enemies.yml 任何敵人可寫 `dispersed-tip: { text, every, count, hold-seconds }`。
+- 統計（所有資料驅動副本自動記錄，不需設定）：玩家閃光後打散、或被 powered 的成員碰散一隻，`InstanceState.stats` 的 `dispersed`（整局合計）與 `dispersed.<玩家 UUID>`（該玩家）各 +1；光圈清場、stage 清場、Boss 召喚物收場（killer 為 null）不算。同一次結算所有成員共用同一份 stats 快照，所以消費端用 `CompletionResult.statFor("dispersed")`：先找 `dispersed.<自己的 UUID>`，沒有才退回整局值。型別 `RunStats`（`DISPERSED`、`playerKey`、`record`）。
+- 型別：`DispersedTip`（`due(total)`）、`EnemySpec.dispersedTip`（尾端預設 null）。
+- 新 log：`dispersed-tip player= total= text=`。
+
+### rc.30：Boss 戰深化（遠距光束、跪下連擊、招式點燈、熄燈搶燈）
+
+- 選填資料欄位（預設零影響；schema 見 [CONTENT-DATA.md](CONTENT-DATA.md)）：lantern `beam`、`kneel.combo`、ring／circle `lamp-boost`／`lamp-radius`／`lamp-boost-cues`、circle `lighting-bias`、snuff `burning-min-fraction`／`burning-weight`／`glide-stop-distance`／`glide-speed`。
+- 型別：`LanternBeam`、`LanternSpec.beam`、`KneelCombo`、`BossKneelSpec.combo`、`MoveSpec.lampBoost`／`lampRadius`／`lampBoostCues`／`lightingBias`、`MoveShape.Snuff` 四個新欄位；`LanternMachine.boost`；頂層函式 `beamAimed`、`bodyBlocksSegment`（Machines.kt）、`comboMultiplier`（BossLogic.kt）。
+- `BossHost` 新增有預設實作的 `lampFraction`／`lampBurning`／`lampLighters`／`boostLamp`／`actionBarText`；`SessionRun.onFlash` 新增多一個 `blockDistance` 的多載（`DataContentListener` 在玩家自己的 region 打方塊射線帶進來）。
+- 新 log：`beam-hold`、`beam-blocked`、`boss-combo`、`boss-lamp-boost`。
+
 ### rc.28：stage 道具覆寫、free-on-burning-lamp、heal.tools、人偶出生即凍結、boss 模型補送
 
 - 選填資料欄位（預設零影響；schema 見 [CONTENT-DATA.md](CONTENT-DATA.md)）：stage `tool-overrides`、tool `free-on-burning-lamp`、boss `heal.tools`、frozen-when-watched `harmless-while-frozen`、on-arrive `dialog-delay-seconds`。

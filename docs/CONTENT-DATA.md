@@ -1,4 +1,4 @@
-# 資料驅動副本內容（1.0.0-rc.28）
+# 資料驅動副本內容（1.0.0-rc.30）
 
 內容插件只給 **一個資料夾 + texts**，行為由框架內建的 `DataDrivenBehavior` 依資料執行，內容端不寫 Kotlin。另做一座副本只換設定檔與資產。判準：加第 N+1 盞燈籠、第 N+1 種幽靈、第 N+1 段提示，只改一筆 YAML。
 
@@ -106,6 +106,36 @@ stage 一開始（上一段完成、門開）玩家常常還在上一區，這�
 ```
 
 沒寫的欄位沿用 tool.yml，至少要覆寫一個欄位。進 stage 時重算生效數值並重開回補計時，log `tool-override stage= tool= max= passive= zone= refill=`。tool.yml 另有 `free-on-burning-lamp: true`（rc.28）：閃光碰到「正在燒」的燈籠、又沒點到未點燃的燈籠時不扣格（log `flash-keep`），敵人照常判定。boss `heal` 另有 `tools: true`：heal 觸發時（on-start／on-kneel／全滅重來）把在線成員的道具補滿（log `boss-refill-tools`）。
+
+### Boss 戰深化（rc.30，全部選填，預設零影響）
+
+**場邊燈遠距光束 `beam`**（objects.yml 的 lantern）：提燈不用跑到燈旁，從遠處瞄準也能點燃並持續照住。
+
+```yaml
+    beam: { range: 18, angle: 24, sustain-seconds: 1.2, speed: 0.7, requires-sight: true, hit-cues: [beam_hit], blocked-cues: [beam_blocked], boss-block-radius: 1.8 }
+```
+
+- 閃光的視線與「燈上方 2.5 格」的夾角在 `angle`（全角）內、距離 <= `range` 就照到：沒點燃的先點燃（照常扣一格）；正在燒的續 `sustain-seconds` 秒（按住右鍵每 0.7 秒一次，搭 tool 的 `free-on-burning-lamp` 就不扣格），續著的期間每位光束玩家各讓燒燈速度加 `speed` 倍（離守燈範圍 `stay-radius` 內的人照舊走近距，不重複算）。log `beam-hold`。
+- `requires-sight: true`（預設）：玩家自己的 region 沿視線打方塊射線（最遠 40 格，跨 region 讀取失敗就當沒擋住），方塊擋在燈前，或 boss 本體與光環（燈的 `boss-block-radius` 圓柱，高 4.5 格，0 = 擋不住）在眼睛與燈之間，就照不到並播 `blocked-cues` 給照燈的人（log `beam-blocked`）。每次照到播 `hit-cues` 給照燈的人。
+- 熄燈招式點名的燈，光束也算「閃光碰到」（可以遠距保住）。
+
+**跪下連擊 `kneel.combo`**（bosses.yml）：
+
+```yaml
+    kneel: { seconds: 10, cues: [...], combo: { step: 0.15, cap: 2.0, window-seconds: 1.6, hit-cues: [kneel_hit], text: k.combo, countdown-seconds: 3, countdown-cues: [kneel_tick], countdown-text: k.count } }
+```
+
+跪下窗口內任何人的有效近戰，距上一下 <= `window-seconds` 秒連擊 +1（否則從 1 重算）；傷害倍率 = `min(cap, 1 + step × (連擊 − 1))`。每下命中播 `hit-cues`，並給攻擊者 ActionBar `text`（參數 `{combo}` `{mult}`）；窗口最後 `countdown-seconds` 秒每秒播 `countdown-cues` 並對全隊 ActionBar `countdown-text`（`{seconds}`）。log `boss-combo n= mult= player=`。起身時連擊歸零。
+
+**招式打到場邊燈 `lamp-boost`**（ring／circle 招式）：
+
+```yaml
+      strike: { shape: circle, radius: 2.5, max-targets: 2, lamp-boost: 1.0, lamp-radius: 1.5, lamp-boost-cues: [bolt], lighting-bias: 0.7, ... }
+```
+
+落雷圈（半徑 + `lamp-radius`）或環形波掃過場邊燈，就把那盞燈燒進度推進 `lamp-boost`（1.0 = 直接點亮，沒點燃的先點燃；亮著的燈不動），每盞每招一次，播 `lamp-boost-cues`、log `boss-lamp-boost lamp= by=circle|ring`。`lighting-bias`（只有 circle）：選目標時以這個機率先挑「正在照燈的人」（光束續著的，或站在燒著的燈守燈範圍內），沒中就先挑離她最近的人（一人引開、一人點燈）；只在 `max-targets` > 0 時有意義，0 = 同舊版隨機。
+
+**熄燈搶燈 snuff**：`burning-min-fraction`（0..1）寫了就也會點名「燒到這個比例以上、還沒亮」的燈，吹熄 = 重置該燈燒燈進度，抽中權重是 `burning-weight`（亮著的燈 1）；`glide-stop-distance` > 0 時預警期間她滑向那盞燈，停在離燈這麼遠（`glide-speed` 格/秒）。仍可被閃光（含光束）保住。
 
 ### 最後一段結算 resolve（rc.22，選填，預設關）
 
@@ -288,6 +318,16 @@ enemies:
 啃燈語意（`LanternMachine.drain`）：只在 `burning` 生效（暫停中也扣，離開燈籠不能躲掉）；進度可退、**夾在 0**、不退回 `unlit`、不觸發完成，所以只有「站著撐住」而沒有打散她們就完成不了，但沒有失敗或倒數；燈亮後不再扣；milestone 只觸發一次（退回再升不重播）。**僵直中的敵人不啃、不碰人**——閃光把她們照住就是解法。啃燈速率每輪掃描發布，超過 60 tick 沒更新視為 0。
 
 掃描：每 `scan-ticks` 一輪（單輪最多 24 隻，超過時跨輪輪替（round-robin，依 actorId 排序接著上一輪掃，每隻都會輪到；boss 本身不佔名額）、在 session 的 anchor region 執行緒用 `locationOf` 與 `memberSnapshots` 的結果一次處理完），全程走既有的 EntityScheduler／PlayerOp，沒有新增跨插件介面方法；來不及回來的一輪不會疊加，也不會覆蓋較新的結果。
+
+### 敵人打散預告 dispersed-tip（rc.30，選填）
+
+任何敵人都可以寫（不是規則標籤，不需要 `rules` 配合）。這隻被玩家打散（閃光後打散、被 powered 的成員碰散；光圈與 stage 清場不算）時，**只對打散的那位玩家**累計：他累計打散第 `every`、`2×every`… 隻時，送一則 ActionBar 短句。`text` 是 texts 的 key（載入時驗證存在），`{count}` 填 `count`。用途是預告結算才發的獎勵（例如每 3 隻打散結算多 1 個材料），不洗聊天室。
+
+```yaml
+    dispersed-tip: { text: mist-patrol.wick-tip, every: 3, count: 1, hold-seconds: 2 }
+```
+
+`every` 1..64（預設 1）、`count` 1..64（預設 1）、`hold-seconds` 0..10（預設 2）：送出後這段時間內不重畫目標列（同一格 ActionBar 最新一則贏，不然下一個 tick 就被目標列蓋掉）。短句在補燈火的工具 HUD **之後**送。累計數是這位玩家全部敵人的總數，與 `dispersed.<UUID>` 統計同一個數字（見 API.md rc.30）。
 
 ### 敵人規則 frozen-when-watched／chases-players／flees-when-powered（rc.22，選填）
 

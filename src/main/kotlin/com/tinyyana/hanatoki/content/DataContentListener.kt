@@ -42,7 +42,15 @@ class DataContentListener(private val core: HanaTokiCore, private val runtime: D
         val player = event.player
         val run = runtime.runOfPlayer(player.uniqueId) ?: return
         // 持有者快照:事件當下的眼睛位置與視線方向(玩家自己的 region 執行緒上讀)。
-        run.onFlash(player.uniqueId, toolId, player.eyeLocation.clone(), player.eyeLocation.direction.clone(), player.location.clone())
+        val eye = player.eyeLocation.clone()
+        val direction = eye.direction.clone()
+        // rc.30 遠距光束判視線:在玩家自己的 region 沿視線打方塊射線(最遠 40 格)；跨 region 讀取失敗就當沒擋住(偏向玩家)
+        val blockDistance = try {
+            player.world.rayTraceBlocks(eye, direction, BEAM_RAY_RANGE, org.bukkit.FluidCollisionMode.NEVER, true)?.hitPosition?.distance(eye.toVector()) ?: Double.MAX_VALUE
+        } catch (t: Throwable) {
+            Double.MAX_VALUE
+        }
+        run.onFlash(player.uniqueId, toolId, eye, direction, player.location.clone(), blockDistance)
     }
 
     /**
@@ -150,5 +158,9 @@ class DataContentListener(private val core: HanaTokiCore, private val runtime: D
             else -> null
         } ?: return
         run.onEnemyAttacked(enemy, player.uniqueId, event.entity.location.clone())
+    }
+
+    private companion object {
+        const val BEAM_RAY_RANGE = 40.0
     }
 }

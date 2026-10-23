@@ -13,7 +13,13 @@ data class CompletionResult(
     val resultKey: String,
     val durationMs: Long,
     val stats: Map<String, Long> = emptyMap(),
-)
+) {
+    /**
+     * 這位玩家自己的統計值:先找逐人鍵 [RunStats.playerKey](內容層為每位成員各記一份),沒有才退回整局共用的 [stat]。
+     * 同一次結算所有成員共用同一份 [stats] 快照,所以「每人打散幾隻」這種逐人數字只能靠逐人鍵區分。
+     */
+    fun statFor(stat: String): Long = stats[RunStats.playerKey(stat, playerId)] ?: stats[stat] ?: 0L
+}
 
 /**
  * ARCH §4:integration 註冊給 HanaToki 呼叫,fire-and-forget(無回傳值)——I/O 由實作端自行

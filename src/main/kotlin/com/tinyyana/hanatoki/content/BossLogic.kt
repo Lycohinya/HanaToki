@@ -17,6 +17,21 @@ data class Pt(val x: Double, val y: Double, val z: Double) {
 
 // ---- 幾何 ----
 
+/**
+ * rc.30 速度驅動移動:載體現在在 ([fromX], [fromY], [fromZ])，每 2 tick 重設一次速度要走到 ([toX], [toY], [toZ])。
+ * 原版每 tick 先位移再乘摩擦(水平:站在地上 0.546、空中 0.91；垂直 0.98)，所以兩 tick 共走 v × (1 + 摩擦)，v = 差距 ÷ (1 + 摩擦)。
+ * 回傳 [vx, vy, vz]（格/tick）。
+ */
+fun velocityToward(fromX: Double, fromY: Double, fromZ: Double, toX: Double, toY: Double, toZ: Double, onGround: Boolean): DoubleArray {
+    val horizontal = if (onGround) 0.546 else 0.91
+    val kh = 1.0 / (1.0 + horizontal)
+    val kv = 1.0 / (1.0 + 0.98)
+    return doubleArrayOf((toX - fromX) * kh, (toY - fromY) * kv, (toZ - fromZ) * kh)
+}
+
+/** rc.30 跪下連擊倍率:連擊數 [combo]（從 1 起）→ min([cap], 1 + [step] × (combo − 1))。 */
+fun comboMultiplier(combo: Int, step: Double, cap: Double): Double = Math.min(cap, 1.0 + step * Math.max(0, combo - 1))
+
 /** 方位角(度,0..360):atan2(dz, dx)。 */
 fun angleDegrees(dx: Double, dz: Double): Double {
     val a = Math.toDegrees(Math.atan2(dz, dx))
