@@ -121,6 +121,9 @@ class BossRunTest {
         override fun cueFor(cueId: String, at: Pt, player: UUID) { cuesFor += cueId to player }
         override fun sampleCue(cueId: String, at: Pt) { sampled += Triple(clock, cueId, at) }
         override fun healMembers(ids: List<UUID>) { healed += ids }
+        var auraOn = 0
+        var auraOff = 0
+        override fun followBossCue(cueId: String): Runnable { auraOn++; return Runnable { auraOff++ } }
         override fun loopCue(cueId: String, at: Pt): Runnable { cuesPlayed += "loop:$cueId"; return Runnable { cuesPlayed += "cancel:$cueId" } }
         override fun followCue(cueId: String, player: UUID, at: Pt): Runnable { cuesPlayed += "follow:$cueId"; return Runnable { cuesPlayed += "cancel:$cueId" } }
         override fun music(cueId: String) { musics += cueId }
@@ -968,6 +971,62 @@ class BossRunTest {
         assertEquals(BossState.IDLE, r2.state)
         assertEquals(Pt(0.0, 0.0, 0.0), h2.bossMoves.first())
         assertEquals(1, h2.logged("boss-intro-done").size)
+    }
+
+    @Test
+    fun `rc26 出場等對話序列：held 時停留與開打倒數都不走，releaseIntro 之後才開始計`() {
+        val spec = introSpec(hold = 1.0, glide = 1.0).let { it.copy(intro = it.intro!!.copy(awaitArriveDialogs = true)) }
+        val (host, run) = setup(spec = spec)
+        host.markers["nun_roof_main"] = Pt(0.0, 12.0, -4.0)
+        run.start(held = true)
+        // 對話序列播很久：一直停在屋頂，沒有滑行、沒有開打
+        host.advance(600)
+        assertEquals(BossState.WAITING, run.state)
+        assertTrue(host.bossMoves.isEmpty(), "對話期間不下來")
+        assertTrue(host.logged("boss-phase").isEmpty())
+        // 對話播完：從現在起算停留 1 秒，滑行 1 秒，start-delay 4 秒才開打
+        run.releaseIntro()
+        assertEquals(1, host.logs.count { it.startsWith("boss-intro-release") })
+        host.advance(30)
+        assertTrue(host.bossMoves.isNotEmpty(), "停留結束開始滑")
+        assertEquals(BossState.WAITING, run.state)
+        host.advance(40)
+        assertEquals(BossState.WAITING, run.state, "start-delay 還沒到")
+        host.advance(20)
+        assertEquals(BossState.IDLE, run.state)
+        assertEquals(1, host.logged("boss-intro-done").size)
+        // 沒在等的出場再叫 releaseIntro 什麼都不做
+        run.releaseIntro()
+        assertEquals(1, host.logs.count { it.startsWith("boss-intro-release") })
+    }
+
+    @Test
+    fun `rc26 光環常駐光效：亮著時播，碎了取消，起身重播，結束取消；沒設定就不播`() {
+        val spec = baseSpec.copy(shield = baseSpec.shield.copy(auraCue = "halo_aura"))
+        val (host, run) = setup(spec = spec)
+        begin(host, run)
+        assertEquals(1, host.auraOn)
+        assertEquals(0, host.auraOff)
+        kneel(host, run)
+        assertEquals(1, host.auraOff, "光環碎了取消")
+        assertTrue(host.advanceUntil(1200) { run.state == BossState.IDLE })
+        assertEquals(2, host.auraOn, "起身光環恢復重播")
+        run.shutdown("test", false)
+        assertEquals(2, host.auraOff)
+        val (h2, r2) = setup()
+        begin(h2, r2)
+        assertEquals(0, h2.auraOn)
+    }
+
+    @Test
+    fun `rc26 held 沒有被 release 的對照：不 held 時同舊版`() {
+        val (host, run) = setup(spec = introSpec(hold = 1.0, glide = 1.0))
+        host.markers["nun_roof_main"] = Pt(0.0, 12.0, -4.0)
+        run.start()
+        run.releaseIntro()
+        host.advance(100)
+        assertEquals(BossState.IDLE, run.state)
+        assertEquals(0, host.logs.count { it.startsWith("boss-intro-release") })
     }
 
     @Test

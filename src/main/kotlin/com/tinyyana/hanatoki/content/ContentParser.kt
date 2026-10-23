@@ -19,9 +19,10 @@ object ContentFileNames {
     const val TOOL = "tool.yml"
     const val HINTS = "hints.yml"
     const val BOSSES = "bosses.yml"
+    const val CHAT = "chat.yml"
 
     val REQUIRED = listOf(STAGES, SCENE)
-    val OPTIONAL = listOf(OBJECTS, ENEMIES, ENCOUNTERS, TOOL, HINTS, BOSSES)
+    val OPTIONAL = listOf(OBJECTS, ENEMIES, ENCOUNTERS, TOOL, HINTS, BOSSES, CHAT)
     val ALL = REQUIRED + OPTIONAL
 }
 
@@ -72,10 +73,11 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         val tools = parseTools(optional(ContentFileNames.TOOL, "tools"))
         val hints = parseHints(optional(ContentFileNames.HINTS, "hints"))
         val bosses = parseBosses(optional(ContentFileNames.BOSSES, "bosses"))
+        val chat = parseChat(optional(ContentFileNames.CHAT, "chat"))
         for (name in files.keys) if (name !in ContentFileNames.ALL) errors += "$name: 未知的資料檔(只認 ${ContentFileNames.ALL.joinToString()})"
 
         if (errors.isNotEmpty()) throw ContentDataException(errors.toList())
-        return ContentSpec(dungeon!!, namespace!!, stages, scene!!, objects, enemies, encounters, tools, hints, bosses)
+        return ContentSpec(dungeon!!, namespace!!, stages, scene!!, objects, enemies, encounters, tools, hints, bosses, chat)
     }
 
     /** 可選檔案:回傳 (檔名, 最上層 key 底下的 Map)。檔案不存在 = 空。 */
@@ -278,9 +280,12 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         val block = root.child("stages", required = true) ?: return emptyList()
         val out = ArrayList<StageSpec>()
         for ((id, node) in block.entries()) {
-            node.only(setOf("on-start", "complete", "on-complete", "next", "objective", "objective-done", "objective-every-seconds", "clears-enemies", "resolve"))
+            node.only(setOf("on-start", "complete", "on-complete", "next", "objective", "objective-done", "objective-every-seconds", "clears-enemies", "resolve", "arrive", "on-arrive"))
             val onStart = parseStageEffects(node.child("on-start"))
             val onComplete = parseStageEffects(node.child("on-complete"), allowOpens = true)
+            val arrive = parseArrive(node)
+            val onArrive = parseStageEffects(node.child("on-arrive"), allowDialogs = true)
+            if (arrive == null && node.map["on-arrive"] != null) node.err("on-arrive", "on-arrive 必須和 arrive 並用(沒有抵達區就不會觸發)")
             val complete = node.mapList("complete").mapNotNull { parseCondition(it) }
             val next = node.id("next")
             val objective = parseObjective(node)
@@ -295,10 +300,31 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                 if (next != null) node.err("resolve", "只有最後一段(沒有 next)才能結算;這個 stage 有 next=$next")
                 if (complete.isEmpty()) node.err("resolve", "有 resolve 的 stage 必須寫 complete(沒有完成條件就永遠不會結算)")
             }
-            out += StageSpec(id, onStart, complete, onComplete, next, objective, done, every, clears, resolve)
+            out += StageSpec(id, onStart, complete, onComplete, next, objective, done, every, clears, resolve, arrive, onArrive)
         }
         if (out.isEmpty() && block.map.isEmpty()) block.err(null, "至少要有一個 stage")
         return out
+    }
+
+    /**
+     * `arrive: { marker, radius, offset: [dx, dy, dz] }`(rc.26,選填):stage 開始後等任一成員進到「marker 加世界方塊偏移」為球心、
+     * radius 為半徑的球內,才算抵達。marker 可以是任何種類(不限 trigger);offset 預設 [0, 0, 0],每個絕對值 <= 64。
+     */
+    private fun parseArrive(stage: Node): ArriveSpec? {
+        if (stage.map["arrive"] == null) return null
+        val n = stage.child("arrive") ?: return null
+        n.only(setOf("marker", "radius", "offset"))
+        val marker = n.id("marker", required = true)
+        val radius = n.num("radius", min = 0.0, max = 64.0, exclusiveMin = true, required = true)
+        val offset = ArrayList<Double>()
+        if (n.map["offset"] != null) {
+            val raw = n.list("offset")
+            if (raw.size != 3 || raw.any { it !is Number || it.toDouble().isNaN() || Math.abs(it.toDouble()) > 64.0 }) {
+                n.err("offset", "必須是三個數字 [dx, dy, dz],每個絕對值 <= 64")
+            } else raw.forEach { offset += (it as Number).toDouble() }
+        }
+        if (offset.isEmpty()) { offset += 0.0; offset += 0.0; offset += 0.0 }
+        return if (marker != null && radius != null) ArriveSpec(marker, radius, offset) else null
     }
 
     /** `objective: key`(單一步驟)或 `objective: [{ text: key, until: {條件} }, …]`(依序,until 達成才換下一步)。 */
@@ -345,10 +371,15 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
     }
 
     /** [allowOpens]:只有 stage 的 `on-complete` 可以寫 `opens`(stage 完成時打開的 gate 物件);on-start 與 boss 階段不行。 */
-    private fun parseStageEffects(node: Node?, allowOpens: Boolean = false): StageEffects {
+    private fun parseStageEffects(node: Node?, allowOpens: Boolean = false, allowDialogs: Boolean = false): StageEffects {
         if (node == null) return StageEffects()
-        node.only(if (allowOpens) setOf("cues", "music", "dialog", "title", "subtitle", "opens") else setOf("cues", "music", "dialog", "title", "subtitle"))
+        val allowed = mutableSetOf("cues", "music", "dialog", "title", "subtitle")
+        if (allowOpens) allowed += "opens"
+        if (allowDialogs) { allowed += "dialogs"; allowed += "dialog-timeout-seconds" }
+        node.only(allowed)
         return StageEffects(
+            dialogs = if (allowDialogs) node.idList("dialogs") else emptyList(),
+            dialogTimeoutSeconds = if (allowDialogs) node.num("dialog-timeout-seconds", min = 1.0, max = 600.0) ?: 120.0 else 120.0,
             cues = node.idList("cues"),
             music = node.str("music"),
             dialog = node.id("dialog"),
@@ -386,6 +417,14 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                 node.only(setOf("type"))
                 if (!objective) { node.err("type", "powered 會來去,只能寫在 objective 的 until／while,不能當 stage 的完成條件"); null } else Condition.Powered
             }
+            "arrived" -> {
+                node.only(setOf("type"))
+                if (!objective) { node.err("type", "arrived 是 stage 內的狀態，只能寫在 objective 的 until／while，不能當 stage 的完成條件"); null } else Condition.Arrived
+            }
+            "lantern-burning" -> {
+                node.only(setOf("type"))
+                if (!objective) { node.err("type", "lantern-burning 會來去，只能寫在 objective 的 until／while，不能當 stage 的完成條件"); null } else Condition.LanternBurning
+            }
             "powered-used" -> {
                 node.only(setOf("type"))
                 if (!objective) { node.err("type", "powered-used 是 stage 內累積的旗標，只能寫在 objective 的 until／while，不能當 stage 的完成條件"); null } else Condition.PoweredUsed
@@ -403,7 +442,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                 else boss?.let(Condition::BossKneel)
             }
             else -> {
-                node.err("type", "未知的完成條件「$type」(可用:encounter-cleared、object-state、reach、boss-defeated;objective 另可用 powered、powered-used、enemy-dispersed、boss-kneel)")
+                node.err("type", "未知的完成條件「$type」(可用:encounter-cleared、object-state、reach、boss-defeated;objective 另可用 powered、powered-used、enemy-dispersed、boss-kneel、arrived、lantern-burning)")
                 null
             }
         }
@@ -791,7 +830,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
     private fun parseChase(enemy: Node): ChasesPlayersSpec? {
         val n = enemy.child("chases-players")
         if (n == null) { enemy.err("chases-players", "規則 chases-players 需要這個區塊(可以寫空的 {} 用預設值)"); return null }
-        n.only(setOf("speed", "target", "sight-range", "give-up-range", "repath-ticks", "contact"))
+        n.only(setOf("speed", "target", "sight-range", "give-up-range", "repath-ticks", "contact", "start-delay-seconds"))
         val targetId = n.str("target") ?: ChaseTarget.NEAREST.id
         val target = ChaseTarget.of(targetId)
         if (target == null) n.err("target", "未知的目標策略「$targetId」(可用:${ChaseTarget.entries.joinToString { it.id }})")
@@ -807,6 +846,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
             giveUpRange = giveUp,
             repathTicks = n.int("repath-ticks", min = MIN_SCAN_TICKS, max = MAX_SCAN_TICKS) ?: 10,
             contact = contact,
+            startDelaySeconds = n.num("start-delay-seconds", min = 0.0, max = 60.0) ?: 0.0,
         )
     }
 
@@ -871,6 +911,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         when (val type = node.str("type", required = true)) {
             null -> null
             "stage-start" -> { node.only(setOf("type")); Trigger.StageStart }
+            "stage-arrive" -> { node.only(setOf("type")); Trigger.StageArrive }
             "object-state" -> {
                 node.only(setOf("type", "object", "state"))
                 val obj = node.id("object", required = true)
@@ -881,7 +922,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                 node.only(setOf("type", "encounter"))
                 node.id("encounter", required = true)?.let(Trigger::EncounterCleared)
             }
-            else -> { node.err("type", "未知的觸發「$type」(可用:stage-start、object-state、encounter-cleared)"); null }
+            else -> { node.err("type", "未知的觸發「$type」(可用:stage-start、stage-arrive、object-state、encounter-cleared)"); null }
         }
 
     // ---- tool.yml ----
@@ -940,7 +981,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
     private fun parseHints(block: Node?): Map<String, HintSpec> {
         val out = LinkedHashMap<String, HintSpec>()
         block?.entries()?.forEach { (id, node) ->
-            node.only(setOf("trigger", "stage", "cues", "once", "repeat-seconds"))
+            node.only(setOf("trigger", "stage", "cues", "once", "repeat-seconds", "requires-arrival"))
             val t = node.child("trigger", required = true)
             val trigger: HintTrigger? = if (t == null) null else when (val type = t.str("type", required = true)) {
                 null -> null
@@ -976,8 +1017,23 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                 out[id] = HintSpec(
                     id, trigger, node.id("stage"), cues, node.bool("once") ?: true,
                     node.num("repeat-seconds", min = 0.0, exclusiveMin = true) ?: 30.0,
+                    node.bool("requires-arrival") ?: false,
                 )
             }
+        }
+        return out
+    }
+
+    // ---- chat.yml(rc.26)----
+
+    /** `chat: { <cue id>: { text: <texts key>, delay-seconds: 0 } }`:播那個 cue 時一併送聊天室台詞。 */
+    private fun parseChat(block: Node?): Map<String, ChatLine> {
+        val out = LinkedHashMap<String, ChatLine>()
+        block?.entries()?.forEach { (cueId, node) ->
+            node.only(setOf("text", "delay-seconds"))
+            val text = node.str("text", required = true)
+            val delay = node.num("delay-seconds", min = 0.0, max = 60.0) ?: 0.0
+            if (text != null) out[cueId] = ChatLine(cueId, text, delay)
         }
         return out
     }
@@ -1091,7 +1147,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
      */
     private fun parseIntro(boss: Node, startDelay: Double): BossIntroSpec? {
         val n = boss.child("intro") ?: return null
-        n.only(setOf("marker", "cues", "animation", "animation-seconds", "hold-seconds", "then-glide-to", "glide-seconds"))
+        n.only(setOf("marker", "cues", "animation", "animation-seconds", "hold-seconds", "then-glide-to", "glide-seconds", "await-arrive-dialogs"))
         val marker = n.id("marker", required = true)
         val hold = n.num("hold-seconds", min = 0.0, max = 120.0) ?: 2.0
         val glide = n.num("glide-seconds", min = 0.0, max = 30.0) ?: 2.0
@@ -1099,7 +1155,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         if (marker == null) return null
         return BossIntroSpec(
             marker, n.idList("cues"), n.str("animation"), n.num("animation-seconds", min = 0.2, max = 60.0) ?: 3.0,
-            hold, glide, n.id("then-glide-to"),
+            hold, glide, n.id("then-glide-to"), n.bool("await-arrive-dialogs") ?: false,
         )
     }
 
@@ -1124,10 +1180,10 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
 
     private fun parseShield(boss: Node): BossShieldSpec {
         val n = boss.child("shield")
-        n?.only(setOf("up-cues", "break-cues", "spark-cues", "spark-cooldown-ticks", "halo-bone"))
+        n?.only(setOf("up-cues", "break-cues", "spark-cues", "spark-cooldown-ticks", "halo-bone", "aura-cue"))
         return BossShieldSpec(
             n?.idList("up-cues") ?: emptyList(), n?.idList("break-cues") ?: emptyList(), n?.idList("spark-cues") ?: emptyList(),
-            n?.int("spark-cooldown-ticks", min = 0, max = 400) ?: 10, n?.str("halo-bone"),
+            n?.int("spark-cooldown-ticks", min = 0, max = 400) ?: 10, n?.str("halo-bone"), n?.id("aura-cue"),
         )
     }
 

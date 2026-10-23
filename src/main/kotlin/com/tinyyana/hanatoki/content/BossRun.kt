@@ -42,6 +42,9 @@ interface BossHost {
     /** 持續型 cue,回傳取消用的 Runnable。 */
     fun loopCue(cueId: String, at: Pt): Runnable
 
+    /** rc.26:持續型 cue，跟著 boss 載體移動(光環常駐光效)，回傳取消用的 Runnable。預設不做事。 */
+    fun followBossCue(cueId: String): Runnable = Runnable { }
+
     /** 持續型 cue,跟著玩家(倒下標示)。 */
     fun followCue(cueId: String, player: UUID, at: Pt): Runnable
 
@@ -231,7 +234,25 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
     // ---- 生命週期 ----
 
     /** stage 開始:boss 出場,等 start-delay 後開打。 */
-    fun start() {
+    /** rc.26:出場等 stage 對話序列播完([start] 的 held);[releaseIntro] 才開始計出場停留與開打倒數。 */
+    private var introHeld = false
+
+    /** rc.26:光環常駐光效的取消器(null = 沒在播)。 */
+    private var auraCancel: Runnable? = null
+
+    private fun setAura(on: Boolean) {
+        if (on) {
+            if (auraCancel == null) spec.shield.auraCue?.let { auraCancel = host.followBossCue(it) }
+        } else {
+            auraCancel?.run()
+            auraCancel = null
+        }
+    }
+
+    /**
+     * [held] = true(intro.await-arrive-dialogs 且 stage 有對話序列在播):出場後停在屋頂，停留與開打倒數都等 [releaseIntro] 才開始計。
+     */
+    fun start(held: Boolean = false) {
         val first = host.markerPos(spec.points.first()) ?: Pt(0.0, 0.0, 0.0)
         val intro = spec.intro
         // 有出場演出:先在 intro marker(例如屋頂)現身,停一會兒再落到 then-glide-to;沒有就同舊版直接在第一個點
@@ -243,10 +264,13 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
         if (intro != null) beginIntro(intro, spawnAt)
         state = BossState.WAITING
         startAt = host.now + ticks(spec.startDelaySeconds)
+        introHeld = held && intro != null
+        if (introHeld) { introHoldEnd = HELD_FOREVER; startAt = HELD_FOREVER }
         targetIdx = if (spec.points.size > 1) 1 else 0
         health = BossHealth(scaled(), spec.phases.map { it.at })
         phase = 1
         shieldUp = true
+        setAura(true)
         pumpkinsAvailable = null
         applyPumpkins()
         updateBar()
@@ -271,6 +295,17 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
                 later(ticks(intro.animationSeconds)) { if (introPhase == IntroPhase.HOLD) resumeAnim() }
             }
         }
+    }
+
+    /** rc.26:對話序列播完(或逾時):從現在起算出場停留與開打倒數。沒有在等的出場什麼都不做。 */
+    fun releaseIntro() {
+        if (!introHeld) return
+        introHeld = false
+        val intro = spec.intro ?: return
+        if (state != BossState.WAITING) return
+        introHoldEnd = host.now + ticks(intro.holdSeconds)
+        startAt = host.now + ticks(spec.startDelaySeconds)
+        host.log("boss-intro-release", "${spec.id}")
     }
 
     private fun tickIntro() {
@@ -507,6 +542,7 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
         cancelCast("shield-broken")
         epoch++
         shieldUp = false
+        setAura(false)
         state = BossState.KNEELING
         kneelEnd = host.now + ticks(spec.kneel.seconds)
         gliding = false
@@ -524,6 +560,7 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
         state = BossState.RISING
         riseEnd = host.now + ticks(spec.kneel.riseSeconds)
         shieldUp = true
+        setAura(true)
         playAnim(spec.animations.rise, false)
         cues(spec.kneel.riseCues, pos)
         cues(spec.shield.upCues, pos)
@@ -933,6 +970,7 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
             restoreGem(gem.lamp)
         }
         shieldUp = true
+        setAura(true)
         spec.shield.haloBone?.let { host.setBone(it, true) }
         pendingPhase = false
         if (w.health == WipeHealth.FULL) {
@@ -1022,6 +1060,7 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
         epoch++
         state = BossState.DEFEATED
         shieldUp = false
+        setAura(false)
         host.log("boss-defeated", spec.id)
         playAnim(spec.animations.defeat, false)
         cues(spec.defeat.cues, pos)
@@ -1044,6 +1083,7 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
         epoch++
         val wasDefeated = state == BossState.DEFEATED
         state = BossState.STOPPED
+        setAura(false)
         for (id in downed.clear()) {
             markRuns.remove(id)?.run()
             host.restoreDowned(id, null)
@@ -1070,6 +1110,8 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
 
     companion object {
         const val TICK_PERIOD = 2L
+        /** rc.26:出場等對話序列時，停留與開打倒數的占位時間（[BossRun.releaseIntro] 之前永遠不到）。 */
+        const val HELD_FOREVER = Long.MAX_VALUE / 2
         const val SAMPLE_TICKS = 2L
         const val SPIN_SAMPLE_TICKS = 4L
         const val RESOLVE_PAD_TICKS = 6L

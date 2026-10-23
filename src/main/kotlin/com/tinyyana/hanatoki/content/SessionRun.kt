@@ -94,6 +94,12 @@ class SessionRun(
     private val hintFiredAt = HashMap<String, Long>()
     private var whiffSeen = false
     private var reachProbePending = false
+    /** rc.26:這個 stage 的 `arrive` 是否已觸發(沒寫 arrive 的 stage 一開始就是 true);換 stage 重設。 */
+    private var arrived = true
+    private var arriveProbePending = false
+    /** rc.26:stage 有 arrive 時，這個 stage 的 boss 等抵達才出場。 */
+    private var arrivalBoss: BossSpec? = null
+    private var arriveDialogRun: ArriveDialogRun? = null
     private val nearProbePending = HashSet<String>()
 
     private val cueRuns = ConcurrentLinkedDeque<CueRun>()
@@ -197,6 +203,13 @@ class SessionRun(
         var wait: DialogWait? = null
     }
 
+    /** rc.26:stage `on-arrive.dialogs` 的播放進度。[token] 每換一段加一，舊段的計時與對話回呼靠它失效。 */
+    private class ArriveDialogRun(val stageId: String, val dialogs: List<String>, val timeoutSeconds: Double) {
+        var index = 0
+        var token = 0
+        var wait: DialogWait? = null
+    }
+
     private class EncounterRt(val spec: EncounterSpec) {
         enum class Phase { PENDING, WAITING, SPAWNING, DONE, CANCELLED }
         var phase = Phase.PENDING
@@ -209,6 +222,8 @@ class SessionRun(
         val machine = EnemyMachine()
         @Volatile var model: BossModelHandle? = null
         var lastLoc: Location? = null
+        /** rc.26:出生(載體生成完成)的 tick;chases-players.start-delay-seconds 用。 */
+        var bornAt = -1L
         var lastWhiff = -1000L
         /** 跟著敵人的狀態標示 cue(活著 / 僵直中),換狀態時換掉。 */
         var markRun: CueRun? = null
@@ -258,6 +273,7 @@ class SessionRun(
     private fun cue(id: String?, origin: Location, follow: Entity? = null, only: Collection<Player>? = null, track: Boolean = true): CueRun? {
         if (id == null || closed) return null
         val port: CuePort = runtime.cuePort() ?: run { noteNoPort("CuePort"); return null }
+        chatFor(id, only)
         return try {
             val run = port.play(spec.namespace, id, origin, only ?: audience(), follow, mutator)
             if (track) {
@@ -271,6 +287,15 @@ class SessionRun(
             warn("cue $id 播放失敗:${t.javaClass.simpleName}: ${t.message}")
             null
         }
+    }
+
+    /** rc.26 chat.yml:這個 cue 有對應的聊天室台詞就送給聽眾([only] 或全體成員);delay-seconds 之後才送。 */
+    private fun chatFor(cueId: String, only: Collection<Player>?) {
+        val line = spec.chat[cueId] ?: return
+        val targets: List<UUID> = only?.map { it.uniqueId } ?: members().toList()
+        val send = Runnable { if (!closed) for (id in targets) ctx.message(id, line.textKey) }
+        val delay = (line.delaySeconds * 20).toLong()
+        if (delay <= 0L) send.run() else timers.schedule(now, delay) { send.run() }
     }
 
     private fun cues(ids: List<String>, origin: Location, follow: Entity? = null, only: Collection<Player>? = null) {
@@ -349,7 +374,13 @@ class SessionRun(
         if (stage.objective.isEmpty()) clearObjectiveHud(objectiveHud.drain())
         // boss 屬於它的 stage:離開時倒下的人還原、載體移除;進入有 boss 的 stage 時出場
         stopBoss("stage", despawn = true)
-        spec.bosses.values.firstOrNull { it.stage == stageId }?.let { if (it.id !in defeatedBosses) startBoss(it) }
+        arriveDialogRun = null
+        arrived = stage.arrive == null
+        arriveProbePending = false
+        arrivalBoss = null
+        spec.bosses.values.firstOrNull { it.stage == stageId }?.let {
+            if (it.id !in defeatedBosses) { if (arrived) startBoss(it, held = false) else arrivalBoss = it }
+        }
         markProgress()
         objectiveKey = null
         objectiveDirty = false
@@ -359,6 +390,87 @@ class SessionRun(
         // transition() 會取消所有 submitRepeating,每個 stage 進場都要重新掛一次週期任務。
         ctx.submitRepeating(1L, TICK_PERIOD) { tick() }
         evaluateStage()
+    }
+
+    /** rc.26:抵達區觸發。每個 stage 一次：記 log、重置無進展計時、播 on-arrive、開對話序列、讓 boss 出場，最後檢查等抵達的波次。 */
+    private fun onArrive(stage: StageSpec) {
+        if (closed || arrived || currentStage?.id != stage.id) return
+        arrived = true
+        log("stage-arrive", stage.id)
+        markProgress()
+        objectiveDirty = true
+        playEffects(stage.onArrive, stage, "on-arrive")
+        val sequence = stage.onArrive.dialogs.isNotEmpty() && startArriveDialogs(stage)
+        arrivalBoss?.let { startBoss(it, held = sequence && it.intro?.awaitArriveDialogs == true) }
+        arrivalBoss = null
+        checkTriggers()
+        evaluateStage()
+    }
+
+    // ---- stage 抵達後的對話序列(rc.26 on-arrive.dialogs)----
+
+    private fun startArriveDialogs(stage: StageSpec): Boolean {
+        if (runtime.dialogPort() == null) { noteNoPort("DialogPort"); return false }
+        val run = ArriveDialogRun(stage.id, stage.onArrive.dialogs, stage.onArrive.dialogTimeoutSeconds)
+        arriveDialogRun = run
+        log("arrive-dialogs-start", "stage=${stage.id} count=${run.dialogs.size}")
+        runArriveDialog(run)
+        return arriveDialogRun === run
+    }
+
+    private fun runArriveDialog(run: ArriveDialogRun) {
+        if (closed || arriveDialogRun !== run) return
+        if (run.index >= run.dialogs.size) { finishArriveDialogs(run); return }
+        val dialogId = run.dialogs[run.index]
+        val token = ++run.token
+        val port: DialogPort = runtime.dialogPort() ?: run { finishArriveDialogs(run); return }
+        val ids = members()
+        if (ids.isEmpty()) { finishArriveDialogs(run); return }
+        run.wait = DialogWait(ids)
+        for (playerId in ids) {
+            ctx.runOnMember(playerId) { player ->
+                try {
+                    port.open(player, spec.namespace, dialogId, IntConsumer { choice ->
+                        log("dialog", "$dialogId (on-arrive/${run.stageId}) player=${nameOf(playerId)} choice=$choice")
+                        ctx.submit { onArriveDialogDone(run, token, playerId) }
+                    })
+                } catch (t: Throwable) {
+                    warn("on-arrive dialog $dialogId 開啟失敗:${t.javaClass.simpleName}: ${t.message}")
+                    ctx.submit { onArriveDialogDone(run, token, playerId) }
+                }
+            }
+        }
+        // 有人一直不按(斷線、關掉對話)也不能卡住後面的 boss 出場
+        timers.schedule(now, (run.timeoutSeconds * 20).toLong()) {
+            if (!closed && arriveDialogRun === run && run.token == token && run.wait != null) {
+                log("arrive-dialog-timeout", "stage=${run.stageId} dialog=$dialogId waiting=${run.wait?.size ?: 0}")
+                run.wait = null
+                run.index++
+                runArriveDialog(run)
+            }
+        }
+    }
+
+    private fun onArriveDialogDone(run: ArriveDialogRun, token: Int, playerId: UUID) {
+        if (closed || arriveDialogRun !== run || run.token != token) return
+        run.wait?.done(playerId)
+        checkArriveDialogDone(run)
+    }
+
+    private fun checkArriveDialogDone(run: ArriveDialogRun) {
+        val wait = run.wait ?: return
+        if (!wait.complete) return
+        run.wait = null
+        run.index++
+        runArriveDialog(run)
+    }
+
+    private fun finishArriveDialogs(run: ArriveDialogRun) {
+        if (arriveDialogRun !== run) return
+        arriveDialogRun = null
+        markProgress()
+        log("arrive-dialogs-done", "stage=${run.stageId}")
+        boss?.releaseIntro()
     }
 
     private fun playEffects(effects: StageEffects, stage: StageSpec, what: String) {
@@ -395,6 +507,8 @@ class SessionRun(
         is Condition.BossKneel -> boss?.let { it.spec.id == c.boss && it.state == BossState.KNEELING } == true
         Condition.PoweredUsed -> poweredUsed
         is Condition.EnemyDispersed -> c.enemy in dispersedEnemies
+        Condition.Arrived -> arrived
+        Condition.LanternBurning -> lanterns.values.any { it.spec.stage == currentStage?.id && it.machine.state == LanternMachine.State.BURNING }
     }
 
     private fun objectReached(objectId: String, state: String): Boolean {
@@ -681,6 +795,7 @@ class SessionRun(
             if (enc.phase != EncounterRt.Phase.PENDING || enc.spec.stage != stage.id) continue
             val met = when (val t = enc.spec.trigger) {
                 Trigger.StageStart -> true
+                Trigger.StageArrive -> arrived
                 is Trigger.ObjectState -> objectReached(t.objectId, t.state)
                 is Trigger.EncounterCleared -> encounters[t.encounter]?.phase == EncounterRt.Phase.DONE
             }
@@ -754,6 +869,7 @@ class SessionRun(
             return
         }
         rt.lastLoc = at
+        rt.bornAt = now
         log("enemy-spawn", "${rt.actorId} enemy=${rt.spec.id} encounter=${rt.encounterId ?: "boss"}")
         cues(rt.spec.spawnCues, at, core.actorController.entityOf(sessionId, rt.actorId))
         setMark(rt, rt.spec.needsFlash?.aliveCue)
@@ -989,6 +1105,9 @@ class SessionRun(
             val flee = rt.spec.fleesWhenPowered
             if (flee != null && poweredNow.isNotEmpty()) { fleeStep(rt, loc, flee, snap, poweredNow); continue }
             if (rt.fleeing) setFleeing(rt, false)
+            // rc.26:出生後的緩衝期原地不動(不追、不碰人)，讓開場先播完
+            val chase = rt.spec.chasesPlayers
+            if (chase != null && rt.bornAt >= 0 && now - rt.bornAt < (chase.startDelaySeconds * 20).toLong()) continue
             rt.spec.chasesPlayers?.let { chaseStep(rt, loc, it, snap) }
             rt.spec.frozenWhenWatched?.let { frozenStep(rt, loc, it, snap) }
             rt.spec.contact?.let { harassStep(rt, loc, it, snap, if (rt.spec.harassesPlayers != null) touch else chaseTouch) }
@@ -1517,6 +1636,7 @@ class SessionRun(
         lines += if (poweredNow.isEmpty()) "powered: 無" else
             "powered: " + poweredNow.joinToString(", ") { "${nameOf(it)}(${String.format(java.util.Locale.ROOT, "%.1f", powered.remainingTicks(it, now) / 20.0)}s)" }
         if (powerUps.isNotEmpty()) lines += "power-up: " + powerUps.values.joinToString(", ") { "${it.spec.id}=${it.machine.state.name.lowercase()}" }
+        lines += "arrive: ${if (currentStage?.arrive == null) "無" else if (arrived) "已抵達" else "等候中"}" + (arriveDialogRun?.let { " 對話 ${it.index + 1}/${it.dialogs.size}" } ?: "")
         epilogueRun?.let { lines += "尾聲: 第 ${it.sequence.position + 1}/${it.resolve.epilogue.size} 步" }
         boss?.let { lines += it.describe() }
         lines += "倒下狀態玩家數=${boss?.downedCount() ?: 0}"
@@ -1581,6 +1701,7 @@ class SessionRun(
             if (!powered.active) endPowered("members-left")
         }
         epilogueRun?.let { run -> run.wait?.remove(playerId); checkDialogDone(run) }
+        arriveDialogRun?.let { run -> run.wait?.remove(playerId); checkArriveDialogDone(run) }
         charges.remove(playerId)
         meters.remove(playerId)
         lastFlash.remove(playerId)
@@ -1704,6 +1825,7 @@ class SessionRun(
         for (h in spec.hints.values) {
             val t = h.trigger as? HintTrigger.NoProgress ?: continue
             if (!stageActive(h.stage) || idleSeconds < t.seconds) continue
+            if (h.requiresArrival && !arrived) continue
             fireHint(h)
         }
     }
@@ -1712,6 +1834,20 @@ class SessionRun(
 
     private fun probeMarkers() {
         val stage = currentStage ?: return
+        stage.arrive?.let { a ->
+            if (!arrived && !arriveProbePending) {
+                arriveProbePending = true
+                val o = a.offset
+                val at = marker(a.marker).location(world).add(o[0], o[1], o[2])
+                ctx.membersWithin(at, a.radius).whenComplete { list, _ ->
+                    ctx.submit {
+                        if (closed || currentStage?.id != stage.id) return@submit
+                        arriveProbePending = false
+                        if (!list.isNullOrEmpty()) onArrive(stage)
+                    }
+                }
+            }
+        }
         if (!reachProbePending) {
             for (c in stage.complete) if (c is Condition.Reach && c.marker !in reached) {
                 reachProbePending = true
@@ -1757,12 +1893,22 @@ class SessionRun(
         if (key != null) showObjective(key)
     }
 
+    /** rc.26:目標文字的 `{burn}`:這個 stage 進度最高的燃燒中燈籠，五格圓點(`●●●○○`)；沒有燈在燒 = 空字串。 */
+    private fun burnPips(): String {
+        val stageId = currentStage?.id ?: return ""
+        val best = lanterns.values
+            .filter { it.spec.stage == stageId && it.machine.state == LanternMachine.State.BURNING }
+            .maxOfOrNull { it.machine.fraction } ?: return ""
+        return chargePips(Math.round(best * BURN_PIPS).toInt(), BURN_PIPS)
+    }
+
     private fun showObjective(key: String) {
         val tool = spec.tools.values.firstOrNull()
+        val burn = burnPips()
         for (playerId in members()) {
-            val params = if (tool == null) emptyMap() else {
+            val params = if (tool == null) mapOf("burn" to burn) else {
                 val c = chargesOf(playerId, tool)
-                mapOf("charges" to c.toString(), "max" to tool.maxCharges.toString(), "pips" to chargePips(c, tool.maxCharges))
+                mapOf("charges" to c.toString(), "max" to tool.maxCharges.toString(), "pips" to chargePips(c, tool.maxCharges), "burn" to burn)
             }
             ctx.actionBar(playerId, key, params)
             objectiveHud.shown(playerId)
@@ -1913,11 +2059,11 @@ class SessionRun(
 
     private fun loc(p: Pt) = Location(world, p.x, p.y, p.z)
 
-    private fun startBoss(bossSpec: BossSpec) {
+    private fun startBoss(bossSpec: BossSpec, held: Boolean = false) {
         val run = BossRun(BossHostImpl(bossSpec), bossSpec, random)
         boss = run
         bossView = run
-        run.start()
+        run.start(held)
     }
 
     /** stage 轉換或局結束:倒下的人還原、招式作廢、血量條收掉。[despawn] = 連載體一起移除。 */
@@ -2007,6 +2153,26 @@ class SessionRun(
         override fun loopCue(cueId: String, at: Pt): Runnable {
             val run = this@SessionRun.cue(cueId, loc(at))
             return Runnable { run?.cancel() }
+        }
+
+        override fun followBossCue(cueId: String): Runnable {
+            var run: CueRun? = null
+            var cancelled = false
+            fun attempt(tries: Int) {
+                if (cancelled || closed) return
+                val actor = bossActor
+                val entity = actor?.let { core.actorController.entityOf(sessionId, it) }
+                if (entity == null) {
+                    // 載體還在生成:稍後再試(最多 10 次)
+                    if (tries < 10) timers.schedule(now, 10L) { attempt(tries + 1) }
+                    return
+                }
+                // 原點用 BossHost 維護的座標（不跨 region 讀實體位置）；實體只當 follow 交給 LycoLib
+                val origin = bossPos?.let { loc(it) } ?: return
+                run = this@SessionRun.cue(cueId, origin, entity)
+            }
+            attempt(0)
+            return Runnable { cancelled = true; run?.cancel() }
         }
 
         override fun followCue(cueId: String, player: UUID, at: Pt): Runnable {
@@ -2256,6 +2422,7 @@ class SessionRun(
         poweredSource = null
         poweredCueRuns.clear()
         epilogueRun = null
+        arriveDialogRun = null
         lanterns.values.forEach { it.hold?.cancel(); it.hold = null }
         lanternHintRuns.clear()
         while (true) {
@@ -2273,6 +2440,8 @@ class SessionRun(
 
     private companion object {
         const val TICK_PERIOD = 2L
+        /** rc.26:目標文字 `{burn}` 的圓點數。 */
+        const val BURN_PIPS = 5
         const val PROBE_STALE_TICKS = 40L
         /** 取樣 cue 的 CueRun 保留上限(每輪最多 80 個、每 4 tick 一輪,保留約 1.6 輪,短促 cue 早已自己結束)。 */
         const val MAX_TRANSIENT_CUE_RUNS = 128

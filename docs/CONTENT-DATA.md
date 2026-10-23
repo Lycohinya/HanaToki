@@ -1,4 +1,4 @@
-# 資料驅動副本內容（1.0.0-rc.25）
+# 資料驅動副本內容（1.0.0-rc.26）
 
 內容插件只給 **一個資料夾 + texts**，行為由框架內建的 `DataDrivenBehavior` 依資料執行，內容端不寫 Kotlin。另做一座副本只換設定檔與資產。判準：加第 N+1 盞燈籠、第 N+1 種幽靈、第 N+1 段提示，只改一筆 YAML。
 
@@ -24,7 +24,7 @@ engine.registerDataContent(this, File(dataFolder, "content"), texts)   // texts:
 content/
   dungeons.yml       引擎副本定義（正好一座；id = stages.yml 的 dungeon）
   stages.yml  scene.yml                      必要
-  objects.yml  enemies.yml  encounters.yml  tool.yml  hints.yml  bosses.yml   可省略（= 空）
+  objects.yml  enemies.yml  encounters.yml  tool.yml  hints.yml  bosses.yml  chat.yml（rc.26）  可省略（= 空）
   map-assets/<namespace>/structure/<path>.nbt   資料夾沒有的資產退回內容插件 jar 內同路徑的 map-assets/
 ```
 
@@ -62,6 +62,32 @@ stages:                       # 宣告順序；第一個 = 起始 stage
 stage 鏈不可繞圈，每個 stage 都要沿 `next` 走得到；有 `next` 的 stage 必須寫 `complete`。
 
 **`on-complete.opens`(rc.24，選填，預設空)**:gate 物件 ID 清單(單一 ID 可寫純量)。stage 完成、播完 `on-complete` 的 cue／title／對話後、轉場之前，依序開這些門(同柵門被燈籠 `on-lit.opens` 開啟的動畫與 log `gate-open`；已開的門不重複開)。計時用 session 的 TimerQueue，滑門不會被轉場砍掉。**只有 `on-complete` 可寫**(`on-start`、boss 階段寫了報「未知的欄位」)；載入時核對每個 ID 都是 objects.yml 的 gate。用法:完成條件是 `reach`(走到出口)而不必再放一盞「開門用的燈」。
+
+### 抵達區 arrive／on-arrive（rc.26，選填，預設關）
+
+stage 一開始（上一段完成、門開）玩家常常還在上一區，這時就播開場對話、生敵人、讓 boss 出場，玩家根本還不知道那一區存在。`arrive` 讓這些事等「任一成員真的走到那一區」才發生。
+
+```yaml
+  doll_corridor:
+    arrive: { marker: gate_corridor, radius: 3, offset: [6, 0, 1] }   # marker 加世界方塊偏移為球心，半徑 radius（0..64）；marker 不限 trigger 種類
+    on-start: { cues: [doll_music] }                                  # 照舊：stage 一開始就播
+    on-arrive:                                                        # 抵達時播（與 on-start 同欄位，另可寫 dialogs）
+      cues: [familiar_chime]
+      dialog: corridor_intro                                          # 對每位成員開，不等讀完（同 on-start）
+      dialogs: [roof_01, roof_02]                                     # 選填：依序一段一段播，每段等全部成員讀完（離場的人不算）才播下一段，全播完才算「對話結束」
+      dialog-timeout-seconds: 120                                     # 每段等全部成員的上限（1..600，預設 120），逾時就放行
+    objective:
+      - { text: goal.go, until: { type: arrived } }                   # 抵達前顯示「去那裡」
+      - { text: goal.flash, until: { type: object-state, object: lantern_b, state: burning } }
+```
+
+- 偵測：每 10 tick 一次，任一在線成員在球內就抵達（每個 stage 一次，換 stage 重設）。記 log `stage-arrive <stage>`，並重置無進展計時。球要放在「不可能繞過」的位置（走廊口、門後），否則有人從旁邊繞過去就永遠不會觸發。
+- 抵達當下依序：播 `on-arrive`（cues／music／dialog／title）→ 開 `dialogs` 序列（log `arrive-dialogs-start`／`arrive-dialogs-done`／`arrive-dialog-timeout`）→ 這個 stage 的 boss 出場 → 檢查等抵達的波次。
+- **波次觸發 `{ type: stage-arrive }`**：所屬 stage 抵達時才開始計 `delay-ticks`。所屬 stage 沒寫 arrive 載入時擋下（請用 `stage-start`）。
+- **objective 條件 `{ type: arrived }`**（只能寫在 objective 的 until／while）：stage 有 arrive 且已抵達。沒寫 arrive 的 stage 用它載入時擋下。
+- **hint `requires-arrival: true`**：那個 stage 抵達前不播（`no-progress` 提示常用，免得玩家還在上一區就被講規則）。需要 `stage` 且該 stage 有 arrive。
+- **boss**：stage 有 arrive 時，boss 不在 stage 開始時出場，改成抵達時才出場（出場演出、start-delay 都從抵達算）。boss `intro.await-arrive-dialogs: true`（需要 stage 的 `on-arrive.dialogs`）：出場後停在 intro marker 不下來，等對話序列播完（或逾時）才開始計 `hold-seconds` 與 `start-delay-seconds`（log `boss-intro-release`）。hold + glide 仍不可超過 start-delay。
+- 沒寫 `arrive` 的 stage 行為與 rc.25 完全相同；`on-arrive` 沒有 `arrive` 載入時擋下；`on-arrive` 不能寫 `opens`。
 
 ### 最後一段結算 resolve（rc.22，選填，預設關）
 
@@ -111,6 +137,7 @@ stage 鏈不可繞圈，每個 stage 都要沿 `next` 走得到；有 `next` 的
       - { text: goal.strike, while: { type: boss-kneel, boss: nun } }    # 她跪下期間:上前揮刀
       - { text: goal.lamps, until: { type: boss-defeated, boss: nun } }  # 其餘時間:點亮場邊燈
 ```
+- **rc.26 條件**（同樣只能寫在 objective）：`{ type: arrived }`（見上節）、`{ type: lantern-burning }`（這個 stage 有任何燈籠正在燃燒，含暫停；stage 要有 lantern 物件）。文字參數另有 `{burn}`：這個 stage 進度最高的燃燒中燈籠的五格圓點（`●●●○○`），沒有燈在燒是空字串；搭配 `while: lantern-burning` 的步驟，玩家一照燈就看到進度。
 - 文字是 texts key（同 `title`），參數 `{charges}` `{max}` `{pips}`（`●●○○○` 燈火條）取 tool.yml 第一個道具、每位玩家各自的值。燈火條要一直看得見，就用 `objective-every-seconds: 1`，不再另用 tool 的 `hud-text`（同一個 ActionBar 組，後送的蓋掉先送的）。
 - 沒寫 `objective` 的 stage（以及整個舊副本）完全不經過這段。
 
@@ -266,6 +293,7 @@ enemies:
       target: nearest          # 預設 nearest；nearest｜farthest｜lowest-health（只考慮 sight-range 內的成員）
       sight-range: 32          # 預設 32（2..128）：索敵距離
       give-up-range: 48        # 預設 sight-range 的 1.5 倍（>= sight-range）：已鎖定的目標跑出索敵距離但仍在這個距離內會繼續追，超過就停下
+      start-delay-seconds: 0   # rc.26，預設 0（0..60）：出生後原地不動（不追也不碰人）幾秒才開始追；用來讓她先現身、說完開場再追
       repath-ticks: 10         # 預設 10（4..100）：多久重挑目標、補一次路
       contact:                 # 選填：接觸效果，同 harasses-players（contact-radius、cooldown-ticks、scan-ticks、effects、cues、suppress-melee）
         contact-radius: 1.6
@@ -314,7 +342,7 @@ enemies:
 | `gap-seconds`／`phase-up-seconds` | 一招結束後到下一招的閒置秒數(預設 2.5)、閒置時換階段的演出秒數(預設 2) |
 | `phases` | `[{ at: 1.0, cues, music, title, subtitle }, { at: 0.55, … }]`:血量比例 ≤ at 進入;第一個必須 1.0,之後嚴格遞減,最多 8 個;不寫 = 單一階段。換階段播 `phase-up` 動畫(閒置時),`boss-phase <n>` |
 | `moves` | 招式表,見下 |
-| `shield` | `{ up-cues, break-cues, spark-cues, spark-cooldown-ticks (10), halo-bone }`。`halo-bone`:模型骨骼,護盾碎時隱藏、起身時顯示 |
+| `shield` | `{ up-cues, break-cues, spark-cues, spark-cooldown-ticks (10), halo-bone, aura-cue }`。`halo-bone`:模型骨骼,護盾碎時隱藏、起身時顯示。`aura-cue`(rc.26):光環亮著期間常駐的 loop 光效 cue,跟著 boss 載體,護盾碎時取消、起身重播 |
 | `gems` | 必填。`[{ lamp: <lantern 物件>, bone, beam-cues, break-cues, restore-cues }]`。**寶石 = 目前亮著的場邊燈**:每點亮一盞,在燈上播 `beam-cues`、在 boss 身上播 `break-cues`、隱藏 `bone`;燈被熄掉(熄燈招式、起身重置)寶石恢復;全部同時亮著 → 護盾碎 |
 | `kneel` | `{ seconds: 10, cues, rise-cues, rise-seconds: 1.5, lamps-reset: on-rise｜never }`。跪下輸出窗口;起身後護盾恢復、(on-rise)所有場邊燈重置為暗。跪下期間打到階段門檻,階段**延到起身後**才換 |
 | `pumpkins` | `{ objects: [power-up 物件], from-phase: 3 }`。階段到之前這些南瓜燈是「拿走」狀態(看不到、拿不到),到了才上架;全滅回第一階段時再次下架 |
@@ -324,7 +352,7 @@ enemies:
 | `bar` | `{ text: texts key（{percent} {phase}）, color, overlay }`。boss 血量條(StageContext.bossBar,和燈籠的 `progress-bar` 共用同一條,所以場邊燈不可有 progress-bar) |
 | `heal` | rc.25,選填,預設全關。`{ on-start: true, on-kneel: true }`:`on-start` = 開打時（含全滅重來後重新開打）、`on-kneel` = 光環碎她跪下時,把**在線成員**血量補滿（log `boss-heal reason=start｜restart｜kneel players=<n>`，派工到各玩家自己的執行緒）。招式傷害是最大血量的固定比例、不看護甲，進場時血量不滿就會被連續兩招打倒;補血讓單人在合理躲避下打得完 |
 | `hit-cues` | rc.24,選填。玩家一下**有效**近戰命中時在命中點播(被光環擋下、玩家冷卻內、出場等待中的不算;擋下走 `shield.spark-cues`)。頻率受 `hit-cooldown-ticks` 限制 |
-| `intro` | rc.24,選填，見下「出場演出」。沒寫 = 直接在 `points` 第一個點出場(同舊版) |
+| `intro` | rc.24,選填，見下「出場演出」。沒寫 = 直接在 `points` 第一個點出場(同舊版)。rc.26 `await-arrive-dialogs: true`:停在屋頂等 stage `on-arrive.dialogs` 播完才計停留與開打倒數 |
 
 ### 出場演出 intro(rc.24)
 
@@ -368,7 +396,7 @@ enemies:
 
 ### 場邊燈與護盾
 
-場邊燈是 objects.yml 的 `lantern` 物件(`stage` 省略或等於 boss 的 stage),用既有的燃燒機制:對它閃光燒 `burn-seconds` 秒點亮(要有人在 `stay-radius` 內)。給 boss 用的燈不可有 `progress-bar`、`on-lit.light-radius`(必須 0,放出的光源方塊不會收回)、`on-lit.opens`、`on-lit.clears-enemies`、`milestones`,也不能被兩個 boss 共用。這些燈**可以被重置為未點亮**(熄燈招式、起身、全滅重來):狀態機回 `unlit`、進度歸零、重新套用 `states.unlit` 的方塊、收掉持續 cue,之後可以再點亮(再記一次 `lantern-lit`)。一般燈籠的「不倒退」不變式不受影響,只有 boss 引用的燈會被重置。
+場邊燈是 objects.yml 的 `lantern` 物件(`stage` 省略或等於 boss 的 stage),用既有的燃燒機制:對它閃光燒 `burn-seconds` 秒點亮(要有人在 `stay-radius` 內)。給 boss 用的燈不可有 `progress-bar`、`on-lit.light-radius`(必須 0,放出的光源方塊不會收回)、`on-lit.opens`、`on-lit.clears-enemies`,也不能被兩個 boss 共用(rc.26 起可以寫 `milestones`:重置為未點亮時進度與已觸發的 milestone 一起歸零,下次點燈會重播,可用來做燒燈三段發光)。這些燈**可以被重置為未點亮**(熄燈招式、起身、全滅重來):狀態機回 `unlit`、進度歸零、重新套用 `states.unlit` 的方塊、收掉持續 cue,之後可以再點亮(再記一次 `lantern-lit`)。一般燈籠的「不倒退」不變式不受影響,只有 boss 引用的燈會被重置。
 
 ### 倒下 downed
 
@@ -443,7 +471,7 @@ encounters:
     stage: lantern_court               # 所屬 stage（只有該 stage 進行中才會被觸發）
     enemy: small_ghost
     marker-group: wave1                # mob_spawn marker 的 group=；依 marker id 排序輪流使用
-    trigger: { type: object-state, object: lantern_a, state: burning }   # 或 stage-start、encounter-cleared
+    trigger: { type: object-state, object: lantern_a, state: burning }   # 或 stage-start、stage-arrive（rc.26）、encounter-cleared
     delay-ticks: 0
     counts: { 1: 3, 2: 4, 4: 5 }       # 人數 → 隻數（必含 1；n 人用 ≤ n 的最大 key）
     interval-ticks: 20                 # 每隻之間
@@ -454,6 +482,19 @@ encounters:
 **`spawn-marker`／`spawn-offset`（rc.25，選填）**：不想用 mob_spawn 組、或組裡的出生點不在玩家看得到的位置時，改成在任一種 marker（trigger、door…）旁出生：`spawn-marker: maze_entry`、`spawn-offset: [0, 0, 6]`（世界方塊 `[dx, dy, dz]`，每個 |值| <= 64，只能和 spawn-marker 並用）。和 `marker-group` 擇一；寫了 spawn-marker 就不用也不能寫 marker-group，所有隻都出生在這一點（`marker-offset` 無作用）。載入時核對 marker 存在（場景核對）。波次的 `start-cues` 在這一點播。用法：大幽靈一進迷宮就出現在入口走廊，不是看不到的迷宮中央。
 
 全部生出且全數消失（打散或死亡）→ 波次清空，打 `wave-clear` log，並可成為其他波次的 `encounter-cleared` 觸發與 stage 完成條件。
+
+## chat.yml（rc.26，選填）
+
+cues.yml 的 `hud` 吐槽是會蓋掉其他 ActionBar 的通知，戰鬥中的角色台詞（修女換階段、光環碎、跪下，幽靈姐姐被碰散…）改送聊天室比較不干擾操作。`chat.yml` 讓「播某個 cue」時一併送一則聊天室訊息（走 `StageContext.message`，文字是 texts key，MiniMessage），cue 本身只留聲光：
+
+```yaml
+chat:
+  boss_phase2_a:                          # key = cues.yml 的 cue id（任何路徑播這個 cue 都會送）
+    text: mist-patrol.chat.nun-phase2-a   # 必填，texts key
+    delay-seconds: 0                      # 選填（0..60，預設 0）：播 cue 後多久才送
+```
+
+送給這次播放的聽眾（個人 cue 只送那位；一般 cue 送全體成員）。沒有 chat.yml 或 cue 沒列在裡面 = 行為同舊版。HanaToki 不驗證 cue id 存在（cues.yml 在 LycoLib 端），內容端的契約測試核對。
 
 ## tool.yml
 

@@ -19,10 +19,20 @@ data class ContentSpec(
     val hints: Map<String, HintSpec>,
     /** rc.23:bosses.yml(沒有檔案 = 空)。 */
     val bosses: Map<String, BossSpec> = emptyMap(),
+    /** rc.26:chat.yml(沒有檔案 = 空):cue id → 播這個 cue 時一併送到聊天室的台詞。 */
+    val chat: Map<String, ChatLine> = emptyMap(),
 ) {
     val startStage: String get() = stages.first().id
     fun stage(id: String): StageSpec? = stages.firstOrNull { it.id == id }
 }
+
+// ---- chat.yml(rc.26)----
+
+/**
+ * 播 cue [cueId] 時，除了 cues.yml 的聲光，再把 [textKey](texts)送進聽眾的聊天室。[delaySeconds] 之後才送。
+ * 用在戰鬥中的角色台詞:HUD 對話框會打斷操作，聊天室不會。
+ */
+data class ChatLine(val cueId: String, val textKey: String, val delaySeconds: Double)
 
 // ---- stages.yml ----
 
@@ -44,7 +54,17 @@ data class StageSpec(
     val clearsEnemies: Boolean = false,
     /** rc.22:非 null = 這個 stage 完成後(先跑尾聲)呼叫 `resolve(result)` 結算;只能用在 `next` 為 null 的最後一段。 */
     val resolve: ResolveSpec? = null,
+    /** rc.26:非 null = stage 開始後要等任一成員抵達這一區才算「抵達」,才播 [onArrive]、才觸發 `stage-arrive` 波次、才出場這個 stage 的 boss。 */
+    val arrive: ArriveSpec? = null,
+    /** rc.26:抵達時播的效果(只有 [arrive] 非 null 才能寫)。 */
+    val onArrive: StageEffects = StageEffects(),
 )
+
+/**
+ * rc.26 stage 抵達區:以 [marker](任何種類)為原點加世界方塊偏移 [offset] `[dx, dy, dz]`,半徑 [radius] 的球。
+ * 任一成員進到球內就抵達(每個 stage 只觸發一次)。
+ */
+data class ArriveSpec(val marker: String, val radius: Double, val offset: List<Double>)
 
 /**
  * 最後一段結算開關(rc.22)。stage 完成並播完 on-complete 之後,依序播 [epilogue] 的每一步,播完才 `resolve(result)`。
@@ -84,6 +104,10 @@ data class StageEffects(
     val dialog: String? = null,
     val titleKey: String? = null,
     val subtitleKey: String? = null,
+    /** rc.26:只有 stage 的 `on-arrive` 可寫。依序一段一段播的對話序列(每段等全部成員讀完才播下一段),播完才算「對話結束」。 */
+    val dialogs: List<String> = emptyList(),
+    /** rc.26:[dialogs] 每一段等全部成員讀完的上限秒數(有人一直不按也不卡住)。 */
+    val dialogTimeoutSeconds: Double = 120.0,
     /** rc.24:只有 stage 的 `on-complete` 可寫。stage 完成時要打開的 gate 物件 id。 */
     val opens: List<String> = emptyList(),
 )
@@ -107,8 +131,14 @@ sealed interface Condition {
     /** rc.25(只能用在 objective):這個 stage 開始後,[enemy](enemies.yml)的敵人被玩家打散或被 powered 的成員碰散過(累積旗標,清場不算)。 */
     data class EnemyDispersed(val enemy: String) : Condition
 
+    /** rc.26(只能用在 objective 的 until／while):這個 stage 的 `arrive` 已經觸發(沒寫 arrive 的 stage 一開始就是 true)。 */
+    data object Arrived : Condition
+
+    /** rc.26(只能用在 objective 的 until／while):這個 stage 有任何燈籠正在燃燒(含暫停中、尚未點亮)。 */
+    data object LanternBurning : Condition
+
     /** 狀態型條件:隨時間來去或隨 stage 累積,只能用在 objective,不能當 stage 的完成條件。 */
-    val isTransient: Boolean get() = this is Powered || this is BossKneel || this is PoweredUsed || this is EnemyDispersed
+    val isTransient: Boolean get() = this is Powered || this is BossKneel || this is PoweredUsed || this is EnemyDispersed || this is Arrived || this is LanternBurning
 }
 
 // ---- scene.yml ----
@@ -353,6 +383,8 @@ data class ChasesPlayersSpec(
     val giveUpRange: Double,
     val repathTicks: Int,
     val contact: HarassSpec?,
+    /** rc.26:出生後原地不動(不追也不碰人)幾秒才開始追;0 = 一出生就追(同舊版)。用來讓她先現身、說完開場再追。 */
+    val startDelaySeconds: Double = 0.0,
 )
 
 /**
@@ -447,6 +479,8 @@ sealed interface Trigger {
     data object StageStart : Trigger
     data class ObjectState(val objectId: String, val state: String) : Trigger
     data class EncounterCleared(val encounter: String) : Trigger
+    /** rc.26:所屬 stage 的 `arrive` 觸發時(stage 必須寫 arrive)。 */
+    data object StageArrive : Trigger
 }
 
 data class EncounterSpec(
@@ -531,4 +565,6 @@ data class HintSpec(
     val cues: List<String>,
     val once: Boolean,
     val repeatSeconds: Double,
+    /** rc.26:true = 所屬 stage 的 `arrive` 觸發之前不播(所屬 stage 必須寫 arrive)。預設 false = 同舊版。 */
+    val requiresArrival: Boolean = false,
 )

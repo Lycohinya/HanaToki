@@ -35,7 +35,7 @@ object ContentValidator {
                     is Condition.Reach -> {}
                     is Condition.BossDefeated ->
                         if (c.boss !in spec.bosses) errors += "$where.complete[$i].boss: 引用不存在的 boss「${c.boss}」(bosses.yml)"
-                    Condition.Powered, is Condition.BossKneel, Condition.PoweredUsed, is Condition.EnemyDispersed ->
+                    Condition.Powered, is Condition.BossKneel, Condition.PoweredUsed, is Condition.EnemyDispersed, Condition.Arrived, Condition.LanternBurning ->
                         errors += "$where.complete[$i]: ${c::class.simpleName} 會來去或是累積旗標,不能當 stage 的完成條件(只能用在 objective)"
                 }
             }
@@ -43,6 +43,9 @@ object ContentValidator {
             stage.onComplete.opens.forEachIndexed { i, gate ->
                 if (spec.objects[gate] !is GateSpec) errors += "$where.on-complete.opens[$i]: 「$gate」不是 gate 物件(objects.yml)"
             }
+            // arrive／on-arrive(rc.26)
+            if (stage.onArrive.opens.isNotEmpty()) errors += "$where.on-arrive.opens: on-arrive 不能寫 opens"
+            if (stage.onArrive.dialogs.isNotEmpty() && stage.arrive == null) errors += "$where.on-arrive.dialogs: 沒有 arrive 的 stage 不會觸發 on-arrive"
             if (stage.complete.isEmpty() && stage.next != null) errors += "$where.complete: 有下一段(next)的 stage 必須寫完成條件"
             if (stage.resolve != null && stage.next != null) errors += "$where.resolve: 有下一段(next)的 stage 不能結算"
             // objective 的 until:跟 complete 同一套條件,引用要存在;reach 只有 stage.complete 裡探測得到的 marker 才會達成
@@ -62,6 +65,10 @@ object ContentValidator {
                         if (spec.objects.values.none { it is PowerUpSpec }) errors += "$at: ${c::class.simpleName} 需要至少一個 power-up 物件(objects.yml),否則永遠不會成立"
                     is Condition.EnemyDispersed ->
                         if (c.enemy !in spec.enemies) errors += "$at.enemy: 引用不存在的敵人「${c.enemy}」(enemies.yml)"
+                    Condition.Arrived ->
+                        if (stage.arrive == null) errors += "$at: arrived 需要這個 stage 寫 arrive(沒有抵達區就一開始成立，不需要這個條件)"
+                    Condition.LanternBurning ->
+                        if (spec.objects.values.none { it is LanternSpec && it.stage == stage.id }) errors += "$at: lantern-burning 需要這個 stage 至少有一盞 lantern 物件(objects.yml stage: ${stage.id})"
                     is Condition.BossKneel -> {
                         val boss = spec.bosses[c.boss]
                         if (boss == null) errors += "$at.boss: 引用不存在的 boss「${c.boss}」(bosses.yml)"
@@ -138,6 +145,8 @@ object ContentValidator {
                     if (t.encounter == enc.id) errors += "$where.trigger.encounter: 不可觸發自己"
                 }
                 Trigger.StageStart -> {}
+                Trigger.StageArrive ->
+                    if (spec.stage(enc.stage)?.arrive == null) errors += "$where.trigger: stage-arrive 需要所屬 stage「${enc.stage}」寫 arrive(沒有抵達區請用 stage-start)"
             }
         }
         // 波次觸發鏈不可繞圈
@@ -154,6 +163,9 @@ object ContentValidator {
         for (hint in spec.hints.values) {
             val where = "${ContentFileNames.HINTS} hints.${hint.id}"
             if (hint.stage != null && hint.stage !in stageIds) errors += "$where.stage: 引用不存在的 stage「${hint.stage}」"
+            if (hint.requiresArrival && (hint.stage == null || spec.stage(hint.stage)?.arrive == null)) {
+                errors += "$where.requires-arrival: 需要寫 stage，而且那個 stage 要有 arrive"
+            }
             (hint.trigger as? HintTrigger.EnemyDispersed)?.let { t ->
                 if (t.enemy !in spec.enemies) errors += "$where.trigger.enemy: 引用不存在的敵人「${t.enemy}」(enemies.yml)"
             }
@@ -187,6 +199,9 @@ object ContentValidator {
         for (boss in spec.bosses.values) {
             val where = "${ContentFileNames.BOSSES} bosses.${boss.id}"
             if (boss.stage !in stageIds) errors += "$where.stage: 引用不存在的 stage「${boss.stage}」"
+            if (boss.intro?.awaitArriveDialogs == true && spec.stage(boss.stage)?.onArrive?.dialogs.isNullOrEmpty()) {
+                errors += "$where.intro.await-arrive-dialogs: stage「${boss.stage}」的 on-arrive 沒有 dialogs 可等"
+            }
             if (boss.moves.values.none { it.fromPhase == 1 }) errors += "$where.moves: 至少要有一招從 phase 1 就開放"
             boss.gems.forEachIndexed { i, gem ->
                 val obj = spec.objects[gem.lamp]
@@ -198,7 +213,6 @@ object ContentValidator {
                 if (obj.onLit.lightRadius > 0.0) errors += "$at: 場邊燈的 on-lit.light-radius 必須是 0(被熄掉時放出的光源方塊不會收回)"
                 if (obj.onLit.opens != null) errors += "$at: 場邊燈不能有 on-lit.opens(它會被重置,門只能開一次)"
                 if (obj.onLit.clearsEnemies) errors += "$at: 場邊燈不能有 on-lit.clears-enemies"
-                if (obj.milestones.isNotEmpty()) errors += "$at: 場邊燈不能有 milestones(重置後不重播,也不是它的用途)"
                 lampOwner.put(gem.lamp, boss.id)?.let { if (it != boss.id) errors += "$at: 場邊燈「${gem.lamp}」已被 boss「$it」使用" }
             }
             boss.pumpkins?.objects?.forEachIndexed { i, id ->
@@ -264,6 +278,9 @@ object ContentValidator {
                 if (m == null) errors += "${ContentFileNames.STAGES} stages.${stage.id}.complete[$i].marker: 場景裡沒有 id=${c.marker} 的 marker"
                 else if (m.kind != MarkerKind.TRIGGER) errors += "${ContentFileNames.STAGES} stages.${stage.id}.complete[$i].marker: reach 的 marker 必須是 trigger(「${c.marker}」是 ${m.kind.id})"
             }
+        }
+        for (stage in spec.stages) stage.arrive?.let { a ->
+            if (marker(a.marker) == null) errors += "${ContentFileNames.STAGES} stages.${stage.id}.arrive.marker: 場景裡沒有 id=${a.marker} 的 marker"
         }
         for (boss in spec.bosses.values) {
             val where = "${ContentFileNames.BOSSES} bosses.${boss.id}"
@@ -344,11 +361,14 @@ object ContentValidator {
         for (s in spec.stages) {
             check(ContentFileNames.STAGES, "stages.${s.id}.on-start.title", s.onStart.titleKey)
             check(ContentFileNames.STAGES, "stages.${s.id}.on-start.subtitle", s.onStart.subtitleKey)
+            check(ContentFileNames.STAGES, "stages.${s.id}.on-arrive.title", s.onArrive.titleKey)
+            check(ContentFileNames.STAGES, "stages.${s.id}.on-arrive.subtitle", s.onArrive.subtitleKey)
             check(ContentFileNames.STAGES, "stages.${s.id}.on-complete.title", s.onComplete.titleKey)
             check(ContentFileNames.STAGES, "stages.${s.id}.on-complete.subtitle", s.onComplete.subtitleKey)
             s.objective.forEachIndexed { i, step -> check(ContentFileNames.STAGES, "stages.${s.id}.objective[$i].text", step.textKey) }
             check(ContentFileNames.STAGES, "stages.${s.id}.objective-done", s.objectiveDoneKey)
         }
+        for (c in spec.chat.values) check(ContentFileNames.CHAT, "chat.${c.cueId}.text", c.textKey)
         for (t in spec.tools.values) {
             check(ContentFileNames.TOOL, "tools.${t.id}.name", t.nameKey)
             t.loreKeys.forEachIndexed { i, k -> check(ContentFileNames.TOOL, "tools.${t.id}.lore[$i]", k) }

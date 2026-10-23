@@ -48,6 +48,8 @@ data class BossShieldSpec(
     val sparkCues: List<String>,
     val sparkCooldownTicks: Int,
     val haloBone: String?,
+    /** rc.26:光環亮著期間常駐的光效 cue(跟著 boss 載體，loop)；光環碎時取消，恢復時重播。null = 沒有。 */
+    val auraCue: String? = null,
 )
 
 /**
@@ -169,6 +171,8 @@ data class BossIntroSpec(
     val holdSeconds: Double,
     val glideSeconds: Double,
     val glideTo: String?,
+    /** rc.26:true = 出場後停在 [marker],等 stage `on-arrive.dialogs` 播完才開始計 [holdSeconds] 與 start-delay(沒有對話序列時同舊版)。 */
+    val awaitArriveDialogs: Boolean = false,
 )
 
 /** boss 血量條(StageContext.bossBar):[textKey] 是 texts key,參數 {percent} {phase}。 */

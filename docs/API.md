@@ -1023,6 +1023,12 @@ interface DialogPort {
 - 目標列的動作列在局結束、成員離場、換到沒有目標的 stage 時清空（`ObjectiveHudTracker`）。
 - 新 log：`boss-heal reason=start｜restart｜kneel players=<n>`。
 
+### rc.26：stage 抵達區、到場對話序列、boss 等抵達出場
+
+- 選填資料欄位（預設零影響；schema 見 [CONTENT-DATA.md](CONTENT-DATA.md)）：stage `arrive`／`on-arrive`（含 `dialogs`、`dialog-timeout-seconds`）、encounter 觸發 `stage-arrive`、objective 條件 `arrived`／`lantern-burning` 與文字參數 `{burn}`、hint `requires-arrival`、boss `intro.await-arrive-dialogs`、chases-players `start-delay-seconds`、boss `shield.aura-cue`、chat.yml（cue id → 聊天室台詞）；場邊燈可寫 `milestones`。
+- 型別（`com.tinyyana.hanatoki.content`，新欄位都在 data class 尾端有預設值）：`StageSpec.arrive`（`ArriveSpec`）／`onArrive`、`StageEffects.dialogs`／`dialogTimeoutSeconds`、`Trigger.StageArrive`、`Condition.Arrived`／`Condition.LanternBurning`（sealed 新子型別）、`HintSpec.requiresArrival`、`BossIntroSpec.awaitArriveDialogs`、`ChasesPlayersSpec.startDelaySeconds`、`ContentSpec.chat`（`ChatLine`）。`BossRun.start(held)` 與 `BossRun.releaseIntro()`（`BossHost` 介面不變）。
+- 新 log：`stage-arrive <stage>`、`arrive-dialogs-start`／`arrive-dialogs-done`／`arrive-dialog-timeout`、`boss-intro-release`。
+
 ### rc.19：`world-time`
 
 `dungeons.yml` 新增可選欄位 `world-time`（0..23999，一天內的 tick；沒寫 = 維持原行為）。`DungeonWorldProvisioner.ensureWorld(..., worldTime)` 在 void 世界建立後、以及世界已載入時（預載入、熱插拔）呼叫 `World#setTime`；`advance_time`（DO_DAYLIGHT_CYCLE）本來就被 provisioner 關掉，所以時間固定。在 global region tick thread 以外會派到 `GlobalRegionScheduler`。解析規則：`world-create: false` 或有 `world-generator` 時報錯（那種世界的日夜循環不受 HanaToki 鎖定）。
