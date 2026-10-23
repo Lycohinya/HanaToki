@@ -1023,6 +1023,15 @@ interface DialogPort {
 - 目標列的動作列在局結束、成員離場、換到沒有目標的 stage 時清空（`ObjectiveHudTracker`）。
 - 新 log：`boss-heal reason=start｜restart｜kneel players=<n>`。
 
+### rc.32：探索收集物 `collectible`、`CollectionPort`
+
+- 選填資料欄位（預設零影響；schema 見 [CONTENT-DATA.md](CONTENT-DATA.md)）：objects.yml 新物件型別 `collectible`（每位玩家各自收一次、浮空實體逐人可見）；power-up／collectible 的 `prop.glow`。
+- 型別（`com.tinyyana.hanatoki.content`）：`CollectibleSpec`（`ObjectSpec` 新子型別，外部對 `ObjectSpec` 做窮舉 `when` 需補分支）、`PowerUpProp.glow`（尾端有預設值）；純邏輯 `CollectViewerBook`（逐人可見記帳）、`CollectLedger`（本局收集帳）、`CollectRules`（first／found 判定、距離量法、`STAT_PREFIX = "collect"`）。
+- 新 port（`com.tinyyana.hanatoki.api.port.CollectionPort`，ServicesManager 註冊，選填）：`CompletableFuture<Set<String>> collectedSpots(UUID playerId, String dungeonId)` 回該玩家在這座副本終身已收過的藏點 id。引擎在局開始與成員加入時預取（快取在這一局），收下時只查快取；沒有實作者、失敗、還沒回來一律當「第一次」且進度只算本局。LycoHanaToki rc.21 實作。
+- 結算 stats：每位收下的成員 `collect.<物件 id>.<玩家 UUID> = 1`，整局合計 `collect.<物件 id>`（`RunStats.record`）。逐人鍵不存在時 `CompletionResult.statFor` 會退回整局合計，消費端要直接讀逐人鍵。
+- `PropController` 新增內部方法 `spawnViewerPart`（隱藏著生成的部件）、`setViewer`（對一位觀看者開／關；派到觀看者自己的 EntityScheduler，且只在部件也屬於目前 region 時動手，沒套用回 false 下一輪再試）。**不在跨插件介面 `PropHandle`／`StageContext`**。
+- 新 log：`collect-found <spotId> player=<p> first=<true｜false>`。
+
 ### rc.31：小怪固定比例傷害、霧鬼吹燈、人偶靠近加速
 
 - 選填資料欄位（預設零影響，其他副本不受影響；schema 見 [CONTENT-DATA.md](CONTENT-DATA.md)）：`harasses-players`／`chases-players.contact` 的效果型別 `damage-percent`（`percent`、`min-health`）、`chases-players.snuff-lamps`／`retreat`／`pressure`、`frozen-when-watched.rush`。

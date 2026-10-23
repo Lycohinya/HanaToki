@@ -286,7 +286,40 @@ data class PowerUpSpec(
  * 浮在 marker 上方 [height] 格，以 [scale] 倍原尺寸(1.0 = 一整格方塊)顯示；每 [bobSeconds] 秒一個上下週期(幅度 [bob] 格)，
  * 每半個週期慢轉 [spinDegrees] 度。
  */
-data class PowerUpProp(val item: String, val scale: Double, val height: Double, val bob: Double, val bobSeconds: Double, val spinDegrees: Double)
+data class PowerUpProp(
+    val item: String,
+    val scale: Double,
+    val height: Double,
+    val bob: Double,
+    val bobSeconds: Double,
+    val spinDegrees: Double,
+    /** rc.32:實體發光(輪廓光+最亮亮度)。收集物的發光紙籤用；舊資料沒寫 = false。 */
+    val glow: Boolean = false,
+)
+
+/**
+ * 探索收集物(rc.32,marker 必須是 trigger):每位玩家各自收一次的藏點。浮空實體([prop])**逐人可見**——本局收過的人看不到，
+ * 其他人照樣看得到；成員走近([radius] 內)就為**那一位**收下:播 [cue](只給他)、送 ActionBar([foundFirstKey]／[foundRepeatKey]，
+ * 佔位符 `{n}`=[label]、`{found}`、`{total}`)，並在 session stats 記 `collect.<物件 id>.<玩家 UUID>`(結算用)。
+ * 實物不在局內給，由 LycoHanaToki 結算依 stats 發。物件 id 就是藏點 id(結算規則 `collectibles.spots` 的 key)。
+ */
+data class CollectibleSpec(
+    override val id: String,
+    override val markerId: String,
+    override val stage: String?,
+    val radius: Double,
+    /** ActionBar 的 `{n}`(例如「三」)，資料指定，引擎不換算。 */
+    val label: String,
+    /** 這位玩家終身第一次找到(或沒有收集紀錄 port)時的 ActionBar texts key；null = 不送。 */
+    val foundFirstKey: String?,
+    /** 終身重訪時的 ActionBar texts key；null = 退回 [foundFirstKey]。 */
+    val foundRepeatKey: String?,
+    /** 收下時只給該玩家的 cue；null = 無聲。 */
+    val cue: String?,
+    val prop: PowerUpProp?,
+) : ObjectSpec {
+    override val states: Map<String, StateEffect> get() = emptyMap()
+}
 
 object ObjectStates {
     const val POWER_UP_READY = "ready"
@@ -306,6 +339,7 @@ object ObjectStates {
         is LanternSpec -> LANTERN
         is GateSpec -> GATE
         is PowerUpSpec -> POWER_UP
+        is CollectibleSpec -> emptyList()
     }
 }
 

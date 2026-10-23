@@ -4,6 +4,8 @@ import org.bukkit.Location
 import org.bukkit.block.data.BlockData
 import org.bukkit.entity.Entity
 import org.bukkit.entity.Player
+import java.util.UUID
+import java.util.concurrent.CompletableFuture
 import java.util.function.IntConsumer
 
 /*
@@ -52,4 +54,16 @@ interface DialogPort {
      * @param onDone 1..N = 玩家選的選項;0 = 取消/斷線/無選項。可能在任意執行緒被呼叫。
      */
     fun open(player: Player, namespace: String, dialogId: String, onDone: IntConsumer)
+}
+
+/**
+ * 探索收集物([com.tinyyana.hanatoki.content.CollectibleSpec])的**終身**收集紀錄查詢(rc.32，選填)。
+ * 實作者(LycoHanaToki)把紀錄存在自己的資料庫；沒有實作者時引擎一律當「第一次找到」、進度只算本局。
+ *
+ * ⚠ 只用 JDK 型別(`Set<String>` 在 bytecode 是 `java.util.Set`)。實作會碰資料庫，所以回傳 future、由實作端排到非 tick 執行緒；
+ * 引擎在局開始與成員加入時預取、快取在這一局裡，收下時只查快取(沒回來或失敗 = 當第一次)。
+ */
+interface CollectionPort {
+    /** 這位玩家在 [dungeonId] 已終身收過的藏點 id(物件 id)。 */
+    fun collectedSpots(playerId: UUID, dungeonId: String): CompletableFuture<Set<String>>
 }

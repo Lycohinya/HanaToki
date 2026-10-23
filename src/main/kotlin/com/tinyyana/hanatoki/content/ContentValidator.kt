@@ -275,6 +275,7 @@ object ContentValidator {
             when (obj) {
                 is LanternSpec -> if (m.kind != MarkerKind.TRIGGER) errors += "$where: lantern 的 marker 必須是 trigger(「${obj.markerId}」是 ${m.kind.id})"
                 is PowerUpSpec -> if (m.kind != MarkerKind.TRIGGER) errors += "$where: power-up 的 marker 必須是 trigger(「${obj.markerId}」是 ${m.kind.id})"
+                is CollectibleSpec -> if (m.kind != MarkerKind.TRIGGER) errors += "$where: collectible 的 marker 必須是 trigger(「${obj.markerId}」是 ${m.kind.id})"
                 is GateSpec -> {
                     if (m.kind != MarkerKind.DOOR) { errors += "$where: gate 的 marker 必須是 door(「${obj.markerId}」是 ${m.kind.id})"; continue }
                     if (m.facing == null || m.facing !in setOf(org.bukkit.block.BlockFace.NORTH, org.bukkit.block.BlockFace.SOUTH, org.bukkit.block.BlockFace.EAST, org.bukkit.block.BlockFace.WEST)) {
@@ -395,6 +396,10 @@ object ContentValidator {
         for (e in spec.enemies.values) check(ContentFileNames.ENEMIES, "enemies.${e.id}.dispersed-tip.text", e.dispersedTip?.textKey)
         for (o in spec.objects.values) if (o is LanternSpec) {
             check(ContentFileNames.OBJECTS, "objects.${o.id}.progress-bar.text", o.progressBar?.textKey)
+        }
+        for (o in spec.objects.values) if (o is CollectibleSpec) {
+            check(ContentFileNames.OBJECTS, "objects.${o.id}.found-first", o.foundFirstKey)
+            check(ContentFileNames.OBJECTS, "objects.${o.id}.found-repeat", o.foundRepeatKey)
         }
         for (b in spec.bosses.values) {
             val f = ContentFileNames.BOSSES

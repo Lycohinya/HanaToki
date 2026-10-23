@@ -81,6 +81,15 @@ class SessionRun(
     private val encounters = LinkedHashMap<String, EncounterRt>()
     private val enemies = ConcurrentHashMap<String, EnemyRt>()
     private val powerUps = LinkedHashMap<String, PowerUpRt>()
+    /** rc.32:探索收集物(物件 id = 藏點 id)。 */
+    private val collects = LinkedHashMap<String, CollectRt>()
+    private val collectLedger = CollectLedger()
+    /** rc.32:各成員的終身收集紀錄預取結果(CollectionPort)；沒有／失敗／還沒回來 = 不在表裡，一律當第一次。 */
+    private val collectPrior = HashMap<UUID, Set<String>>()
+    private val collectPriorPending = HashSet<UUID>()
+    private val collectPriorFailed = HashSet<UUID>()
+    private var collectProbing = false
+    private var collectProbeAt = 0L
 
     private var currentStage: StageSpec? = null
     private val completedStages = HashSet<String>()
@@ -209,6 +218,18 @@ class SessionRun(
         var propNextPose = 0L
         var propPhase = 0
         var propWarned = false
+    }
+
+    private class CollectRt(val spec: CollectibleSpec, val marker: MapMarker, val loc: Location) {
+        /** 浮空實體:已要求生成／生成完成可以開給人看／下一次擺姿勢的 tick／第幾個半週期。 */
+        var propOn = false
+        var propReady = false
+        var propNextPose = 0L
+        var propPhase = 0
+        var propWarned = false
+        val book = CollectViewerBook()
+        /** 正在開／關的成員(同一人同時只送一筆)。 */
+        val pending = HashSet<UUID>()
     }
 
     /** 最後一段結算前的尾聲:[token] 每換一步加一,舊步驟的計時與對話回呼靠它失效。 */
@@ -379,6 +400,7 @@ class SessionRun(
                     PowerUpMachine(obj.consume, (obj.respawnSeconds * 20).toLong(), (obj.seconds * 20).toLong()),
                     m, m.location(world),
                 )
+                is CollectibleSpec -> collects[obj.id] = CollectRt(obj, m, m.location(world))
             }
         }
         for (enc in spec.encounters.values) encounters[enc.id] = EncounterRt(enc)
@@ -610,6 +632,7 @@ class SessionRun(
         timers.runDue(now) { warn("計時任務丟出例外:${it.javaClass.simpleName}: ${it.message}") }
         tickLanterns()
         tickPowerUps()
+        tickCollectibles()
         tickPowered()
         boss?.tick()
         tickEnemyRules()
@@ -1666,6 +1689,164 @@ class SessionRun(
         if (state == EnemyMachine.State.ALIVE || state == EnemyMachine.State.STUNNED) syncBody(rt)
     }
 
+    // ---- 探索收集物(rc.32) ----
+
+    private fun collectPropId(rt: CollectRt) = "collect-" + rt.spec.id
+
+    private fun tickCollectibles() {
+        if (collects.isEmpty()) return
+        for (rt in collects.values) syncCollectProp(rt)
+        if (now % 10L == 0L) {
+            prefetchCollectPrior()
+            reconcileCollectViewers()
+        }
+        if (now % 4L == 0L) probeCollect()
+    }
+
+    /** 浮空實體:所屬 stage 進行中才有(隱藏著生成)；開給誰由 [reconcileCollectViewers] 決定。擺姿勢的做法同 power-up prop。 */
+    private fun syncCollectProp(rt: CollectRt) {
+        val prop = rt.spec.prop ?: return
+        val want = !closed && stageActive(rt.spec.stage)
+        val propId = collectPropId(rt)
+        if (want) {
+            if (!rt.propOn) {
+                val material = Material.matchMaterial(prop.item)
+                if (material == null) {
+                    if (!rt.propWarned) { rt.propWarned = true; warn("collectible ${rt.spec.id} 的 prop.item「${prop.item}」不是 Material，不生成浮空實體") }
+                    return
+                }
+                rt.propOn = true
+                rt.propReady = false
+                rt.propPhase = 0
+                val at = rt.loc.clone().add(0.0, prop.height, 0.0)
+                core.propController.spawnViewerPart(sessionId, propId, at, org.bukkit.inventory.ItemStack(material), prop.glow, COLLECT_VIEW_RANGE).whenComplete { _, error ->
+                    ctx.submit {
+                        if (error != null) warn("collectible ${rt.spec.id} 浮空實體生成失敗:${error.message}")
+                        else { rt.propReady = true; rt.propNextPose = now }
+                    }
+                }
+            } else if (rt.propReady && now >= rt.propNextPose) {
+                val half = Math.max(1, Math.round(prop.bobSeconds * 10.0).toInt())
+                val up = rt.propPhase % 2 == 0
+                val ty = (if (up) prop.bob / 2.0 else -prop.bob / 2.0).toFloat()
+                val yaw = (prop.spinDegrees * (rt.propPhase + 1)).toFloat()
+                ctx.props().pose(propId, 0f, ty, 0f, 0f, yaw, 0f, prop.scale.toFloat(), half)
+                rt.propPhase++
+                rt.propNextPose = now + half
+            }
+        } else if (rt.propOn && rt.propReady) {
+            rt.propOn = false
+            rt.propReady = false
+            rt.book.clear()
+            rt.pending.clear()
+            ctx.props().despawn(propId)
+        }
+    }
+
+    /** 在線的成員 → 代表那個 Player 物件的憑據(重連後是新物件，記帳靠它判斷要重開)。 */
+    private fun onlineCollectViewers(): Map<UUID, Any> {
+        val out = HashMap<UUID, Any>()
+        for (id in members()) {
+            if (id in quitMembers) continue
+            Bukkit.getPlayer(id)?.let { out[id] = it }
+        }
+        return out
+    }
+
+    /**
+     * 每 10 tick 與每次有人收下時對帳:實體開給「在線成員且本局沒收過」的人，關掉已收過的人；
+     * 重連、離線的記帳作廢(新 Player 物件的可見表是空的，下一輪重開)。開／關非同步，成功才記帳。
+     */
+    private fun reconcileCollectViewers() {
+        if (closed || collects.isEmpty()) return
+        val online = onlineCollectViewers()
+        for (rt in collects.values) {
+            if (rt.spec.prop == null) continue
+            val plan = rt.book.plan(rt.propOn && rt.propReady, online, collectLedger.collectedBy(rt.spec.id))
+            if (plan.isEmpty) continue
+            plan.drop.forEach { rt.book.forget(it) }
+            for (id in plan.show) setCollectViewer(rt, id, online[id] as? Player ?: continue, true)
+            for (id in plan.hide) setCollectViewer(rt, id, online[id] as? Player ?: continue, false)
+        }
+    }
+
+    private fun setCollectViewer(rt: CollectRt, id: UUID, player: Player, visible: Boolean) {
+        if (!rt.pending.add(id)) return
+        core.propController.setViewer(sessionId, collectPropId(rt), player, visible).whenComplete { applied, _ ->
+            ctx.submit {
+                rt.pending.remove(id)
+                if (applied == true) { if (visible) rt.book.markShown(id, player) else rt.book.markHidden(id) }
+            }
+        }
+    }
+
+    /** 預取成員的終身收集紀錄(CollectionPort，選填)。沒有 port、失敗、還沒回來 = 收下時當第一次、進度只算本局。 */
+    private fun prefetchCollectPrior() {
+        val port = runtime.collectionPort() ?: run { noteNoPort("CollectionPort"); return }
+        for (id in members()) {
+            if (id in collectPrior || id in collectPriorPending || id in collectPriorFailed) continue
+            collectPriorPending += id
+            port.collectedSpots(id, dungeonId).whenComplete { set, error ->
+                ctx.submit {
+                    collectPriorPending.remove(id)
+                    if (error != null || set == null) {
+                        collectPriorFailed += id
+                        warn("終身收集紀錄查詢失敗(player=${nameOf(id)}):${error?.message}，這一局當作第一次找到")
+                    } else {
+                        collectPrior[id] = set.toSet()
+                    }
+                }
+            }
+        }
+    }
+
+    /** 每 4 tick 一次 memberPositions，在 anchor 執行緒上對所有藏點量距離(不是每個藏點各探一次)。 */
+    private fun probeCollect() {
+        if (collectProbing && now - collectProbeAt <= PROBE_STALE_TICKS) return
+        val mem = members()
+        val open = collects.values.any { rt -> stageActive(rt.spec.stage) && mem.any { !collectLedger.has(it, rt.spec.id) } }
+        if (!open) return
+        collectProbing = true
+        collectProbeAt = now
+        val startedAt = now
+        ctx.memberPositions().whenComplete { positions, _ ->
+            ctx.submit {
+                if (collectProbeAt != startedAt) return@submit
+                collectProbing = false
+                if (closed || positions.isNullOrEmpty()) return@submit
+                val current = members().toSet()
+                for ((id, pos) in positions) {
+                    if (id !in current || id in quitMembers || isDowned(id)) continue
+                    for (rt in collects.values) {
+                        if (!stageActive(rt.spec.stage) || collectLedger.has(id, rt.spec.id)) continue
+                        val l = rt.loc
+                        if (CollectRules.within(pos[0], pos[1], pos[2], l.x, l.y, l.z, rt.spec.prop?.height ?: 1.0, rt.spec.radius)) pickUpCollectible(rt, id)
+                    }
+                }
+            }
+        }
+    }
+
+    /** 這位成員收下這個藏點:記帳 → stats(結算用) → log → cue(只給他) → ActionBar → 立刻把實體對他關掉。 */
+    private fun pickUpCollectible(rt: CollectRt, id: UUID) {
+        val spec = rt.spec
+        if (!collectLedger.add(id, spec.id)) return
+        val prior = collectPrior[id]
+        val first = CollectRules.isFirst(prior, spec.id)
+        val found = CollectRules.found(prior, collectLedger.spotsOf(id))
+        RunStats.record(ctx.state.stats, CollectRules.statName(spec.id), id)
+        log("collect-found", "${spec.id} player=${nameOf(id)} first=$first")
+        markProgress()
+        spec.cue?.let { cueId -> Bukkit.getPlayer(id)?.let { p -> cue(cueId, rt.loc, only = listOf(p)) } }
+        CollectRules.textKey(spec, first)?.let { key -> ctx.actionBar(id, key, CollectRules.textParams(spec, found, collects.size)) }
+        reconcileCollectViewers()
+    }
+
+    /** 成員斷線／重連:他的 Player 物件作廢，所有藏點的開啟記帳清掉(下一輪 reconcile 重開，已收過的不會再開)。 */
+    private fun forgetCollectViewer(id: UUID) {
+        for (rt in collects.values) rt.book.forget(id)
+    }
+
     // ---- power-up 物件與 powered ----
 
     /** rc.25:南瓜燈在架上(ready、所屬 stage 進行中)才有標示 cue;被拿走、換 stage、結束時取消。 */
@@ -1947,6 +2128,7 @@ class SessionRun(
         lines += if (poweredNow.isEmpty()) "powered: 無" else
             "powered: " + poweredNow.joinToString(", ") { "${nameOf(it)}(${String.format(java.util.Locale.ROOT, "%.1f", powered.remainingTicks(it, now) / 20.0)}s)" }
         if (powerUps.isNotEmpty()) lines += "power-up: " + powerUps.values.joinToString(", ") { "${it.spec.id}=${it.machine.state.name.lowercase()}" }
+        if (collects.isNotEmpty()) lines += "collectible: " + collects.values.joinToString(", ") { "${it.spec.id}=${collectLedger.collectedBy(it.spec.id).size}人/開給${it.book.shownIds().size}人" }
         lines += "arrive: ${if (currentStage?.arrive == null) "無" else if (arrived) "已抵達" else "等候中"}" + (arriveDialogRun?.let { " 對話 ${it.index + 1}/${it.dialogs.size}" } ?: "")
         epilogueRun?.let { lines += "尾聲: 第 ${it.sequence.position + 1}/${it.resolve.epilogue.size} 步" }
         boss?.let { lines += it.describe() }
@@ -2036,6 +2218,15 @@ class SessionRun(
 
     fun onMemberLeft(playerId: UUID) {
         quitMembers.remove(playerId)
+        // 離場的人:已開給他的實體關掉(他還在線才有意義)，記帳清掉
+        ctx.submit {
+            val player = Bukkit.getPlayer(playerId)
+            for (rt in collects.values) {
+                if (player != null && rt.book.isShown(playerId)) setCollectViewer(rt, playerId, player, false)
+                rt.book.forget(playerId)
+            }
+            collectPrior.remove(playerId); collectPriorPending.remove(playerId); collectPriorFailed.remove(playerId)
+        }
         if (objectiveHud.forget(playerId)) clearObjectiveHud(listOf(playerId))
         // 離場的人已不在成員名單，身體狀態還原走 PlayerOp(不依賴名單)，見 BossHostImpl.restoreDowned
         boss?.onMemberLeft(playerId)
@@ -2533,6 +2724,7 @@ class SessionRun(
     /** 事件執行緒呼叫（PlayerQuitEvent，玩家自己的執行緒）：同步還原倒下的身體狀態，再回 anchor 執行緒處理邏輯。 */
     fun onMemberQuit(id: UUID) {
         quitMembers += id
+        ctx.submit { forgetCollectViewer(id) }
         bossView?.onMemberQuitSync(id)
         ctx.submit { boss?.onMemberQuit(id) }
     }
@@ -2540,6 +2732,7 @@ class SessionRun(
     /** 事件執行緒呼叫（PlayerJoinEvent，重連寬限期內回來）。 */
     fun onMemberReconnected(id: UUID) {
         quitMembers.remove(id)
+        ctx.submit { forgetCollectViewer(id) }
         ctx.submit { boss?.onMemberReconnected(id) }
     }
 
@@ -2893,6 +3086,12 @@ class SessionRun(
         // boss 先收（倒下的人還原身體狀態、血量條收掉）；這時 closed 還是 false，host 的演出呼叫才不會被擋
         stopBoss(reason, despawn = false)
         clearObjectiveHud(objectiveHud.drain())
+        // 已開給成員的實體關掉(引擎隨後整批移除實體；這裡只是不在玩家的可見表留殘項)
+        for (rt in collects.values) {
+            for (id in rt.book.shownIds()) Bukkit.getPlayer(id)?.let { p -> core.propController.setViewer(sessionId, collectPropId(rt), p, false) }
+            rt.book.clear(); rt.pending.clear()
+        }
+        collectLedger.clear(); collectPrior.clear(); collectPriorPending.clear(); collectPriorFailed.clear()
         closed = true
         timers.clear()
         touch.clear()
@@ -2923,6 +3122,8 @@ class SessionRun(
         /** rc.26:目標文字 `{burn}` 的圓點數。 */
         const val BURN_PIPS = 5
         const val PROBE_STALE_TICKS = 40L
+        /** rc.32:收集物浮空實體的可見距離倍率(1.0 = 64 格)。 */
+        const val COLLECT_VIEW_RANGE = 0.5f
         /** 取樣 cue 的 CueRun 保留上限(每輪最多 80 個、每 4 tick 一輪,保留約 1.6 輪,短促 cue 早已自己結束)。 */
         const val MAX_TRANSIENT_CUE_RUNS = 128
         /** [StageContext.MEMBER_SNAPSHOT_FIELDS] 的 heldSlot 欄位。 */

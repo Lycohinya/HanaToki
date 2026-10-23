@@ -25,6 +25,9 @@ class DataContentRuntime(private val core: HanaTokiCore) {
 
     fun cuePort(): CuePort? = core.plugin.server.servicesManager.getRegistration(CuePort::class.java)?.provider
 
+    fun collectionPort(): com.tinyyana.hanatoki.api.port.CollectionPort? =
+        core.plugin.server.servicesManager.getRegistration(com.tinyyana.hanatoki.api.port.CollectionPort::class.java)?.provider
+
     fun dialogPort(): DialogPort? = core.plugin.server.servicesManager.getRegistration(DialogPort::class.java)?.provider
 
     fun runOf(sessionId: UUID): SessionRun? = runs[sessionId]

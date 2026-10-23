@@ -1,4 +1,4 @@
-# 資料驅動副本內容（1.0.0-rc.31）
+# 資料驅動副本內容（1.0.0-rc.32）
 
 內容插件只給 **一個資料夾 + texts**，行為由框架內建的 `DataDrivenBehavior` 依資料執行，內容端不寫 Kotlin。另做一座副本只換設定檔與資產。判準：加第 N+1 盞燈籠、第 N+1 種幽靈、第 N+1 段提示，只改一筆 YAML。
 
@@ -203,7 +203,7 @@ pieces:                       # 一塊 piece 一筆；key = piece ID
 
 ## objects.yml
 
-共通：`type`（`lantern`｜`gate`｜`power-up`）、`marker`（marker ID）、`stage`（可省略；填了只在該 stage 進行中可互動）、`states`。`states.<狀態>` = `{ cues: [...], blocks: [{ offset: [dx,dy,dz], block: "minecraft:..." }] }`，blocks 座標相對 marker，進入該狀態時經 `ctx.mutate` 替換（局結束回滾）。`unlit`／`closed` 的 blocks 在場景放好後套用。
+共通：`type`（`lantern`｜`gate`｜`power-up`｜`collectible`）、`marker`（marker ID）、`stage`（可省略；填了只在該 stage 進行中可互動）、`states`。`states.<狀態>` = `{ cues: [...], blocks: [{ offset: [dx,dy,dz], block: "minecraft:..." }] }`，blocks 座標相對 marker，進入該狀態時經 `ctx.mutate` 替換（局結束回滾）。`unlit`／`closed` 的 blocks 在場景放好後套用。
 
 **lantern**（marker 必須是 `trigger`）：狀態 `unlit → burning → lit`，單向、不倒退、只完成一次。
 
@@ -254,6 +254,24 @@ objects:
 ```
 
 powered 是每位成員各自的到期時間（再吃一次把結束時間刷新成較晚的那個，不疊加）；成員離場即移除；**換 stage 一律結束 powered**（收持續 cue、敵人恢復追擊外觀）。偵測每 4 tick 一次（`membersWithin`，不跨 region 讀玩家座標）。stage 完成條件與目標的 `object-state` 可以引用 power-up 的 `ready`／`taken`。
+
+**collectible**（rc.32，探索收集物；marker 必須是 `trigger`；沒有 `states`）：藏在場景角落、**每位玩家各自收一次**的東西。浮空實體只對「尚未收過（本局）」的在線成員顯示，走近 `radius` 內就為**那一位**收下，收過的人看不到，其他人照樣看得到。實物不在局內給：只記 session stats，由獎勵端（LycoHanaToki `rewards.yml` 的 `collectibles:`）在結算時依 stats 逐人發。物件 id 就是藏點 id（結算規則的 `spots` key）。
+
+```yaml
+objects:
+  collect_entry_1:
+    type: collectible
+    marker: collect_entry_1      # 必填，trigger marker
+    stage: front_court           # 選填；只在該 stage 進行中可收
+    radius: 1.5                  # 預設 1.5（0.5..8）：身體中心到浮空實體中心的距離
+    n: "一"                      # ActionBar 的 {n}（文字，引擎不換算，例如國字）
+    found-first: mist-patrol.collect.found-first    # 選填 texts key；終身第一次（或沒有收集紀錄 port）時送
+    found-repeat: mist-patrol.collect.found-repeat  # 選填；終身重訪時送，沒寫退回 found-first
+    cue: collect_found           # 選填；收下時只給該玩家播
+    prop: { item: PAPER, scale: 0.5, height: 1.0, bob: 0.2, bob-seconds: 3, spin-degrees: 90, glow: true }  # 選填；glow 預設 false
+```
+
+ActionBar 佔位符：`{n}`＝`n`、`{found}`＝這位玩家的終身進度（有 `CollectionPort` 時 = 終身已收的 ∪ 本局收的；沒有時只算本局）、`{total}`＝這個內容的 collectible 物件數。**逐人可見**：實體生成時 `isVisibleByDefault = false`，每 10 tick 與每次有人收下時對帳，只對「在線成員且本局沒收過」的人 `showEntity`；重連（新 Player 物件）、離線、離場、局結束時記帳清掉，重連後已收過的不會再開。偵測每 4 tick 一次 `memberPositions()`，在 anchor 執行緒對所有藏點量距離（倒下的成員不能收）。收下當下的寫入順序：本局收集帳 → stats `collect.<物件 id>`（整局合計）與 `collect.<物件 id>.<玩家 UUID>`（逐人，結算讀這個，**不要用 `CompletionResult.statFor`**——它在逐人鍵不存在時會退回整局合計，沒收到的人會被當成收過）→ log → cue → ActionBar → 關掉那位的實體。終身「是否收過」由 `CollectionPort`（選填，見 API.md rc.32）提供，沒有實作者或查詢失敗一律當第一次。
 
 ## enemies.yml
 
@@ -703,6 +721,7 @@ rc.22 新增（紙燈別院全程契約的 tag，bot 認這些字串；`<enemyId
 | `doll-frozen <enemyId> watcher=<player>` | 人偶從移動轉為凍結（每次轉換一行）；另有 `doll-pose <enemyId> pose=<id>` 記這次挑的姿勢 |
 | `doll-dispersed <enemyId> by=<player>` | frozen-when-watched 的敵人被玩家打散（光圈清場不記；仍有 `enemy-dissolve … by=lantern`） |
 | `power-up-taken <objectId> player=<player>` | 有人碰到 power-up；`power-up <id> taken->ready` 是重生 |
+| `collect-found <spotId> player=<player> first=<true｜false>` | rc.32 有人收下探索收集物；`first` = 終身第一次（沒有收集紀錄 port 時恆為 true） |
 | `powered-start players=<n> seconds=<s>` | 全隊 powered（每次吃都記；再吃是刷新） |
 | `powered-end reason=<expired｜stage｜members-left>` | powered 全部結束 |
 | `powered-reversal <enemyId> by=<player>` | powered 成員碰散一隻會逃的敵人（隨後還有 `enemy-dissolve`） |

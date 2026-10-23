@@ -52,6 +52,68 @@ class PropController(private val plugin: Plugin, private val sessionActive: java
         return out
     }
 
+    /**
+     * rc.32 逐人可見的骨架部件(探索收集物)。引擎內部用,**不放進跨插件的 [PropHandle]**。
+     *
+     * 與 [PropHandle.spawnPart] 同一套(ItemDisplay、NONE、FIXED、[PropHandle.PART_TAG]，登記進同一張 [props] 表，
+     * 所以 [PropHandle.pose]／[PropHandle.despawn]／[despawnAllForSession]／孤兒掃描都照常適用)，差別:
+     * 生成時就 `isVisibleByDefault = false`(**必須在 spawn 的 consumer 裡設**，生成後再設會先廣播給所有人)，
+     * 之後只有 [setViewer] 開給的人看得到；[glow] 時發光並用最亮亮度。
+     */
+    fun spawnViewerPart(sessionId: UUID, propId: String, location: Location, item: ItemStack, glow: Boolean, viewRange: Float): CompletableFuture<Void> {
+        val k = key(sessionId, propId)
+        props.remove(k)?.let { old -> WorldOp.dispatch(plugin, old) { it.remove() } }
+        return WorldOp.dispatchAt(plugin, location) { loc ->
+            if (!sessionActive.test(sessionId)) return@dispatchAt
+            val world = loc.world ?: return@dispatchAt
+            val display = world.spawn(loc, ItemDisplay::class.java) { d ->
+                d.isVisibleByDefault = false
+                d.isPersistent = false
+                d.setItemStack(item)
+                d.billboard = Display.Billboard.FIXED
+                d.itemDisplayTransform = ItemDisplay.ItemDisplayTransform.NONE
+                d.brightness = if (glow) Display.Brightness(15, 15) else Display.Brightness(11, 15)
+                d.isGlowing = glow
+                d.viewRange = viewRange
+                d.setTeleportDuration(0)
+                d.addScoreboardTag(PropHandle.PART_TAG)
+            }
+            synchronized(props) { if (sessionActive.test(sessionId)) props[k] = display else display.remove() }
+        }
+    }
+
+    /**
+     * 對**一位**觀看者開／關 [spawnViewerPart] 生出的部件。完成值 true = 這次真的套用了；false = 沒套用
+     * (部件不在、玩家已登出、或部件不歸玩家目前所在的 region)，呼叫端不要記成「已開／已關」，下一輪再試。
+     *
+     * 執行緒:派到**觀看者自己的 EntityScheduler**(`Player#showEntity` 會寫玩家的可見表)，並且只在部件也屬於目前 region 時動手
+     * (讀部件的 handle 需要擁有它；跟 LycoLib `VfxPlayback` 同一套，離太遠本來也看不到)。
+     * 因為 [spawnViewerPart] 設了 `isVisibleByDefault = false`，「可見」= 這個插件有 showEntity 過；hideEntity 就是撤銷它。
+     */
+    fun setViewer(sessionId: UUID, propId: String, viewer: org.bukkit.entity.Player, visible: Boolean): CompletableFuture<Boolean> {
+        val entity = props[key(sessionId, propId)] ?: return CompletableFuture.completedFuture(false)
+        val future = CompletableFuture<Boolean>()
+        val scheduled = viewer.scheduler.run(
+            plugin,
+            { _ ->
+                var applied = false
+                try {
+                    if (org.bukkit.Bukkit.isOwnedByCurrentRegion(entity) && entity.isValid) {
+                        if (visible) viewer.showEntity(plugin, entity) else viewer.hideEntity(plugin, entity)
+                        applied = true
+                    }
+                } catch (t: Throwable) {
+                    plugin.logger.warning("[HanaToki] prop $propId 對 ${viewer.name} ${if (visible) "顯示" else "隱藏"}失敗:${t.javaClass.simpleName}: ${t.message}")
+                } finally {
+                    future.complete(applied)
+                }
+            },
+            { future.complete(false) }, // retired:玩家已登出
+        )
+        if (scheduled == null) future.complete(false)
+        return future
+    }
+
     /** 擺設是不是副本生出來的(死亡掉落清除/debug 反查用,同 actor/encounter)。 */
     fun isTracked(entityId: UUID): Boolean = props.values.any { it.uniqueId == entityId }
 
