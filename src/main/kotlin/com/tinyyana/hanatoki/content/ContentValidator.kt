@@ -35,8 +35,8 @@ object ContentValidator {
                     is Condition.Reach -> {}
                     is Condition.BossDefeated ->
                         if (c.boss !in spec.bosses) errors += "$where.complete[$i].boss: 引用不存在的 boss「${c.boss}」(bosses.yml)"
-                    Condition.Powered, is Condition.BossKneel ->
-                        errors += "$where.complete[$i]: ${c::class.simpleName} 會來去,不能當 stage 的完成條件(只能用在 objective)"
+                    Condition.Powered, is Condition.BossKneel, Condition.PoweredUsed, is Condition.EnemyDispersed ->
+                        errors += "$where.complete[$i]: ${c::class.simpleName} 會來去或是累積旗標,不能當 stage 的完成條件(只能用在 objective)"
                 }
             }
             // on-complete.opens:要打開的 gate 物件
@@ -58,8 +58,10 @@ object ContentValidator {
                         }
                     is Condition.BossDefeated ->
                         if (c.boss !in spec.bosses) errors += "$at.boss: 引用不存在的 boss「${c.boss}」(bosses.yml)"
-                    Condition.Powered ->
-                        if (spec.objects.values.none { it is PowerUpSpec }) errors += "$at: powered 需要至少一個 power-up 物件(objects.yml),否則永遠不會成立"
+                    Condition.Powered, Condition.PoweredUsed ->
+                        if (spec.objects.values.none { it is PowerUpSpec }) errors += "$at: ${c::class.simpleName} 需要至少一個 power-up 物件(objects.yml),否則永遠不會成立"
+                    is Condition.EnemyDispersed ->
+                        if (c.enemy !in spec.enemies) errors += "$at.enemy: 引用不存在的敵人「${c.enemy}」(enemies.yml)"
                     is Condition.BossKneel -> {
                         val boss = spec.bosses[c.boss]
                         if (boss == null) errors += "$at.boss: 引用不存在的 boss「${c.boss}」(bosses.yml)"
@@ -152,6 +154,9 @@ object ContentValidator {
         for (hint in spec.hints.values) {
             val where = "${ContentFileNames.HINTS} hints.${hint.id}"
             if (hint.stage != null && hint.stage !in stageIds) errors += "$where.stage: 引用不存在的 stage「${hint.stage}」"
+            (hint.trigger as? HintTrigger.EnemyDispersed)?.let { t ->
+                if (t.enemy !in spec.enemies) errors += "$where.trigger.enemy: 引用不存在的敵人「${t.enemy}」(enemies.yml)"
+            }
             if (hint.trigger is HintTrigger.LanternContested && spec.enemies.values.none { it.seeksObject != null }) {
                 errors += "$where.trigger: lantern-contested 需要至少一種敵人有 seeks-object 規則"
             }
@@ -280,6 +285,10 @@ object ContentValidator {
             if (marker(id) == null) errors += "${ContentFileNames.STAGES} stages.${stage.id}.resolve.epilogue[$i].marker: 場景裡沒有 id=$id 的 marker"
         }
         for (enc in spec.encounters.values) {
+            if (enc.spawnMarker != null) {
+                if (marker(enc.spawnMarker) == null) errors += "${ContentFileNames.ENCOUNTERS} encounters.${enc.id}.spawn-marker: 場景裡沒有 id=${enc.spawnMarker} 的 marker"
+                continue
+            }
             val spawns = markers.filter { it.kind == MarkerKind.MOB_SPAWN && it.properties["group"] == enc.markerGroup }
             if (spawns.isEmpty()) errors += "${ContentFileNames.ENCOUNTERS} encounters.${enc.id}.marker-group: 場景裡沒有 mob_spawn group=${enc.markerGroup}"
         }

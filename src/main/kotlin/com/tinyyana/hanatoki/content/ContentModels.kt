@@ -101,8 +101,14 @@ sealed interface Condition {
     /** rc.24(只能用在 objective 的 until／while):boss 目前正在跪下(輸出窗口)。 */
     data class BossKneel(val boss: String) : Condition
 
-    /** 狀態型條件:隨時間來去,不能當 stage 的完成條件。 */
-    val isTransient: Boolean get() = this is Powered || this is BossKneel
+    /** rc.25(只能用在 objective):這個 stage 開始後,任一成員吃過 power-up(累積旗標,powered 結束後仍成立)。 */
+    data object PoweredUsed : Condition
+
+    /** rc.25(只能用在 objective):這個 stage 開始後,[enemy](enemies.yml)的敵人被玩家打散或被 powered 的成員碰散過(累積旗標,清場不算)。 */
+    data class EnemyDispersed(val enemy: String) : Condition
+
+    /** 狀態型條件:隨時間來去或隨 stage 累積,只能用在 objective,不能當 stage 的完成條件。 */
+    val isTransient: Boolean get() = this is Powered || this is BossKneel || this is PoweredUsed || this is EnemyDispersed
 }
 
 // ---- scene.yml ----
@@ -204,6 +210,8 @@ data class PowerUpSpec(
     val startCues: List<String>,
     /** powered 全部結束時在 marker 上播。 */
     val endCues: List<String>,
+    /** rc.25:南瓜燈「在架上」(ready 且所屬 stage 進行中)期間持續播的 loop cue,被拿走、換 stage 時取消,重生時再播。讓玩家從遠處(越過樹籬)看到。 */
+    val beaconCue: String? = null,
 ) : ObjectSpec
 
 object ObjectStates {
@@ -454,6 +462,10 @@ data class EncounterSpec(
     val startCues: List<String>,
     /** 第 i 隻出生在該組排序後第 `(markerOffset + i) % 組大小` 個 marker;讓同一組出生點的不同波次用不同位置。 */
     val markerOffset: Int = 0,
+    /** rc.25:不用 mob_spawn 組,改在這個 marker(任何種類)出生;[markerGroup] 此時是空字串。 */
+    val spawnMarker: String? = null,
+    /** rc.25:出生點相對 [spawnMarker] 的偏移 `[dx, dy, dz]`(世界方塊);空 = 不偏移。 */
+    val spawnOffset: List<Double> = emptyList(),
 )
 
 // ---- tool.yml ----
@@ -507,6 +519,8 @@ sealed interface HintTrigger {
     data class UnequippedNearEnemy(val radius: Double) : HintTrigger
     /** 有敵人連續啃燈 [seconds] 秒(seeks-object 的啃燈沒有中斷過)。全隊提示。 */
     data class LanternContested(val seconds: Double) : HintTrigger
+    /** rc.25:[enemy] 的敵人被玩家打散或被 powered 的成員碰散的那一刻。全隊提示。 */
+    data class EnemyDispersed(val enemy: String) : HintTrigger
 }
 
 data class HintSpec(

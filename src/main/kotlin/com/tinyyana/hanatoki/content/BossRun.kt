@@ -52,6 +52,9 @@ interface BossHost {
     fun bossBar(textKey: String, fraction: Double, color: String, overlay: String, params: Map<String, String>)
     fun hideBossBar()
 
+    /** rc.25:把這些成員的血量補滿(在線的;派工到玩家自己的執行緒)。預設不做事。 */
+    fun healMembers(ids: List<UUID>) {}
+
     // ---- boss 實體(載體 + 模型)----
     fun spawnBoss(at: Pt)
     fun moveBoss(to: Pt)
@@ -306,7 +309,16 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
         enterPhase(phase)
         state = BossState.IDLE
         nextMoveAt = host.now + ticks(spec.gapSeconds)
+        if (spec.heal.onStart) healAll("start")
         checkShieldBreak()
+    }
+
+    /** rc.25:補滿所有在線成員的血量(log `boss-heal reason=…`)。 */
+    private fun healAll(reason: String) {
+        val ids = onlineMembers()
+        if (ids.isEmpty()) return
+        host.log("boss-heal", "reason=$reason players=${ids.size}")
+        host.healMembers(ids)
     }
 
     /** 每個 TICK_PERIOD 呼叫一次(SessionRun.tick)。 */
@@ -505,6 +517,7 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
         cues(spec.kneel.cues, pos)
         playAnim(spec.animations.kneel, true)
         reviveAll("kneel")
+        if (spec.heal.onKneel) healAll("kneel")
     }
 
     private fun rise() {
@@ -950,6 +963,7 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
         enterPhase(phase)
         state = BossState.IDLE
         nextMoveAt = host.now + ticks(spec.gapSeconds)
+        if (spec.heal.onStart) healAll("restart")
     }
 
     // ---- 成員事件 ----

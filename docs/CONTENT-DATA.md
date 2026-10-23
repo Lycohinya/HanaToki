@@ -1,4 +1,4 @@
-# 資料驅動副本內容（1.0.0-rc.24）
+# 資料驅動副本內容（1.0.0-rc.25）
 
 內容插件只給 **一個資料夾 + texts**，行為由框架內建的 `DataDrivenBehavior` 依資料執行，內容端不寫 Kotlin。另做一座副本只換設定檔與資產。判準：加第 N+1 盞燈籠、第 N+1 種幽靈、第 N+1 段提示，只改一筆 YAML。
 
@@ -96,6 +96,14 @@ stage 鏈不可繞圈，每個 stage 都要沿 `next` 走得到；有 `next` 的
 ```
 
 - 顯示「第一個 until 還沒達成」的步驟；`until` 沿用 `complete` 的條件（`encounter-cleared`／`object-state`／`reach`）。沒寫 `until` 的步驟永遠停在那一步，只能放最後一個。`reach` 只有寫在**同一個 stage 的 `complete`** 裡的 marker 才偵測得到，其他的載入時拒絕。
+- **累積旗標條件（rc.25）**，同樣只能寫在 objective 的 `until`／`while`：`{ type: powered-used }`（這個 stage 開始後任一成員吃過 power-up，powered 結束後仍成立；需要至少一個 power-up 物件）、`{ type: enemy-dispersed, enemy: <enemies.yml id> }`（這個 stage 開始後該種敵人被玩家打散，或被 powered 的成員碰散過；光圈／stage 清場不算）。換 stage 兩個旗標都清掉。三步目標範例（南瓜迷宮）：
+
+```yaml
+    objective:
+      - { text: goal.find, until: { type: powered-used } }                                              # 還沒吃到南瓜燈:去找
+      - { text: goal.powered, while: { type: powered }, until: { type: enemy-dispersed, enemy: big_ghost } }  # powered 中、她還沒被碰散:追她
+      - { text: goal.exit }                                                                               # 碰散她後,或 powered 結束她沒被碰散:去出口
+```
 - **`while`(rc.24，選填)**:步驟加 `while: {條件}`，只在條件成立期間才輪得到這一步，不成立就跳過、回來又顯示(跟 `until` 並用時兩者都要符合:`while` 成立且 `until` 還沒達成)。有 `while` 的步驟不受「沒寫 until 只能放最後」限制。`while`／`until` 另可用兩個**狀態型條件**(會來去，只能寫在 objective，不能當 stage 的 `complete`，載入時拒絕):`{ type: powered }`(任一成員目前 powered，需要至少一個 power-up 物件)、`{ type: boss-kneel, boss: <id> }`(該 boss 目前正在跪下，boss 必須在這個 stage)。重畫由 `objective-every-seconds` 與「顯示的步驟換了」觸發，所以進出 powered／跪下的瞬間就會換字。
 
 ```yaml
@@ -137,6 +145,8 @@ pieces:                       # 一塊 piece 一筆；key = piece ID
 | `hint` | 選填（rc.20）。未點亮燈籠的世界標示：`{ cue, ready-cue, radius, ready-radius, requires-tool }`。玩家距離 ≤ `radius` 播 `cue`、≤ `ready-radius` 換成 `ready-cue`（「現在閃一下一定點得著」）；`requires-tool` 填 tool ID = 只有主手拿著那個道具才顯示。**只放給該玩家自己**（audience = 他一人），cue 要寫成 loop 光效（LycoLib `vfx` 的 `loop: true`）；點燃、換 stage、離開範圍、離場都會取消。位置與主手格取自成員快照（每 10 tick 一次，不跨 region 讀玩家座標），邊界留 1.5 格遲滯 |
 
 **gate**（marker 必須是 `door`，要有水平 `facing` 與 `w`／`h`）：狀態 `closed → open`。`facing` = 門面朝的方向；站在門前（facing 那一側）看過去，marker 在**左下角**，寬往右延伸（右手邊 = facing 逆時針轉 90 度）。`column-ticks`（預設 4）每隔幾 tick 把一欄（h 格高）換成空氣做滑開；`slide-from`：`left`（從 marker 端）｜`right`。
+
+**power-up 的 `beacon-cue`（rc.25，選填）**：南瓜燈「在架上」（ready、所屬 stage 進行中）期間持續播的 **loop cue**（cue 引用 loop vfx），被拿走、換 stage、`pumpkins` 下架、局結束時取消，重生／上架時再播。讓玩家從遠處（越過樹籬）看到：用高過牆的細光柱＋頂端柔光球，亮度克制。同時最多 = 在架上的南瓜燈數 × 該 vfx 的 display 數，要算進 vfx 的 `max-total-displays`。
 
 **power-up**（rc.22，南瓜燈；marker 必須是 `trigger`）：成員走進 `radius` 內，**全隊** powered `seconds` 秒（見 flees-when-powered）。狀態 `ready ⇄ taken`：`states.<狀態>` 同其他物件（cues＋blocks，進入該狀態時播／換方塊；`ready` 的 blocks 在場景放好後套用）。
 
@@ -312,6 +322,7 @@ enemies:
 | `wipe` | 必填。全滅重來,見下 |
 | `defeat` | `{ cues, seconds: 3 }`。打倒後播 `defeat` 動畫與 cue,`seconds` 後接 `sit-end` 迴圈 |
 | `bar` | `{ text: texts key（{percent} {phase}）, color, overlay }`。boss 血量條(StageContext.bossBar,和燈籠的 `progress-bar` 共用同一條,所以場邊燈不可有 progress-bar) |
+| `heal` | rc.25,選填,預設全關。`{ on-start: true, on-kneel: true }`:`on-start` = 開打時（含全滅重來後重新開打）、`on-kneel` = 光環碎她跪下時,把**在線成員**血量補滿（log `boss-heal reason=start｜restart｜kneel players=<n>`，派工到各玩家自己的執行緒）。招式傷害是最大血量的固定比例、不看護甲，進場時血量不滿就會被連續兩招打倒;補血讓單人在合理躲避下打得完 |
 | `hit-cues` | rc.24,選填。玩家一下**有效**近戰命中時在命中點播(被光環擋下、玩家冷卻內、出場等待中的不算;擋下走 `shield.spark-cues`)。頻率受 `hit-cooldown-ticks` 限制 |
 | `intro` | rc.24,選填，見下「出場演出」。沒寫 = 直接在 `points` 第一個點出場(同舊版) |
 
@@ -440,6 +451,8 @@ encounters:
     marker-offset: 0                   # 選填（rc.21，0..64）：第 i 隻用該組排序後第 (offset + i) % 組大小 個 marker，讓同一組出生點的不同波次出生在不同位置
 ```
 
+**`spawn-marker`／`spawn-offset`（rc.25，選填）**：不想用 mob_spawn 組、或組裡的出生點不在玩家看得到的位置時，改成在任一種 marker（trigger、door…）旁出生：`spawn-marker: maze_entry`、`spawn-offset: [0, 0, 6]`（世界方塊 `[dx, dy, dz]`，每個 |值| <= 64，只能和 spawn-marker 並用）。和 `marker-group` 擇一；寫了 spawn-marker 就不用也不能寫 marker-group，所有隻都出生在這一點（`marker-offset` 無作用）。載入時核對 marker 存在（場景核對）。波次的 `start-cues` 在這一點播。用法：大幽靈一進迷宮就出現在入口走廊，不是看不到的迷宮中央。
+
 全部生出且全數消失（打散或死亡）→ 波次清空，打 `wave-clear` log，並可成為其他波次的 `encounter-cleared` 觸發與 stage 完成條件。
 
 ## tool.yml
@@ -515,6 +528,14 @@ interface DialogPort {
 ```
 
 HanaToki 追蹤每局播出的所有 `CueRun`（不設上限），局結束全部 `cancel()`；燈籠的持續 cue 另外持有，暫停／完成時 cancel。cue 播放失敗只記 WARN，不影響狀態機。`audience` 是副本成員的 `Player` 參考，HanaToki 不碰它們；實作端自行派到各玩家的 EntityScheduler。
+
+### 提示觸發 enemy-dispersed（rc.25）
+
+`hints.yml` 的 `trigger: { type: enemy-dispersed, enemy: <enemies.yml id> }`：該種敵人被玩家打散、或被 powered 的成員碰散的那一刻觸發（全隊提示；光圈／stage 清場不觸發）。`once: false` 加 `repeat-seconds` 讓每次碰散都提醒。
+
+### 目標列清理（rc.25）
+
+目標列走 ActionBar 的 `hanatoki.stage` 組，LycoLib 會讓最後一則停留到 duration 結束（約 1.5 秒），離場後看起來像「目標列沒消失」。HanaToki 現在記下收過目標列的成員（`ObjectiveHudTracker`），**局結束、成員離場、換到沒有 objective 的 stage** 時對他們送一則空白動作列，同組取代掉最後一則（走玩家自己的執行緒，不依賴成員名單）。2026-10-23 的 bot 紀錄裡「28 秒仍在刷新」是那一局根本還沒結束（bot 人在副本世界），不是殘留；r2e 的「剩 579ms」才是這個停留。
 
 ### 提示觸發 lantern-contested（rc.21）
 

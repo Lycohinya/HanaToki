@@ -150,6 +150,12 @@ data class BossWipeSpec(
 data class BossDefeatSpec(val cues: List<String>, val seconds: Double)
 
 /**
+ * 補血(rc.25,選填,預設全關):[onStart] = 開打時(含全滅重來後重新開打)、[onKneel] = 光環碎、她跪下時,
+ * 把所有在線成員的血量補滿。讓單人在合理躲避下打得完,不會因為進場時血量不滿就被固定比例傷害連續打倒。
+ */
+data class BossHealSpec(val onStart: Boolean, val onKneel: Boolean)
+
+/**
  * 出場演出(rc.24,選填):boss 先在 [marker] 現身(播 [cues] 與一次性 [animation]),停 [holdSeconds] 秒後
  * 用 [glideSeconds] 秒滑(0 = 直接傳送)到 [glideTo](預設 `points` 第一個)落地,再等 start-delay 到才開打。
  * 全滅重來不重播出場演出。
@@ -286,6 +292,8 @@ data class BossSpec(
     val hitCues: List<String> = emptyList(),
     /** rc.24:出場演出;null = 直接在 points 第一個點出場(同舊版)。 */
     val intro: BossIntroSpec? = null,
+    /** rc.25:補血時機;預設不補。 */
+    val heal: BossHealSpec = BossHealSpec(false, false),
 ) {
     val lampIds: List<String> get() = gems.map { it.lamp }
 }

@@ -135,6 +135,11 @@ class SessionRun(
 
     // powered(power-up 物件觸發的全隊狀態)與最後一段尾聲
     private val powered = PoweredTracker()
+    /** rc.25:這個 stage 開始後有人吃過 power-up／某種敵人被打散或碰散過(objective 條件 powered-used、enemy-dispersed;換 stage 清掉)。 */
+    private var poweredUsed = false
+    private val dispersedEnemies = HashSet<String>()
+    /** rc.25:收到過目標列(objective)的成員;局結束、離場、換到沒有目標的 stage 時要把動作列清掉,不讓最後一則停留。 */
+    private val objectiveHud = ObjectiveHudTracker()
     private var poweredSource: PowerUpSpec? = null
     private val poweredCueRuns = ArrayList<CueRun>()
     /** 給指令執行緒讀的 powered 快照:成員 -> 結束的 tick。 */
@@ -180,6 +185,8 @@ class SessionRun(
     private class PowerUpRt(val spec: PowerUpSpec, val machine: PowerUpMachine, val marker: MapMarker, val loc: Location) {
         var probing = false
         var probeAt = 0L
+        /** rc.25:在架上期間持續播的標示 cue(beacon-cue)。 */
+        var beacon: CueRun? = null
     }
 
     /** 最後一段結算前的尾聲:[token] 每換一步加一,舊步驟的計時與對話回呼靠它失效。 */
@@ -337,6 +344,9 @@ class SessionRun(
         val stage = spec.stage(stageId) ?: run { warn("stage $stageId 不在 stages.yml"); return }
         currentStage = stage
         clearTransient("stage")
+        poweredUsed = false
+        dispersedEnemies.clear()
+        if (stage.objective.isEmpty()) clearObjectiveHud(objectiveHud.drain())
         // boss 屬於它的 stage:離開時倒下的人還原、載體移除;進入有 boss 的 stage 時出場
         stopBoss("stage", despawn = true)
         spec.bosses.values.firstOrNull { it.stage == stageId }?.let { if (it.id !in defeatedBosses) startBoss(it) }
@@ -383,6 +393,8 @@ class SessionRun(
         is Condition.BossDefeated -> c.boss in defeatedBosses
         Condition.Powered -> powered.poweredIds(now).isNotEmpty()
         is Condition.BossKneel -> boss?.let { it.spec.id == c.boss && it.state == BossState.KNEELING } == true
+        Condition.PoweredUsed -> poweredUsed
+        is Condition.EnemyDispersed -> c.enemy in dispersedEnemies
     }
 
     private fun objectReached(objectId: String, state: String): Boolean {
@@ -680,26 +692,29 @@ class SessionRun(
 
     private fun startEncounter(enc: EncounterRt) {
         if (closed || enc.phase != EncounterRt.Phase.WAITING) return
-        val group = spawnGroups[enc.spec.markerGroup].orEmpty()
+        val group: List<Location> = enc.spec.spawnMarker?.let { id ->
+            val o = enc.spec.spawnOffset
+            listOf(marker(id).location(world).add(o.getOrElse(0) { 0.0 }, o.getOrElse(1) { 0.0 }, o.getOrElse(2) { 0.0 }))
+        } ?: spawnGroups[enc.spec.markerGroup].orEmpty().map { it.location(world) }
         val players = members().size.coerceAtLeast(1)
         enc.phase = EncounterRt.Phase.SPAWNING
         enc.target = pickByPlayers(enc.spec.counts, players, enc.spec.counts.getValue(1))
         log("wave-start", "${enc.spec.id} count=${enc.target} players=$players offset=${enc.spec.markerOffset}")
         markProgress()
-        group.firstOrNull()?.let { cues(enc.spec.startCues, it.location(world)) }
+        group.firstOrNull()?.let { cues(enc.spec.startCues, it) }
         for (i in 0 until enc.target) {
             timers.schedule(now, i.toLong() * enc.spec.intervalTicks) { spawnEnemy(enc, group, i) }
         }
         if (enc.target == 0) maybeClear(enc)
     }
 
-    private fun spawnEnemy(enc: EncounterRt, group: List<MapMarker>, index: Int) {
+    private fun spawnEnemy(enc: EncounterRt, group: List<Location>, index: Int) {
         if (closed || enc.phase != EncounterRt.Phase.SPAWNING || enc.spawned >= enc.target || group.isEmpty()) return
         enc.spawned++
         val enemySpec = spec.enemies.getValue(enc.spec.enemy)
         val actorId = "${enc.spec.id}-${index + 1}"
         enc.alive += actorId
-        val at = group[(enc.spec.markerOffset + index) % group.size].location(world)
+        val at = group[(enc.spec.markerOffset + index) % group.size].clone()
         spawnEnemyAt(actorId, enemySpec, at, enc.spec.id)
     }
 
@@ -882,6 +897,11 @@ class SessionRun(
         val at = loc ?: rt.lastLoc
         log("enemy-dissolve", "${rt.actorId} enemy=${rt.spec.id} by=${killer?.let(::nameOf) ?: "lantern"}")
         if (rt.spec.frozenWhenWatched != null && killer != null) log("doll-dispersed", "${rt.actorId} by=${nameOf(killer)}")
+        // 玩家打散或 powered 碰散才算「打散過」;光圈／stage 清場(killer 為 null 且不是 reversal)不算
+        if (killer != null || reversal) {
+            dispersedEnemies += rt.spec.id
+            fireHints { (it.trigger as? HintTrigger.EnemyDispersed)?.enemy == rt.spec.id }
+        }
         markProgress()
         setMark(rt, null)
         rt.fleeing = false
@@ -1265,8 +1285,17 @@ class SessionRun(
 
     // ---- power-up 物件與 powered ----
 
+    /** rc.25:南瓜燈在架上(ready、所屬 stage 進行中)才有標示 cue;被拿走、換 stage、結束時取消。 */
+    private fun syncBeacon(rt: PowerUpRt) {
+        val cueId = rt.spec.beaconCue ?: return
+        val want = !closed && stageActive(rt.spec.stage) && rt.machine.state == PowerUpMachine.State.READY
+        if (want && rt.beacon == null) rt.beacon = cue(cueId, rt.loc)
+        else if (!want && rt.beacon != null) { rt.beacon?.cancel(); rt.beacon = null }
+    }
+
     private fun tickPowerUps() {
         if (powerUps.isEmpty()) return
+        for (rt in powerUps.values) syncBeacon(rt)
         for (rt in powerUps.values) {
             if (rt.machine.tryRespawn(now)) {
                 log("power-up", "${rt.spec.id} taken->ready")
@@ -1310,6 +1339,7 @@ class SessionRun(
     private fun grantPower(spec: PowerUpSpec, origin: Location) {
         val count = powered.grant(members(), now, (spec.seconds * 20).toLong())
         if (count == 0) return
+        poweredUsed = true
         poweredSource = spec
         poweredOrigin = origin
         cancelPoweredCues()
@@ -1540,6 +1570,7 @@ class SessionRun(
 
     fun onMemberLeft(playerId: UUID) {
         quitMembers.remove(playerId)
+        if (objectiveHud.forget(playerId)) clearObjectiveHud(listOf(playerId))
         // 離場的人已不在成員名單，身體狀態還原走 PlayerOp(不依賴名單)，見 BossHostImpl.restoreDowned
         boss?.onMemberLeft(playerId)
         touch.forget(playerId)
@@ -1734,7 +1765,13 @@ class SessionRun(
                 mapOf("charges" to c.toString(), "max" to tool.maxCharges.toString(), "pips" to chargePips(c, tool.maxCharges))
             }
             ctx.actionBar(playerId, key, params)
+            objectiveHud.shown(playerId)
         }
+    }
+
+    /** rc.25:把動作列清成空白(同一個 group 取代掉最後一則目標，不等它自己過期)。走玩家自己的執行緒，不依賴成員名單。 */
+    private fun clearObjectiveHud(ids: Collection<UUID>) {
+        for (id in ids) PlayerOp.dispatch(core.plugin, id) { p -> ActionBars.show(p, Component.empty()) }
     }
 
     // ---- 成員快照:燈火回補、燈籠世界標示、「沒拿道具靠近敵人」提示 ----
@@ -1994,6 +2031,13 @@ class SessionRun(
 
         override fun hideBossBar() { ctx.hideBossBar(); barPercent = -1 }
 
+        override fun healMembers(ids: List<UUID>) {
+            for (id in ids) ctx.runOnMember(id) { p ->
+                if (p.isDead) return@runOnMember
+                p.health = p.getAttribute(Attribute.MAX_HEALTH)?.value ?: 20.0
+            }
+        }
+
         override fun spawnBoss(at: Pt) {
             val actorId = "boss-${bossSpec.id}"
             bossActor = actorId
@@ -2202,6 +2246,7 @@ class SessionRun(
         if (closed) return
         // boss 先收（倒下的人還原身體狀態、血量條收掉）；這時 closed 還是 false，host 的演出呼叫才不會被擋
         stopBoss(reason, despawn = false)
+        clearObjectiveHud(objectiveHud.drain())
         closed = true
         timers.clear()
         touch.clear()
@@ -2221,6 +2266,7 @@ class SessionRun(
             val run = transientRuns.pollFirst() ?: break
             try { run.cancel() } catch (t: Throwable) { warn("CueRun.cancel 失敗:${t.message}") }
         }
+        powerUps.values.forEach { it.beacon = null }
         enemies.clear()
         log("session-end", "$reason cancelledCues=done")
     }

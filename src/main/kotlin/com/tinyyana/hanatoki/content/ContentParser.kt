@@ -386,6 +386,16 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                 node.only(setOf("type"))
                 if (!objective) { node.err("type", "powered 會來去,只能寫在 objective 的 until／while,不能當 stage 的完成條件"); null } else Condition.Powered
             }
+            "powered-used" -> {
+                node.only(setOf("type"))
+                if (!objective) { node.err("type", "powered-used 是 stage 內累積的旗標，只能寫在 objective 的 until／while，不能當 stage 的完成條件"); null } else Condition.PoweredUsed
+            }
+            "enemy-dispersed" -> {
+                node.only(setOf("type", "enemy"))
+                val enemy = node.id("enemy", required = true)
+                if (!objective) { node.err("type", "enemy-dispersed 是 stage 內累積的旗標，只能寫在 objective 的 until／while，不能當 stage 的完成條件"); null }
+                else enemy?.let(Condition::EnemyDispersed)
+            }
             "boss-kneel" -> {
                 node.only(setOf("type", "boss"))
                 val boss = node.id("boss", required = true)
@@ -393,7 +403,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                 else boss?.let(Condition::BossKneel)
             }
             else -> {
-                node.err("type", "未知的完成條件「$type」(可用:encounter-cleared、object-state、reach、boss-defeated;objective 另可用 powered、boss-kneel)")
+                node.err("type", "未知的完成條件「$type」(可用:encounter-cleared、object-state、reach、boss-defeated;objective 另可用 powered、powered-used、enemy-dispersed、boss-kneel)")
                 null
             }
         }
@@ -538,7 +548,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
 
     private fun parsePowerUp(id: String, node: Node): PowerUpSpec? {
         node.only(
-            setOf("type", "marker", "stage", "states", "radius", "seconds", "consume", "respawn-seconds", "start-cues", "end-cues"),
+            setOf("type", "marker", "stage", "states", "radius", "seconds", "consume", "respawn-seconds", "start-cues", "end-cues", "beacon-cue"),
         )
         val marker = node.id("marker", required = true)
         val radius = node.num("radius", min = 0.5, max = 8.0) ?: 1.5
@@ -547,7 +557,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         val respawn = node.num("respawn-seconds", min = 0.0, max = 3600.0) ?: 0.0
         val states = parseStates(node, ObjectStates.POWER_UP)
         if (marker == null || seconds == null) return null
-        return PowerUpSpec(id, marker, node.id("stage"), states, radius, seconds, consume, respawn, node.idList("start-cues"), node.idList("end-cues"))
+        return PowerUpSpec(id, marker, node.id("stage"), states, radius, seconds, consume, respawn, node.idList("start-cues"), node.idList("end-cues"), node.id("beacon-cue"))
     }
 
     private fun parseGate(id: String, node: Node): GateSpec? {
@@ -821,10 +831,23 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
     private fun parseEncounters(block: Node?): Map<String, EncounterSpec> {
         val out = LinkedHashMap<String, EncounterSpec>()
         block?.entries()?.forEach { (id, node) ->
-            node.only(setOf("stage", "enemy", "marker-group", "trigger", "delay-ticks", "counts", "interval-ticks", "start-cues", "marker-offset"))
+            node.only(setOf("stage", "enemy", "marker-group", "trigger", "delay-ticks", "counts", "interval-ticks", "start-cues", "marker-offset", "spawn-marker", "spawn-offset"))
             val stage = node.id("stage", required = true)
             val enemy = node.id("enemy", required = true)
-            val group = node.id("marker-group", required = true)
+            // rc.25:marker-group(mob_spawn 組)或 spawn-marker(任一 marker＋偏移)擇一
+            val spawnMarker = node.id("spawn-marker")
+            val group = if (spawnMarker != null) {
+                if (node.map["marker-group"] != null) node.err("marker-group", "和 spawn-marker 擇一，不能並用")
+                ""
+            } else node.id("marker-group", required = true)
+            val offsetRaw = node.list("spawn-offset")
+            val spawnOffset = ArrayList<Double>()
+            if (node.map["spawn-offset"] != null) {
+                if (spawnMarker == null) node.err("spawn-offset", "只能和 spawn-marker 並用")
+                if (offsetRaw.size != 3 || offsetRaw.any { it !is Number || it.toDouble().isNaN() || Math.abs(it.toDouble()) > 64.0 }) {
+                    node.err("spawn-offset", "必須是三個數字 [dx, dy, dz]，每個絕對值 <= 64")
+                } else offsetRaw.forEach { spawnOffset += (it as Number).toDouble() }
+            }
             val trigger = node.child("trigger", required = true)?.let { parseTrigger(it) }
             val counts = LinkedHashMap<Int, Int>()
             for ((n, v) in node.playerMap("counts")) {
@@ -837,7 +860,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
             if (stage != null && enemy != null && group != null && trigger != null && counts.isNotEmpty()) {
                 out[id] = EncounterSpec(
                     id, stage, enemy, group, trigger, node.int("delay-ticks", min = 0, max = 6000) ?: 0, counts, interval,
-                    node.idList("start-cues"), node.int("marker-offset", min = 0, max = 64) ?: 0,
+                    node.idList("start-cues"), node.int("marker-offset", min = 0, max = 64) ?: 0, spawnMarker, spawnOffset,
                 )
             }
         }
@@ -941,7 +964,11 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                     t.only(setOf("type", "seconds"))
                     t.num("seconds", min = 0.0, max = 600.0, exclusiveMin = true, required = true)?.let(HintTrigger::LanternContested)
                 }
-                else -> { t.err("type", "未知的提示觸發「$type」(可用:first-whiff、no-progress、near-marker、tool-empty、unequipped-near-enemy、lantern-contested)"); null }
+                "enemy-dispersed" -> {
+                    t.only(setOf("type", "enemy"))
+                    t.id("enemy", required = true)?.let(HintTrigger::EnemyDispersed)
+                }
+                else -> { t.err("type", "未知的提示觸發「$type」(可用:first-whiff、no-progress、near-marker、tool-empty、unequipped-near-enemy、lantern-contested、enemy-dispersed)"); null }
             }
             val cues = node.idList("cues")
             if (cues.isEmpty() && node.map["cues"] == null) node.err("cues", "缺少必要欄位(要播的 cue ID 清單)")
@@ -964,7 +991,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                 setOf(
                     "stage", "base-entity", "model", "scale", "animations", "health", "by-players", "hit-weight", "powered-hit-weight",
                     "hit-cooldown-ticks", "min-attack-strength", "start-delay-seconds", "spawn-cues", "points", "glide", "gap-seconds", "phase-up-seconds",
-                    "phases", "moves", "shield", "gems", "kneel", "pumpkins", "downed", "wipe", "defeat", "bar", "hit-cues", "intro",
+                    "phases", "moves", "shield", "gems", "kneel", "pumpkins", "downed", "wipe", "defeat", "bar", "hit-cues", "intro", "heal",
                 ),
             )
             val stage = node.id("stage", required = true)
@@ -1044,11 +1071,18 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                     node.idList("spawn-cues"), points, glide, node.num("gap-seconds", min = 0.0, max = 60.0) ?: 2.5,
                     node.num("phase-up-seconds", min = 0.0, max = 30.0) ?: 2.0,
                     phases, moves, shield, gems, kneel, pumpkins, downed, wipe, defeat, bar,
-                    node.idList("hit-cues"), intro,
+                    node.idList("hit-cues"), intro, parseHeal(node),
                 )
             }
         }
         return out
+    }
+
+    /** `heal: { on-start: true, on-kneel: true }`(rc.25,選填,預設都關)。 */
+    private fun parseHeal(boss: Node): BossHealSpec {
+        val n = boss.child("heal") ?: return BossHealSpec(false, false)
+        n.only(setOf("on-start", "on-kneel"))
+        return BossHealSpec(n.bool("on-start") ?: false, n.bool("on-kneel") ?: false)
     }
 
     /**

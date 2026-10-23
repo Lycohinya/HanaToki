@@ -117,7 +117,7 @@ class Rc24DataTest {
         val unknown = assertFailsWith<ContentDataException> {
             BossFixtures.parse(mapOf("stages.yml" to bossStages.replace("type: powered }", "type: sleeping }")))
         }.errors
-        assertTrue(unknown.any { "powered、boss-kneel" in it }, unknown.toString())
+        assertTrue(unknown.any { "enemy-dispersed、boss-kneel" in it }, unknown.toString())
     }
 
     @Test

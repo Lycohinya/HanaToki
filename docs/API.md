@@ -1016,6 +1016,13 @@ interface DialogPort {
 - `BossHost` 新增有預設實作的 `sampleCue(cueId, at)`(預設等同 `cue`)；`SessionRun` 覆寫成只保留最近 128 個 CueRun。
 - 新 log:`boss-intro`、`boss-intro-done`。
 
+### rc.25：南瓜迷宮分步引導與實玩缺陷修正
+
+- 選填資料欄位（預設零影響；schema 見 [CONTENT-DATA.md](CONTENT-DATA.md)）：encounter `spawn-marker`／`spawn-offset`、power-up `beacon-cue`、objective 條件 `powered-used`／`enemy-dispersed`、hint 觸發 `enemy-dispersed`、boss `heal`。
+- 型別（`com.tinyyana.hanatoki.content`，新欄位都在 data class 尾端有預設值）：`EncounterSpec.spawnMarker`／`spawnOffset`、`PowerUpSpec.beaconCue`、`Condition.PoweredUsed`／`Condition.EnemyDispersed`、`HintTrigger.EnemyDispersed`、`BossSpec.heal`（`BossHealSpec`）；`BossHost.healMembers` 有預設（不做事）。
+- 目標列的動作列在局結束、成員離場、換到沒有目標的 stage 時清空（`ObjectiveHudTracker`）。
+- 新 log：`boss-heal reason=start｜restart｜kneel players=<n>`。
+
 ### rc.19：`world-time`
 
 `dungeons.yml` 新增可選欄位 `world-time`（0..23999，一天內的 tick；沒寫 = 維持原行為）。`DungeonWorldProvisioner.ensureWorld(..., worldTime)` 在 void 世界建立後、以及世界已載入時（預載入、熱插拔）呼叫 `World#setTime`；`advance_time`（DO_DAYLIGHT_CYCLE）本來就被 provisioner 關掉，所以時間固定。在 global region tick thread 以外會派到 `GlobalRegionScheduler`。解析規則：`world-create: false` 或有 `world-generator` 時報錯（那種世界的日夜循環不受 HanaToki 鎖定）。

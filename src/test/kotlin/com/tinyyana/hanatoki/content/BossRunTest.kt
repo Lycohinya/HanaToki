@@ -40,6 +40,7 @@ class BossRunTest {
         val cuesPlayed = ArrayList<String>()
         val cuesFor = ArrayList<Pair<String, UUID>>()
         val sampled = ArrayList<Triple<Long, String, Pt>>()
+        val healed = ArrayList<List<UUID>>()
         val spawnedAt = ArrayList<Pt>()
         val bossMoves = ArrayList<Pt>()
         val anims = ArrayList<String>()
@@ -119,6 +120,7 @@ class BossRunTest {
         override fun cue(cueId: String, at: Pt) { cuesPlayed += cueId }
         override fun cueFor(cueId: String, at: Pt, player: UUID) { cuesFor += cueId to player }
         override fun sampleCue(cueId: String, at: Pt) { sampled += Triple(clock, cueId, at) }
+        override fun healMembers(ids: List<UUID>) { healed += ids }
         override fun loopCue(cueId: String, at: Pt): Runnable { cuesPlayed += "loop:$cueId"; return Runnable { cuesPlayed += "cancel:$cueId" } }
         override fun followCue(cueId: String, player: UUID, at: Pt): Runnable { cuesPlayed += "follow:$cueId"; return Runnable { cuesPlayed += "cancel:$cueId" } }
         override fun music(cueId: String) { musics += cueId }
@@ -1101,5 +1103,41 @@ class BossRunTest {
         host.advance(300)
         assertEquals(total, host.sampled.size)
         assertEquals(1, host.logged("boss-move-cancel").size)
+    }
+
+    // ---- rc.25:補血 ----
+
+    @Test
+    fun `heal 預設關，開了才在開打、跪下、全滅重來後補血`() {
+        val (h0, r0) = setup()
+        begin(h0, r0)
+        kneel(h0, r0)
+        assertTrue(h0.healed.isEmpty() && h0.logged("boss-heal").isEmpty(), "預設不補血")
+        val spec = baseSpec.copy(heal = BossHealSpec(onStart = true, onKneel = true))
+        val (host, run) = setup(players = listOf(alice, bob), spec = spec)
+        begin(host, run)
+        assertEquals(listOf("boss-heal reason=start players=2"), host.logged("boss-heal"))
+        assertEquals(listOf(listOf(alice, bob)), host.healed)
+        kneel(host, run)
+        assertEquals(listOf("boss-heal reason=start players=2", "boss-heal reason=kneel players=2"), host.logged("boss-heal"))
+        // 離線的不補
+        host.online -= bob
+        host.advance(260)
+        run.downMember(alice)
+        assertEquals(BossState.WIPED, run.state)
+        host.advance(200)
+        assertEquals(BossState.IDLE, run.state)
+        assertEquals("boss-heal reason=restart players=1", host.logged("boss-heal").last())
+        assertEquals(listOf(alice), host.healed.last())
+    }
+
+    @Test
+    fun `只開 on-kneel 時開打不補血`() {
+        val spec = baseSpec.copy(heal = BossHealSpec(onStart = false, onKneel = true))
+        val (host, run) = setup(spec = spec)
+        begin(host, run)
+        assertTrue(host.healed.isEmpty())
+        kneel(host, run)
+        assertEquals(1, host.healed.size)
     }
 }
