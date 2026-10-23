@@ -1,4 +1,4 @@
-# 資料驅動副本內容（1.0.0-rc.27）
+# 資料驅動副本內容（1.0.0-rc.28）
 
 內容插件只給 **一個資料夾 + texts**，行為由框架內建的 `DataDrivenBehavior` 依資料執行，內容端不寫 Kotlin。另做一座副本只換設定檔與資產。判準：加第 N+1 盞燈籠、第 N+1 種幽靈、第 N+1 段提示，只改一筆 YAML。
 
@@ -76,6 +76,7 @@ stage 一開始（上一段完成、門開）玩家常常還在上一區，這�
       dialog: corridor_intro                                          # 對每位成員開，不等讀完（同 on-start）
       dialogs: [roof_01, roof_02]                                     # 選填：依序一段一段播，每段等全部成員讀完（離場的人不算）才播下一段，全播完才算「對話結束」
       dialog-timeout-seconds: 120                                     # 每段等全部成員的上限（1..600，預設 120），逾時就放行
+      dialog-delay-seconds: 0                                         # rc.28：`dialog`（單段）延遲幾秒才開（0..30，預設 0），讓敵人先現身
     objective:
       - { text: goal.go, until: { type: arrived } }                   # 抵達前顯示「去那裡」
       - { text: goal.flash, until: { type: object-state, object: lantern_b, state: burning } }
@@ -88,6 +89,23 @@ stage 一開始（上一段完成、門開）玩家常常還在上一區，這�
 - **hint `requires-arrival: true`**：那個 stage 抵達前不播（`no-progress` 提示常用，免得玩家還在上一區就被講規則）。需要 `stage` 且該 stage 有 arrive。
 - **boss**：stage 有 arrive 時，boss 不在 stage 開始時出場，改成抵達時才出場（出場演出、start-delay 都從抵達算）。boss `intro.await-arrive-dialogs: true`（需要 stage 的 `on-arrive.dialogs`）：出場後停在 intro marker 不下來，等對話序列播完（或逾時）才開始計 `hold-seconds` 與 `start-delay-seconds`（log `boss-intro-release`）。hold + glide 仍不可超過 start-delay。
 - 沒寫 `arrive` 的 stage 行為與 rc.25 完全相同；`on-arrive` 沒有 `arrive` 載入時擋下；`on-arrive` 不能寫 `opens`。
+
+### stage 層級的道具覆寫 tool-overrides（rc.28，選填）
+
+`tool.yml` 的道具數值是全域的；某一段想要不同的回補速度或格數（例如 Boss 戰要常常閃光），在那個 stage 寫 `tool-overrides`，只影響這一段：
+
+```yaml
+  front_court:
+    tool-overrides:
+      night_lantern:                  # tool.yml 的 tool id，必須存在
+        charges: 8                    # 格數上限（耐久條上限跟著換）
+        passive-regen-seconds: 2.5    # 被動回補間隔
+        zone-regen-seconds: 1.5       # 光源區回補間隔（道具必須有 zone-regen）
+        refill-on-dissolve: 2         # 打散敵人補幾格
+        fill-on-start: true           # 進這個 stage 時把在線成員補到新的上限（預設 false，維持目前格數）
+```
+
+沒寫的欄位沿用 tool.yml，至少要覆寫一個欄位。進 stage 時重算生效數值並重開回補計時，log `tool-override stage= tool= max= passive= zone= refill=`。tool.yml 另有 `free-on-burning-lamp: true`（rc.28）：閃光碰到「正在燒」的燈籠、又沒點到未點燃的燈籠時不扣格（log `flash-keep`），敵人照常判定。boss `heal` 另有 `tools: true`：heal 觸發時（on-start／on-kneel／全滅重來）把在線成員的道具補滿（log `boss-refill-tools`）。
 
 ### 最後一段結算 resolve（rc.22，選填，預設關）
 
@@ -291,7 +309,10 @@ enemies:
       move-cues: [doll_click]  # 選填：從凍結轉為移動時播在人偶身上（follow 實體，聽得出方位）
       freeze-cues: [doll_stop] # 選填：從移動轉為凍結時播
       cue-cooldown-ticks: 6    # 預設 6（0..400）：move-cues 兩次之間的最短間隔，視線在邊緣來回掃時不洗聲
+      harmless-while-frozen: false   # rc.28，預設 false：true = 被看著凍結期間接觸玩家不推、不扣燈火（只有移動中的才有接觸效果）
 ```
+
+**rc.28 出生即凍結**：這種敵人一生出來就先是凍結的姿勢（原地不動、`setAI(false)`），第一輪掃描才決定放不放開——不再先走兩步才凍住。第一次判定若被看著，照常補記 `doll-frozen`／`doll-pose`。
 
 掃描：視錐與距離在 anchor 執行緒用成員快照（`x,y,z,yaw,pitch,…,sneaking`；眼睛高度站 1.62、蹲 1.27）算；只有已在視錐內的候選才派 `rayTraceBlocks` 到**該敵人自己的 region**（`Bukkit.isOwnedByCurrentRegion` 確認射線經過的區塊都歸本 region，否則當作被看到並 WARN 一次），AI 開關與路徑指令在同一個回呼裡套用。單輪最多 24 隻（超過時輪替，見上）。姿勢只在「移動 → 凍結」那一刻換一次，不連續兩次同一個。
 

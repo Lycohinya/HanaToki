@@ -13,6 +13,7 @@ import kr.toxicity.model.api.bukkit.platform.BukkitLocation
 import kr.toxicity.model.api.entity.BaseEntity
 import kr.toxicity.model.api.tracker.EntityTracker
 import kr.toxicity.model.api.tracker.ModelScaler
+import kr.toxicity.model.api.tracker.TrackerModifier
 import kr.toxicity.model.api.tracker.TrackerUpdateAction
 import kr.toxicity.model.api.util.function.BonePredicate
 import org.bukkit.Bukkit
@@ -70,7 +71,9 @@ class BetterModelBossModels(private val plugin: Plugin) : BossModels {
     private val registry = BossModelOwnerRegistry<Handle>()
     private val entityIndex = ConcurrentHashMap<UUID, String>()
 
-    override fun bind(owner: String, entity: Entity, modelId: String): BossModelHandle? {
+    override fun bind(owner: String, entity: Entity, modelId: String): BossModelHandle? = bind(owner, entity, modelId, false)
+
+    override fun bind(owner: String, entity: Entity, modelId: String, alwaysVisible: Boolean): BossModelHandle? {
         val renderer = BetterModel.modelOrNull(modelId) ?: run {
             plugin.logger.warning("[HanaToki] BossModels.bind: 找不到 BetterModel 模型 $modelId")
             return null
@@ -83,7 +86,9 @@ class BetterModelBossModels(private val plugin: Plugin) : BossModels {
         }
         // 回傳值本身不留著(見 class KDoc:reload 之後會換一顆新物件,Handle 一律用
         // resolveTracker() 重新查),這裡呼叫只是為了讓 BetterModel 真的建立並登記它。
-        renderer.create(BaseEntity.of(BukkitAdapter.adapt(entity)))
+        // alwaysVisible:關掉這顆 tracker 的 sight-trace(config.yml sight-trace: true 時，大模型中心點被牆或屋頂擋住就不送)
+        if (alwaysVisible) renderer.create(BaseEntity.of(BukkitAdapter.adapt(entity)), TrackerModifier.DEFAULT.toBuilder().sightTrace(false).build())
+        else renderer.create(BaseEntity.of(BukkitAdapter.adapt(entity)))
         val key = newKey(owner)
         val handle = Handle(modelId, key, entity)
         registry.put(owner, key, handle)
@@ -187,6 +192,22 @@ class BetterModelBossModels(private val plugin: Plugin) : BossModels {
                 current.update(TrackerUpdateAction.togglePart(visible), BonePredicate.name(bone).withChildren())
             }
             return true
+        }
+
+        override fun ensureVisibleTo(players: Collection<UUID>) {
+            if (closed || players.isEmpty()) return
+            dispatch { current ->
+                var sent = 0
+                for (id in players) {
+                    val player = Bukkit.getPlayer(id) ?: continue
+                    if (!player.isOnline || player.world != boundEntity.world) continue
+                    if (current.isSpawned(id)) continue
+                    val platform = BukkitAdapter.adapt(player)
+                    // 還沒對這位玩家生成，而且 BetterModel 自己也認為他該看得到(距離、條件)才補送
+                    if (current.canBeSpawnedAt(platform) && current.markPlayerForSpawn(platform)) sent++
+                }
+                if (sent > 0) plugin.logger.info("[HanaToki] BossModels.ensureVisibleTo: 補送 $sent 位玩家 model=$modelId")
+            }
         }
 
         override fun scale(value: Float) {

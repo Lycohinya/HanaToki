@@ -155,7 +155,7 @@ data class BossDefeatSpec(val cues: List<String>, val seconds: Double)
  * 補血(rc.25,選填,預設全關):[onStart] = 開打時(含全滅重來後重新開打)、[onKneel] = 光環碎、她跪下時,
  * 把所有在線成員的血量補滿。讓單人在合理躲避下打得完,不會因為進場時血量不滿就被固定比例傷害連續打倒。
  */
-data class BossHealSpec(val onStart: Boolean, val onKneel: Boolean)
+data class BossHealSpec(val onStart: Boolean, val onKneel: Boolean, val refillTools: Boolean = false)
 
 /**
  * 出場演出(rc.24,選填):boss 先在 [marker] 現身(播 [cues] 與一次性 [animation]),停 [holdSeconds] 秒後

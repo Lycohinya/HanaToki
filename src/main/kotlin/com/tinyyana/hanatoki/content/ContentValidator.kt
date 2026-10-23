@@ -43,6 +43,15 @@ object ContentValidator {
             stage.onComplete.opens.forEachIndexed { i, gate ->
                 if (spec.objects[gate] !is GateSpec) errors += "$where.on-complete.opens[$i]: 「$gate」不是 gate 物件(objects.yml)"
             }
+            // tool-overrides(rc.28):引用的道具要存在，zone-regen-seconds 要有光源區可以覆寫
+            for ((toolId, o) in stage.toolOverrides) {
+                val tool = spec.tools[toolId]
+                if (tool == null) { errors += "$where.tool-overrides.$toolId: 引用不存在的道具「$toolId」(tool.yml)"; continue }
+                if (o.zoneRegenSeconds != null && tool.zoneRegen == null) errors += "$where.tool-overrides.$toolId.zone-regen-seconds: 道具「$toolId」沒有 zone-regen，不能只覆寫間隔"
+                if (o.charges == null && o.passiveRegenSeconds == null && o.zoneRegenSeconds == null && o.refillOnDissolve == null) {
+                    errors += "$where.tool-overrides.$toolId: 至少要覆寫一個欄位"
+                }
+            }
             // arrive／on-arrive(rc.26)
             if (stage.onArrive.opens.isNotEmpty()) errors += "$where.on-arrive.opens: on-arrive 不能寫 opens"
             if (stage.onArrive.dialogs.isNotEmpty() && stage.arrive == null) errors += "$where.on-arrive.dialogs: 沒有 arrive 的 stage 不會觸發 on-arrive"

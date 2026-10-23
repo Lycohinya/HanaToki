@@ -33,6 +33,12 @@ interface BossModels {
      */
     fun bind(owner: String, entity: Entity, modelId: String): BossModelHandle?
 
+    /**
+     * rc.28:同 [bind]，[alwaysVisible] = true 時這顆 tracker 關掉 BetterModel 的 sight-trace 剔除(大型 boss 模型不會因為
+     * 中心點被屋頂、牆擋住就整隻不送給玩家)。預設實作忽略旗標、等同 [bind]。
+     */
+    fun bind(owner: String, entity: Entity, modelId: String, alwaysVisible: Boolean): BossModelHandle? = bind(owner, entity, modelId)
+
     /** 關掉這個 owner 名下所有 handle。找不到就是 no-op。 */
     fun closeOwner(owner: String)
 

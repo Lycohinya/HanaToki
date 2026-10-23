@@ -155,6 +155,10 @@ interface ActorHandle {
      */
     fun bindModel(actorId: String, modelId: String): CompletableFuture<com.tinyyana.hanatoki.presentation.BossModelHandle>
 
+    /** rc.28:同 [bindModel]，[alwaysVisible] = true 關掉這顆 tracker 的 sight-trace 剔除(大型 boss 模型用)。預設等同 [bindModel]。 */
+    fun bindModel(actorId: String, modelId: String, alwaysVisible: Boolean): CompletableFuture<com.tinyyana.hanatoki.presentation.BossModelHandle> =
+        bindModel(actorId, modelId)
+
     /**
      * 在 actor 實體**自己的 EntityScheduler** 上對它做一件事(關 AI、發光、播模型動畫…)。
      * 找不到 actor 或實體已 retired 時不執行。[action] 只能在回呼內使用實體,不能帶出去存。

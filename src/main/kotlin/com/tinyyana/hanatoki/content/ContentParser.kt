@@ -280,7 +280,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         val block = root.child("stages", required = true) ?: return emptyList()
         val out = ArrayList<StageSpec>()
         for ((id, node) in block.entries()) {
-            node.only(setOf("on-start", "complete", "on-complete", "next", "objective", "objective-done", "objective-every-seconds", "clears-enemies", "resolve", "arrive", "on-arrive"))
+            node.only(setOf("on-start", "complete", "on-complete", "next", "objective", "objective-done", "objective-every-seconds", "clears-enemies", "resolve", "arrive", "on-arrive", "tool-overrides"))
             val onStart = parseStageEffects(node.child("on-start"))
             val onComplete = parseStageEffects(node.child("on-complete"), allowOpens = true)
             val arrive = parseArrive(node)
@@ -300,9 +300,30 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                 if (next != null) node.err("resolve", "只有最後一段(沒有 next)才能結算;這個 stage 有 next=$next")
                 if (complete.isEmpty()) node.err("resolve", "有 resolve 的 stage 必須寫 complete(沒有完成條件就永遠不會結算)")
             }
-            out += StageSpec(id, onStart, complete, onComplete, next, objective, done, every, clears, resolve, arrive, onArrive)
+            out += StageSpec(id, onStart, complete, onComplete, next, objective, done, every, clears, resolve, arrive, onArrive, parseToolOverrides(node))
         }
         if (out.isEmpty() && block.map.isEmpty()) block.err(null, "至少要有一個 stage")
+        return out
+    }
+
+    /**
+     * `tool-overrides: { night_lantern: { charges, passive-regen-seconds, zone-regen-seconds, refill-on-dissolve, fill-on-start } }`
+     * (rc.28,選填):這個 stage 進行期間覆寫局內道具的數值。
+     */
+    private fun parseToolOverrides(stage: Node): Map<String, ToolOverride> {
+        if (stage.map["tool-overrides"] == null) return emptyMap()
+        val block = stage.child("tool-overrides") ?: return emptyMap()
+        val out = LinkedHashMap<String, ToolOverride>()
+        for ((toolId, n) in block.entries()) {
+            n.only(setOf("charges", "passive-regen-seconds", "zone-regen-seconds", "refill-on-dissolve", "fill-on-start"))
+            out[toolId] = ToolOverride(
+                n.int("charges", min = 1, max = 64),
+                n.num("passive-regen-seconds", min = 1.0, max = 600.0),
+                n.num("zone-regen-seconds", min = 0.5, max = 600.0),
+                n.int("refill-on-dissolve", min = 0, max = 64),
+                n.bool("fill-on-start") ?: false,
+            )
+        }
         return out
     }
 
@@ -375,9 +396,10 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         if (node == null) return StageEffects()
         val allowed = mutableSetOf("cues", "music", "dialog", "title", "subtitle")
         if (allowOpens) allowed += "opens"
-        if (allowDialogs) { allowed += "dialogs"; allowed += "dialog-timeout-seconds" }
+        if (allowDialogs) { allowed += "dialogs"; allowed += "dialog-timeout-seconds"; allowed += "dialog-delay-seconds" }
         node.only(allowed)
         return StageEffects(
+            dialogDelaySeconds = if (allowDialogs) node.num("dialog-delay-seconds", min = 0.0, max = 30.0) ?: 0.0 else 0.0,
             dialogs = if (allowDialogs) node.idList("dialogs") else emptyList(),
             dialogTimeoutSeconds = if (allowDialogs) node.num("dialog-timeout-seconds", min = 1.0, max = 600.0) ?: 120.0 else 120.0,
             cues = node.idList("cues"),
@@ -804,7 +826,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         n.only(
             setOf(
                 "half-angle", "max-distance", "occlusion", "scan-ticks", "speed", "body-height", "poses", "moving-animation",
-                "move-cues", "freeze-cues", "cue-cooldown-ticks",
+                "move-cues", "freeze-cues", "cue-cooldown-ticks", "harmless-while-frozen",
             ),
         )
         return FrozenWhenWatchedSpec(
@@ -819,6 +841,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
             moveCues = n.idList("move-cues"),
             freezeCues = n.idList("freeze-cues"),
             cueCooldownTicks = n.int("cue-cooldown-ticks", min = 0, max = 400) ?: 6,
+            harmlessWhileFrozen = n.bool("harmless-while-frozen") ?: false,
         )
     }
 
@@ -950,6 +973,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                 setOf(
                     "type", "material", "item-model", "name", "lore", "slot", "charges", "start-charges", "cone-angle", "range",
                     "stun-seconds", "cooldown-ticks", "refill-on-dissolve", "cues", "hud-text", "passive-regen-seconds", "zone-regen",
+                    "free-on-burning-lamp",
                 ),
             )
             val type = node.str("type") ?: "flash"
@@ -986,6 +1010,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                     node.int("refill-on-dissolve", min = 0, max = 64) ?: 0,
                     cues?.idList("flash") ?: emptyList(), cues?.idList("empty") ?: emptyList(), node.str("hud-text"),
                     passive, zone, cues?.idList("drained") ?: emptyList(), cues?.idList("gain") ?: emptyList(),
+                    node.bool("free-on-burning-lamp") ?: false,
                 )
             }
         }
@@ -1152,9 +1177,9 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
 
     /** `heal: { on-start: true, on-kneel: true }`(rc.25,選填,預設都關)。 */
     private fun parseHeal(boss: Node): BossHealSpec {
-        val n = boss.child("heal") ?: return BossHealSpec(false, false)
-        n.only(setOf("on-start", "on-kneel"))
-        return BossHealSpec(n.bool("on-start") ?: false, n.bool("on-kneel") ?: false)
+        val n = boss.child("heal") ?: return BossHealSpec(false, false, false)
+        n.only(setOf("on-start", "on-kneel", "tools"))
+        return BossHealSpec(n.bool("on-start") ?: false, n.bool("on-kneel") ?: false, n.bool("tools") ?: false)
     }
 
     /**

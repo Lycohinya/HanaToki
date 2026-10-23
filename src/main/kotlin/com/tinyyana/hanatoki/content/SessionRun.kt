@@ -124,6 +124,7 @@ class SessionRun(
     private val presenceNeeded: Boolean = spec.tools.values.any { it.passiveRegenSeconds != null || it.zoneRegen != null } ||
         spec.objects.values.any { it is LanternSpec && it.hint != null } ||
         spec.hints.values.any { it.trigger is HintTrigger.UnequippedNearEnemy } ||
+        spec.stages.any { st -> st.toolOverrides.values.any { it.passiveRegenSeconds != null || it.zoneRegenSeconds != null } } ||
         spec.stages.any { st -> st.objective.any { step -> core.texts.rawOrNull(step.textKey)?.contains("{nearest:") == true } }
 
     /** rc.27:最近一輪成員快照(presence 探測)，目標文字 `{nearest:power-up}` 算方向用。 */
@@ -234,6 +235,8 @@ class SessionRun(
         var lastLoc: Location? = null
         /** rc.26:出生(載體生成完成)的 tick;chases-players.start-delay-seconds 用。 */
         var bornAt = -1L
+        /** rc.28:人偶一出生就先凍結(第一輪掃描前不先走兩步)；第一次判定時補記 doll-frozen／doll-pose log。 */
+        var initialFreeze = false
         var lastWhiff = -1000L
         /** 跟著敵人的狀態標示 cue(活著 / 僵直中),換狀態時換掉。 */
         var markRun: CueRun? = null
@@ -388,6 +391,7 @@ class SessionRun(
         arrived = stage.arrive == null
         arriveProbePending = false
         arrivalBoss = null
+        applyToolOverrides(stage)
         spec.bosses.values.firstOrNull { it.stage == stageId }?.let {
             if (it.id !in defeatedBosses) { if (arrived) startBoss(it, held = false) else arrivalBoss = it }
         }
@@ -495,17 +499,22 @@ class SessionRun(
         }
         val dialogId = effects.dialog ?: return
         val port: DialogPort = runtime.dialogPort() ?: run { noteNoPort("DialogPort"); return }
-        for (playerId in members()) {
-            ctx.runOnMember(playerId) { player ->
-                try {
-                    port.open(player, spec.namespace, dialogId, IntConsumer { choice ->
-                        log("dialog", "$dialogId ($what/${stage.id}) player=${nameOf(playerId)} choice=$choice")
-                    })
-                } catch (t: Throwable) {
-                    warn("dialog $dialogId 開啟失敗:${t.javaClass.simpleName}: ${t.message}")
+        val openDialog = Runnable {
+            if (!closed && currentStage?.id == stage.id) for (playerId in members()) {
+                ctx.runOnMember(playerId) { player ->
+                    try {
+                        port.open(player, spec.namespace, dialogId, IntConsumer { choice ->
+                            log("dialog", "$dialogId ($what/${stage.id}) player=${nameOf(playerId)} choice=$choice")
+                        })
+                    } catch (t: Throwable) {
+                        warn("dialog $dialogId 開啟失敗:${t.javaClass.simpleName}: ${t.message}")
+                    }
                 }
             }
         }
+        // rc.28 dialog-delay-seconds:先讓敵人現身，過幾秒使魔才開口
+        val delayTicks = (effects.dialogDelaySeconds * 20).toLong()
+        if (delayTicks > 0L) timers.schedule(now, delayTicks) { openDialog.run() } else openDialog.run()
     }
 
     private fun conditionMet(c: Condition): Boolean = when (c) {
@@ -583,6 +592,8 @@ class SessionRun(
         boss?.tick()
         tickEnemyRules()
         if (now % 10L == 0L) probeMarkers()
+        // rc.28:boss 模型補送。BetterModel 偶爾丟掉整個 tick 的封包(生成封包剛好被丟 = 該玩家看不到模型)，每秒檢查一次
+        if (now % 20L == 0L) bossModel?.ensureVisibleTo(members())
         if (presenceNeeded && now % 10L == 0L) probePresence()
         tickIdleHints()
         tickObjective()
@@ -888,6 +899,13 @@ class SessionRun(
             // 之後只聽掃描給的路徑。導航本身仍然會走
             ctx.actors().runOnEntity(rt.actorId) { e -> (e as? Mob)?.let { stripPlayerAi(rt, it) } }
         }
+        // rc.28:人偶一生出來就是凍結的姿勢(原地不動)，第一輪掃描才決定要不要放開；不先走兩步才凍住
+        rt.spec.frozenWhenWatched?.let { f ->
+            rt.freeze.update(true)
+            rt.freeze.pickPose(f.poses.size, random)
+            rt.initialFreeze = true
+            ctx.actors().runOnEntity(rt.actorId) { e -> (e as? LivingEntity)?.setAI(false) }
+        }
         if (powered.active && rt.spec.fleesWhenPowered != null) setFleeing(rt, true)
         val modelId = rt.spec.model ?: return
         ctx.actors().bindModel(rt.actorId, modelId).whenComplete { handle, _ ->
@@ -1120,7 +1138,9 @@ class SessionRun(
             if (chase != null && rt.bornAt >= 0 && now - rt.bornAt < (chase.startDelaySeconds * 20).toLong()) continue
             rt.spec.chasesPlayers?.let { chaseStep(rt, loc, it, snap) }
             rt.spec.frozenWhenWatched?.let { frozenStep(rt, loc, it, snap) }
-            rt.spec.contact?.let { harassStep(rt, loc, it, snap, if (rt.spec.harassesPlayers != null) touch else chaseTouch) }
+            // rc.28 harmless-while-frozen:被看著凍結的人偶不推人、不扣燈火
+            val harmless = rt.freeze.frozen && rt.spec.frozenWhenWatched?.harmlessWhileFrozen == true
+            if (!harmless) rt.spec.contact?.let { harassStep(rt, loc, it, snap, if (rt.spec.harassesPlayers != null) touch else chaseTouch) }
         }
         publishDrain(contest)
     }
@@ -1208,7 +1228,7 @@ class SessionRun(
                 applied += "push"
             }
             is HarassEffect.ToolCharges -> {
-                val tool = spec.tools[effect.tool] ?: continue
+                val tool = effectiveTools[effect.tool] ?: continue
                 val before = chargesOf(playerId, tool)
                 val after = (before + effect.delta).coerceIn(0, tool.maxCharges)
                 if (after != before) {
@@ -1335,6 +1355,8 @@ class SessionRun(
         }
         val entity = core.actorController.entityOf(sessionId, rt.actorId)
         val at = rt.lastLoc
+        val initial = rt.initialFreeze
+        rt.initialFreeze = false
         when (rt.freeze.update(watcher != null)) {
             FreezeState.Change.FROZE -> {
                 val index = rt.freeze.pickPose(f.poses.size, random)
@@ -1348,7 +1370,15 @@ class SessionRun(
                 if (at != null && rt.freeze.moveCueDue(now, f.cueCooldownTicks)) cues(f.moveCues, at, entity)
                 syncBody(rt)
             }
-            FreezeState.Change.NONE -> {}
+            FreezeState.Change.NONE -> {
+                // 出生時就先凍結、第一次判定也被看著:補記「從移動轉凍結」該有的 log 與 cue(bot 以 doll-frozen 為準)
+                if (initial && watcher != null) {
+                    val index = rt.freeze.poseIndex
+                    log("doll-frozen", "${rt.actorId} watcher=${nameOf(watcher)}")
+                    log("doll-pose", "${rt.actorId} pose=${f.poses.getOrNull(index)?.id ?: "none"}")
+                    if (at != null) cues(f.freezeCues, at, entity)
+                }
+            }
         }
     }
 
@@ -1698,7 +1728,42 @@ class SessionRun(
 
     // ---- 局內道具 ----
 
-    private fun toolSpecs(): Collection<ToolSpec> = spec.tools.values
+    /** rc.28:目前 stage 生效的道具數值(tool.yml 加上 stage 的 tool-overrides);換 stage 時重算。 */
+    private var effectiveTools: Map<String, ToolSpec> = spec.tools
+
+    private fun toolSpecs(): Collection<ToolSpec> = effectiveTools.values
+
+    private fun effectiveToolsFor(stage: StageSpec): Map<String, ToolSpec> =
+        if (stage.toolOverrides.isEmpty()) spec.tools else spec.tools.mapValues { (id, base) ->
+            val o = stage.toolOverrides[id] ?: return@mapValues base
+            base.copy(
+                maxCharges = o.charges ?: base.maxCharges,
+                passiveRegenSeconds = o.passiveRegenSeconds ?: base.passiveRegenSeconds,
+                zoneRegen = base.zoneRegen?.let { z -> o.zoneRegenSeconds?.let { z.copy(seconds = it) } ?: z },
+                refillOnDissolve = o.refillOnDissolve ?: base.refillOnDissolve,
+            )
+        }
+
+    /**
+     * rc.28:進 stage 時套用 tool-overrides:重算生效數值、回補計時重開、耐久條上限跟著換(`fill-on-start` 的補滿，其餘維持目前格數)。
+     * 沒有覆寫、前一個 stage 也沒有覆寫就什麼都不做。
+     */
+    private fun applyToolOverrides(stage: StageSpec) {
+        val before = effectiveTools
+        val after = effectiveToolsFor(stage)
+        if (before === after) return
+        effectiveTools = after
+        meters.clear()
+        for (tool in after.values) {
+            val o = stage.toolOverrides[tool.id]
+            for (playerId in members()) {
+                val current = chargesOf(playerId, tool)
+                val target = if (o?.fillOnStart == true) tool.maxCharges else current
+                setCharges(playerId, tool, target)
+            }
+            log("tool-override", "stage=${stage.id} tool=${tool.id} max=${tool.maxCharges} passive=${tool.passiveRegenSeconds ?: 0.0} zone=${tool.zoneRegen?.seconds ?: 0.0} refill=${tool.refillOnDissolve}")
+        }
+    }
 
     private fun chargesOf(playerId: UUID, tool: ToolSpec): Int = charges.getOrPut(playerId) { HashMap() }.getOrPut(tool.id) { tool.startCharges }
 
@@ -1769,7 +1834,7 @@ class SessionRun(
 
     private fun handleFlash(playerId: UUID, toolId: String, eye: Location, dir: Vector, feet: Location) {
         if (closed) return
-        val tool = spec.tools[toolId] ?: return
+        val tool = effectiveTools[toolId] ?: return
         if (playerId !in members()) return
         // 倒下的人不能點燈、不能閃光
         if (isDowned(playerId)) return
@@ -1778,21 +1843,27 @@ class SessionRun(
         lastFlash[playerId] = now
         val player = Bukkit.getPlayer(playerId)
         val current = chargesOf(playerId, tool)
-        if (current <= 0) {
+        val direction = dir.clone().normalize()
+        val half = Math.toRadians(tool.coneAngle / 2.0)
+        // rc.28 free-on-burning-lamp:閃光碰到正在燒的燈、又沒點到任何未點燃的燈 = 「繼續照住燈」，不吃燈火(實玩 31 次閃光有 20 次沒點到燈，
+        // 多半是對燒著或太遠的燈連按)；這次閃光仍照常判定敵人
+        val keepLighting = tool.freeOnBurningLamp &&
+            lanterns.values.any { stageActive(it.spec.stage) && it.machine.state == LanternMachine.State.BURNING && flashTouches(it, eye, direction, half, tool, feet) } &&
+            lanterns.values.none { stageActive(it.spec.stage) && it.machine.state == LanternMachine.State.UNLIT && flashTouches(it, eye, direction, half, tool, feet) }
+        if (current <= 0 && !keepLighting) {
             log("flash-empty", "player=${nameOf(playerId)} tool=${tool.id}")
             cues(tool.emptyCues, eye, null, listOfNotNull(player))
             hintToolEmpty(playerId)
             return
         }
-        setCharges(playerId, tool, current - 1)
+        val after = if (keepLighting) current else current - 1
+        if (!keepLighting) setCharges(playerId, tool, after) else log("flash-keep", "player=${nameOf(playerId)} tool=${tool.id} charges=$current")
         cues(tool.flashCues, eye)
-        if (current - 1 == 0) {
+        if (!keepLighting && after == 0) {
             log("tool-drained", "player=${nameOf(playerId)} tool=${tool.id}")
             cues(tool.drainedCues, eye, null, listOfNotNull(player))
             hintToolEmpty(playerId)
         }
-        val direction = dir.clone().normalize()
-        val half = Math.toRadians(tool.coneAngle / 2.0)
         var lanternHits = 0
         val misses = ArrayList<String>()
         for (rt in lanterns.values) {
@@ -1822,7 +1893,7 @@ class SessionRun(
             log("flash-miss", "player=${nameOf(playerId)} range=${tool.range} cone=${tool.coneAngle} ${misses.joinToString(" ")}")
         }
         val candidates = enemies.values.filter { it.spec.needsFlash != null && (it.machine.state == EnemyMachine.State.ALIVE || it.machine.stunned) }
-        log("flash", "player=${nameOf(playerId)} tool=${tool.id} charges=${current - 1} lanterns=$lanternHits candidates=${candidates.size}")
+        log("flash", "player=${nameOf(playerId)} tool=${tool.id} charges=$after lanterns=$lanternHits candidates=${candidates.size}")
         if (lanternHits > 0) markProgress()
         if (candidates.isEmpty()) return
         val futures = candidates.map { rt -> ctx.actors().locationOf(rt.actorId).handle { loc, _ -> rt to loc } }
@@ -1982,7 +2053,7 @@ class SessionRun(
     }
 
     private fun showObjective(key: String) {
-        val tool = spec.tools.values.firstOrNull()
+        val tool = effectiveTools.values.firstOrNull()
         val burn = burnPips()
         for (playerId in members()) {
             val base = if (tool == null) mapOf("burn" to burn) else {
@@ -2283,6 +2354,11 @@ class SessionRun(
                 if (p.isDead) return@runOnMember
                 p.health = p.getAttribute(Attribute.MAX_HEALTH)?.value ?: 20.0
             }
+            // rc.28 heal.tools:開打、全滅重來、跪下時把提燈也補滿(戰鬥不用停下來等閃光)
+            if (bossSpec.heal.refillTools) {
+                for (id in ids) for (tool in toolSpecs()) setCharges(id, tool, tool.maxCharges)
+                this@SessionRun.log("boss-refill-tools", "players=${ids.size}")
+            }
         }
 
         override fun spawnBoss(at: Pt) {
@@ -2471,7 +2547,8 @@ class SessionRun(
             return
         }
         val modelId = bossSpec.model ?: return
-        ctx.actors().bindModel(actorId, modelId).whenComplete { handle, _ ->
+        // alwaysVisible:boss 的大模型不吃 BetterModel 的 sight-trace 剔除
+        ctx.actors().bindModel(actorId, modelId, true).whenComplete { handle, _ ->
             ctx.submit {
                 if (closed || bossActor != actorId) return@submit
                 bossModel = handle

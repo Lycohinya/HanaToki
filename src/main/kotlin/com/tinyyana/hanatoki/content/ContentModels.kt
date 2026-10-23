@@ -58,6 +58,20 @@ data class StageSpec(
     val arrive: ArriveSpec? = null,
     /** rc.26:抵達時播的效果(只有 [arrive] 非 null 才能寫)。 */
     val onArrive: StageEffects = StageEffects(),
+    /** rc.28:這個 stage 進行期間覆寫局內道具的數值(key = tool.yml 的 tool id);沒寫的道具與欄位沿用 tool.yml。 */
+    val toolOverrides: Map<String, ToolOverride> = emptyMap(),
+)
+
+/**
+ * rc.28 stage 層級的 tool 覆寫。[charges] = 這一段的格數上限(耐久條跟著換)，[passiveRegenSeconds]／[zoneRegenSeconds] = 被動／光源區回補間隔，
+ * [refillOnDissolve] = 打散敵人補幾格；[fillOnStart] = 進這個 stage 時把在線成員補到新的上限。沒寫(null)的欄位沿用 tool.yml。
+ */
+data class ToolOverride(
+    val charges: Int?,
+    val passiveRegenSeconds: Double?,
+    val zoneRegenSeconds: Double?,
+    val refillOnDissolve: Int?,
+    val fillOnStart: Boolean,
 )
 
 /**
@@ -104,6 +118,8 @@ data class StageEffects(
     val dialog: String? = null,
     val titleKey: String? = null,
     val subtitleKey: String? = null,
+    /** rc.28:只有 stage 的 `on-arrive` 可寫。[dialog] 延遲幾秒才開(讓敵人先現身、使魔再開口)。 */
+    val dialogDelaySeconds: Double = 0.0,
     /** rc.26:只有 stage 的 `on-arrive` 可寫。依序一段一段播的對話序列(每段等全部成員讀完才播下一段),播完才算「對話結束」。 */
     val dialogs: List<String> = emptyList(),
     /** rc.26:[dialogs] 每一段等全部成員讀完的上限秒數(有人一直不按也不卡住)。 */
@@ -370,6 +386,8 @@ data class FrozenWhenWatchedSpec(
     val freezeCues: List<String>,
     /** 兩次 [moveCues] 之間至少隔幾 tick(視線在邊緣來回掃時不連續洗聲)。 */
     val cueCooldownTicks: Int,
+    /** rc.28:true = 凍結(被看著)期間接觸玩家不推、不扣燈火(只有移動中的才有接觸效果)。預設 false = 同舊版。 */
+    val harmlessWhileFrozen: Boolean = false,
 )
 
 enum class ChaseTarget(val id: String) {
@@ -541,6 +559,8 @@ data class ToolSpec(
     val drainedCues: List<String> = emptyList(),
     /** 自動回補(被動或光源區)+1 時播給持有者的 cue。 */
     val gainCues: List<String> = emptyList(),
+    /** rc.28:true = 閃光碰到「正在燒」的燈籠(沒有點到未點燃的燈籠)不扣格，「繼續照住燈」不吃燈火。預設 false = 每次閃光都扣一格。 */
+    val freeOnBurningLamp: Boolean = false,
 )
 
 /**

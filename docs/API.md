@@ -1023,6 +1023,14 @@ interface DialogPort {
 - 目標列的動作列在局結束、成員離場、換到沒有目標的 stage 時清空（`ObjectiveHudTracker`）。
 - 新 log：`boss-heal reason=start｜restart｜kneel players=<n>`。
 
+### rc.28：stage 道具覆寫、free-on-burning-lamp、heal.tools、人偶出生即凍結、boss 模型補送
+
+- 選填資料欄位（預設零影響；schema 見 [CONTENT-DATA.md](CONTENT-DATA.md)）：stage `tool-overrides`、tool `free-on-burning-lamp`、boss `heal.tools`、frozen-when-watched `harmless-while-frozen`、on-arrive `dialog-delay-seconds`。
+- 行為變更（無旗標）：frozen-when-watched 的敵人出生當下就是凍結姿勢（rc.27 以前要等第一輪掃描才凍）。boss 模型（`bindModel(…, alwaysVisible = true)`）關掉 BetterModel sight-trace，並每秒對成員呼叫 `BossModelHandle.ensureVisibleTo`（`isSpawned` 為 false 且 `canBeSpawnedAt` 才 `markPlayerForSpawn`）。
+- 型別：`ToolOverride`、`StageSpec.toolOverrides`、`ToolSpec.freeOnBurningLamp`、`BossHealSpec.refillTools`、`FrozenWhenWatchedSpec.harmlessWhileFrozen`、`StageEffects.dialogDelaySeconds`；`BossModels.bind(owner, entity, modelId, alwaysVisible)`、`ActorHandle.bindModel(actorId, modelId, alwaysVisible)`（皆有預設實作）、`BossModelHandle.ensureVisibleTo`（預設不做事）。
+- `ToolItems.syncDurability` 同步耐久條上限（stage 覆寫 charges 時）。
+- 新 log：`tool-override`、`flash-keep`、`boss-refill-tools`；補送時 `BossModels.ensureVisibleTo: 補送 N 位玩家 model=…`。
+
 ### rc.27：power-up 浮空實體、目標文字方位佔位符
 
 - 選填資料欄位（預設零影響；schema 見 [CONTENT-DATA.md](CONTENT-DATA.md)）：power-up `prop`（浮空發光實體，item display，緩慢浮動慢轉）、objective 文字參數 `{nearest:power-up}`（最近一顆 ready power-up 的方位與距離）。

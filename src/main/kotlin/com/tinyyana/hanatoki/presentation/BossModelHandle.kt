@@ -49,6 +49,14 @@ interface BossModelHandle : AutoCloseable {
      */
     fun locator(name: String): Location?
 
+    /**
+     * rc.28:補送。[players] 裡每一位「在這個模型的可視範圍內、但 tracker 還沒對他生成」的人，重新標記成要生成
+     * (BetterModel `markPlayerForSpawn`)。BetterModel 的封包打包偶爾會丟掉一個 tick 的封包(log:
+     * `Ticking this tracker has been failed … ConcurrentModificationException`)，生成封包剛好被丟掉的玩家就永遠看不到模型。
+     * 補送動作在載體所屬的 region 執行(補送時記一行 HanaToki log)。預設實作什麼都不做。
+     */
+    fun ensureVisibleTo(players: Collection<java.util.UUID>) {}
+
     /** 設定整體縮放倍率(1.0 = 模型原始大小)。 */
     fun scale(value: Float)
 

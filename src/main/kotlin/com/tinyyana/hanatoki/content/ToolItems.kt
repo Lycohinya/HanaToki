@@ -59,7 +59,11 @@ class ToolItems(plugin: Plugin, private val texts: Texts) {
             val item = contents[i] ?: continue
             if (idOf(item) != spec.id) continue
             item.editMeta { meta ->
-                if (meta is Damageable) meta.damage = (spec.maxCharges - charges.coerceIn(0, spec.maxCharges))
+                if (meta is Damageable) {
+                    // rc.28:stage 覆寫 charges 時上限會變，耐久條上限跟著換
+                    if (meta.hasMaxDamage() && meta.maxDamage != spec.maxCharges) meta.setMaxDamage(spec.maxCharges)
+                    meta.damage = (spec.maxCharges - charges.coerceIn(0, spec.maxCharges))
+                }
             }
             player.inventory.setItem(i, item)
             return

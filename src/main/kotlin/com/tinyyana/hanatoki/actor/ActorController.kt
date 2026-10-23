@@ -220,12 +220,15 @@ class ActorController(private val plugin: Plugin, private val sessionActive: jav
             return out
         }
 
-        override fun bindModel(actorId: String, modelId: String): CompletableFuture<com.tinyyana.hanatoki.presentation.BossModelHandle> {
+        override fun bindModel(actorId: String, modelId: String): CompletableFuture<com.tinyyana.hanatoki.presentation.BossModelHandle> =
+            bindModel(actorId, modelId, false)
+
+        override fun bindModel(actorId: String, modelId: String, alwaysVisible: Boolean): CompletableFuture<com.tinyyana.hanatoki.presentation.BossModelHandle> {
             val out = CompletableFuture<com.tinyyana.hanatoki.presentation.BossModelHandle>()
             val entity = actors[key(sessionId, actorId)] ?: return CompletableFuture.completedFuture(null)
             // bind 必須在實體自己的 region thread 上呼叫(BossModels.bind 的前提),所以派工過去再綁。
             // owner 用 sessionId:session 收斂時 HanaTokiCore.finishSession 的 closeOwner 一次收掉。
-            WorldOp.dispatch(plugin, entity) { e -> out.complete(if (e.isValid) models.bind(sessionId.toString(), e, modelId) else null) }
+            WorldOp.dispatch(plugin, entity) { e -> out.complete(if (e.isValid) models.bind(sessionId.toString(), e, modelId, alwaysVisible) else null) }
                 .whenComplete { _, _ -> out.complete(null) }
             return out
         }
