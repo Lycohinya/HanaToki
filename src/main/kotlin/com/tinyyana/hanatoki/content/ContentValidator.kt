@@ -33,6 +33,8 @@ object ContentValidator {
                         if (c.encounter !in spec.encounters) errors += "$where.complete[$i].encounter: 引用不存在的波次「${c.encounter}」(encounters.yml)"
                     is Condition.ObjectState -> stateOk(c.objectId, c.state)?.let { errors += "$where.complete[$i]: $it" }
                     is Condition.Reach -> {}
+                    is Condition.BossDefeated ->
+                        if (c.boss !in spec.bosses) errors += "$where.complete[$i].boss: 引用不存在的 boss「${c.boss}」(bosses.yml)"
                 }
             }
             if (stage.complete.isEmpty() && stage.next != null) errors += "$where.complete: 有下一段(next)的 stage 必須寫完成條件"
@@ -48,6 +50,8 @@ object ContentValidator {
                         if (stage.complete.none { it is Condition.Reach && it.marker == c.marker }) {
                             errors += "$where.objective[$i].until.marker: reach 只有寫在這個 stage 的 complete 裡的 marker「${c.marker}」才會被偵測"
                         }
+                    is Condition.BossDefeated ->
+                        if (c.boss !in spec.bosses) errors += "$where.objective[$i].until.boss: 引用不存在的 boss「${c.boss}」(bosses.yml)"
                 }
                 if (step.until == null && i != stage.objective.lastIndex) {
                     errors += "$where.objective[$i].until: 沒寫 until 的步驟永遠停在這一步,只能放最後一個"
@@ -101,6 +105,8 @@ object ContentValidator {
             }
         }
 
+        errors += validateBosses(spec, stageIds)
+
         // encounters.yml
         for (enc in spec.encounters.values) {
             val where = "${ContentFileNames.ENCOUNTERS} encounters.${enc.id}"
@@ -149,6 +155,48 @@ object ContentValidator {
         return errors.distinct()
     }
 
+    /** bosses.yml 的跨檔參照:stage、場邊燈(lantern 物件)、南瓜燈(power-up 物件)、召喚的敵人。 */
+    private fun validateBosses(spec: ContentSpec, stageIds: Set<String>): List<String> {
+        val errors = ArrayList<String>()
+        for ((stageId, list) in spec.bosses.values.groupBy { it.stage }) {
+            if (list.size > 1) errors += "${ContentFileNames.BOSSES} bosses: stage「$stageId」有 ${list.size} 個 boss(${list.joinToString { it.id }}),一個 stage 只能有一個"
+        }
+        val lampOwner = HashMap<String, String>()
+        for (boss in spec.bosses.values) {
+            val where = "${ContentFileNames.BOSSES} bosses.${boss.id}"
+            if (boss.stage !in stageIds) errors += "$where.stage: 引用不存在的 stage「${boss.stage}」"
+            if (boss.moves.values.none { it.fromPhase == 1 }) errors += "$where.moves: 至少要有一招從 phase 1 就開放"
+            boss.gems.forEachIndexed { i, gem ->
+                val obj = spec.objects[gem.lamp]
+                val at = "$where.gems[$i].lamp"
+                if (obj == null) { errors += "$at: 引用不存在的物件「${gem.lamp}」(objects.yml)"; return@forEachIndexed }
+                if (obj !is LanternSpec) { errors += "$at: 「${gem.lamp}」不是 lantern 物件"; return@forEachIndexed }
+                if (obj.stage != null && obj.stage != boss.stage) errors += "$at: 場邊燈「${gem.lamp}」的 stage 是 ${obj.stage},必須省略或等於 boss 的 stage「${boss.stage}」"
+                if (obj.progressBar != null) errors += "$at: 場邊燈不能有 progress-bar(它和 boss 血量條共用同一條 boss bar)"
+                if (obj.onLit.lightRadius > 0.0) errors += "$at: 場邊燈的 on-lit.light-radius 必須是 0(被熄掉時放出的光源方塊不會收回)"
+                if (obj.onLit.opens != null) errors += "$at: 場邊燈不能有 on-lit.opens(它會被重置,門只能開一次)"
+                if (obj.onLit.clearsEnemies) errors += "$at: 場邊燈不能有 on-lit.clears-enemies"
+                if (obj.milestones.isNotEmpty()) errors += "$at: 場邊燈不能有 milestones(重置後不重播,也不是它的用途)"
+                lampOwner.put(gem.lamp, boss.id)?.let { if (it != boss.id) errors += "$at: 場邊燈「${gem.lamp}」已被 boss「$it」使用" }
+            }
+            boss.pumpkins?.objects?.forEachIndexed { i, id ->
+                val obj = spec.objects[id]
+                val at = "$where.pumpkins.objects[$i]"
+                if (obj == null) errors += "$at: 引用不存在的物件「$id」(objects.yml)"
+                else if (obj !is PowerUpSpec) errors += "$at: 「$id」不是 power-up 物件"
+                else if (obj.stage != null && obj.stage != boss.stage) errors += "$at: power-up「$id」的 stage 是 ${obj.stage},必須省略或等於 boss 的 stage「${boss.stage}」"
+            }
+            for (move in boss.moves.values) {
+                val s = move.shape
+                if (s is MoveShape.Summon && s.enemy !in spec.enemies) {
+                    errors += "$where.moves.${move.id}.enemy: 引用不存在的敵人「${s.enemy}」(enemies.yml)"
+                }
+                if (s is MoveShape.Snuff && boss.gems.isEmpty()) errors += "$where.moves.${move.id}: snuff 需要場邊燈(gems)"
+            }
+        }
+        return errors
+    }
+
     /**
      * 場景 marker 核對。[markers] 是整張圖(所有 piece 轉換後)的 marker,座標任意(只看種類、ID、屬性)。
      * 這裡的錯誤在註冊時就擋下,不等到玩家進場才發現「少一個出生點」。
@@ -193,6 +241,17 @@ object ContentValidator {
                 val m = marker(c.marker)
                 if (m == null) errors += "${ContentFileNames.STAGES} stages.${stage.id}.complete[$i].marker: 場景裡沒有 id=${c.marker} 的 marker"
                 else if (m.kind != MarkerKind.TRIGGER) errors += "${ContentFileNames.STAGES} stages.${stage.id}.complete[$i].marker: reach 的 marker 必須是 trigger(「${c.marker}」是 ${m.kind.id})"
+            }
+        }
+        for (boss in spec.bosses.values) {
+            val where = "${ContentFileNames.BOSSES} bosses.${boss.id}"
+            fun need(path: String, id: String) { if (marker(id) == null) errors += "$where.$path: 場景裡沒有 id=$id 的 marker" }
+            boss.points.forEachIndexed { i, id -> need("points[$i]", id) }
+            boss.downed.revivePoints.forEachIndexed { i, id -> need("downed.revive-points[$i]", id) }
+            need("wipe.checkpoint", boss.wipe.checkpoint)
+            for (move in boss.moves.values) {
+                move.origin.marker?.let { need("moves.${move.id}.origin-marker", it) }
+                (move.shape as? MoveShape.Summon)?.markers?.forEachIndexed { i, id -> need("moves.${move.id}.markers[$i]", id) }
             }
         }
         for (stage in spec.stages) stage.resolve?.epilogue?.forEachIndexed { i, step ->
@@ -267,6 +326,19 @@ object ContentValidator {
         }
         for (o in spec.objects.values) if (o is LanternSpec) {
             check(ContentFileNames.OBJECTS, "objects.${o.id}.progress-bar.text", o.progressBar?.textKey)
+        }
+        for (b in spec.bosses.values) {
+            val f = ContentFileNames.BOSSES
+            check(f, "bosses.${b.id}.bar.text", b.bar?.textKey)
+            check(f, "bosses.${b.id}.downed.title", b.downed.titleKey)
+            check(f, "bosses.${b.id}.downed.subtitle", b.downed.subtitleKey)
+            check(f, "bosses.${b.id}.downed.hud-text", b.downed.hudTextKey)
+            check(f, "bosses.${b.id}.wipe.title", b.wipe.titleKey)
+            check(f, "bosses.${b.id}.wipe.subtitle", b.wipe.subtitleKey)
+            b.phases.forEach { p ->
+                check(f, "bosses.${b.id}.phases[${p.number - 1}].title", p.onEnter.titleKey)
+                check(f, "bosses.${b.id}.phases[${p.number - 1}].subtitle", p.onEnter.subtitleKey)
+            }
         }
         return errors
     }

@@ -974,12 +974,12 @@ override fun prepareStage(ctx: StageContext, stageId: String): CompletableFuture
 
 ## 26. 資料驅動副本內容與 port（1.0.0-rc.19）
 
-內容插件只給一個資料夾（`dungeons.yml` + `stages.yml`／`scene.yml`／`objects.yml`／`enemies.yml`／`encounters.yml`／`tool.yml`／`hints.yml` + `map-assets/`）和 texts，由框架內建的 `DataDrivenBehavior` 執行，不需要內容端 Kotlin。完整 schema、範例、驗證規則與證據 log 見 [CONTENT-DATA.md](CONTENT-DATA.md)。
+內容插件只給一個資料夾（`dungeons.yml` + `stages.yml`／`scene.yml`／`objects.yml`／`enemies.yml`／`encounters.yml`／`tool.yml`／`hints.yml`／`bosses.yml` + `map-assets/`）和 texts，由框架內建的 `DataDrivenBehavior` 執行，不需要內容端 Kotlin。完整 schema、範例、驗證規則與證據 log 見 [CONTENT-DATA.md](CONTENT-DATA.md)。
 
 | 入口 | 簽章 |
 |---|---|
 | 註冊 | `HanaTokiCore.registerDataContent(owner: Plugin, dataDir: File, textEntries: Map<String, String>): CompletableFuture<ContentRegistration>`。資料有任何錯誤 → future 以 `com.tinyyana.hanatoki.content.ContentDataException`（`errors: List<String>`，每筆「檔名 路徑: 訊息」）失敗，整份拒絕、不半載入 |
-| 規則實作 | 敵人規則 `needs-flash`；物件 `lantern`、`gate`；局內道具 `flash`；其他規則標籤 `frozen-when-watched`／`flees-when-powered` 只保留（接受、不實作、WARN） |
+| 規則實作 | 敵人規則 `needs-flash`、`seeks-object`、`harasses-players`、`frozen-when-watched`、`chases-players`、`flees-when-powered`；物件 `lantern`、`gate`、`power-up`；局內道具 `flash`；`bosses.yml` 的 boss（rc.23） |
 | 純資料層（可單測） | `ContentYaml.parse`、`ContentParser`、`ContentValidator`、`LanternMachine`／`GateMachine`／`EnemyMachine`／`TimerQueue`（`com.tinyyana.hanatoki.content`） |
 
 ### Port（`com.tinyyana.hanatoki.api.port`）
@@ -1000,6 +1000,14 @@ interface DialogPort {
 - `onDone` 用 `IntConsumer` 而不是 Kotlin `(Int) -> Unit`：Kotlin 函式型別跨 classloader 會 `LinkageError`（見 `StageContext` KDoc）。1..N = 選項；0 = 取消／斷線／無選項；可能在任意執行緒回呼。
 - `StageWorldMutator` 由 HanaToki 以 `StageContext.mutate` 實作（寫入記 diff，局結束回滾；局結束後 no-op）。`CueRun` 在局結束時全部 `cancel()`。
 - `audience` 是副本成員的 `Player` 參考；HanaToki 不碰它，實作端自行派到各玩家的 EntityScheduler。
+
+### rc.23：Boss（`bosses.yml`）
+
+- 資料驅動 boss：階段、招式時間軸、光環護盾與場邊燈、跪下輸出窗口、倒下與復活、全滅重來；stage 完成條件 `boss-defeated <bossId>`。schema 見 [CONTENT-DATA.md](CONTENT-DATA.md) 的 bosses.yml 一節。
+- 新增選配介面 `com.tinyyana.hanatoki.presentation.BossModelBones { fun setBoneVisible(bone: String, visible: Boolean): Boolean }`：`BossModelHandle` 的 BetterModel 實作同時實作它（`handle as? BossModelBones`）。**`BossModelHandle` 本身沒有改**，跨插件簽章不變。
+- 純邏輯與流程層（可單測，不碰 Bukkit）：`BossLogic.kt`（幾何判定、`MovePicker`、`TelegraphLedger`、`BossHealth`、`GemTracker`、`DownedTracker`、`DownedBodyLedger`、`rotatingWindow`）與 `BossRun`（透過 `BossHost` 介面對外，測試用假 host）。
+- 事件：`DataContentListener` 新增致死傷害攔截（`EntityDamageEvent`，HIGHEST）、斷線（`PlayerQuitEvent`）與登入（`PlayerJoinEvent`，MONITOR）處理，只對資料驅動副本的成員、boss 戰進行中生效；沒有 `bosses.yml` 的副本完全不經過。
+- 敵人規則掃描（rc.21 起單輪最多 24 隻）改為跨輪輪替（round-robin），超過上限時每隻都會輪到。
 
 ### rc.19：`world-time`
 

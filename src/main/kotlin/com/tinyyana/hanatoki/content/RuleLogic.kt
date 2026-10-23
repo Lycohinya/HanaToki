@@ -191,6 +191,19 @@ class PowerUpMachine(private val consume: Boolean, private val respawnTicks: Lon
         return true
     }
 
+    /** boss 的南瓜燈暫時下架(階段未到):變 TAKEN、不會自動重生,直到 [forceReady]。 */
+    fun forceTaken() {
+        state = State.TAKEN
+        respawnAt = Long.MAX_VALUE
+    }
+
+    /** 上架:變 READY 且立刻可拿。 */
+    fun forceReady() {
+        state = State.READY
+        respawnAt = Long.MAX_VALUE
+        nextUseAt = 0L
+    }
+
     /** TAKEN 且到期 → READY,回 true。 */
     fun tryRespawn(now: Long): Boolean {
         if (state != State.TAKEN || now < respawnAt) return false

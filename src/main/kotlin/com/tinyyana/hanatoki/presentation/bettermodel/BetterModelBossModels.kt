@@ -1,6 +1,7 @@
 package com.tinyyana.hanatoki.presentation.bettermodel
 
 import com.tinyyana.hanatoki.folia.WorldOp
+import com.tinyyana.hanatoki.presentation.BossModelBones
 import com.tinyyana.hanatoki.presentation.BossModelHandle
 import com.tinyyana.hanatoki.presentation.BossModelOwnerRegistry
 import com.tinyyana.hanatoki.presentation.BossModels
@@ -12,6 +13,8 @@ import kr.toxicity.model.api.bukkit.platform.BukkitLocation
 import kr.toxicity.model.api.entity.BaseEntity
 import kr.toxicity.model.api.tracker.EntityTracker
 import kr.toxicity.model.api.tracker.ModelScaler
+import kr.toxicity.model.api.tracker.TrackerUpdateAction
+import kr.toxicity.model.api.util.function.BonePredicate
 import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.entity.Entity
@@ -115,7 +118,7 @@ class BetterModelBossModels(private val plugin: Plugin) : BossModels {
         override val modelId: String,
         private val key: String,
         private val boundEntity: Entity,
-    ) : BossModelHandle {
+    ) : BossModelHandle, BossModelBones {
 
         @Volatile private var closed = false
         @Volatile private var baseAnimation: String? = null
@@ -169,6 +172,21 @@ class BetterModelBossModels(private val plugin: Plugin) : BossModels {
             val offset = bone.worldPosition()
             val base = (t.location() as? BukkitLocation)?.source() ?: return null
             return base.clone().add(offset.x.toDouble(), offset.y.toDouble(), offset.z.toDouble())
+        }
+
+        /**
+         * 顯示／隱藏一根骨骼(連同子骨骼)。用 BetterModel 的 `TrackerUpdateAction.togglePart`
+         * (`bettermodel-api-3.5.0`:`Tracker.update(action, BonePredicate)`)。**只編譯通過、單元測試不覆蓋,
+         * 實機行為待測試服驗證**(骨骼名不存在時 [Tracker.bone] 回 null,這裡回 false 不丟例外)。
+         */
+        override fun setBoneVisible(bone: String, visible: Boolean): Boolean {
+            if (closed) return false
+            val t = resolveTracker() ?: return false
+            if (t.isClosed || t.bone(bone) == null) return false
+            dispatch { current ->
+                current.update(TrackerUpdateAction.togglePart(visible), BonePredicate.name(bone).withChildren())
+            }
+            return true
         }
 
         override fun scale(value: Float) {

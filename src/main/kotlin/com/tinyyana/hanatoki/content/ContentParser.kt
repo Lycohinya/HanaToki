@@ -18,9 +18,10 @@ object ContentFileNames {
     const val ENCOUNTERS = "encounters.yml"
     const val TOOL = "tool.yml"
     const val HINTS = "hints.yml"
+    const val BOSSES = "bosses.yml"
 
     val REQUIRED = listOf(STAGES, SCENE)
-    val OPTIONAL = listOf(OBJECTS, ENEMIES, ENCOUNTERS, TOOL, HINTS)
+    val OPTIONAL = listOf(OBJECTS, ENEMIES, ENCOUNTERS, TOOL, HINTS, BOSSES)
     val ALL = REQUIRED + OPTIONAL
 }
 
@@ -70,10 +71,11 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         val encounters = parseEncounters(optional(ContentFileNames.ENCOUNTERS, "encounters"))
         val tools = parseTools(optional(ContentFileNames.TOOL, "tools"))
         val hints = parseHints(optional(ContentFileNames.HINTS, "hints"))
+        val bosses = parseBosses(optional(ContentFileNames.BOSSES, "bosses"))
         for (name in files.keys) if (name !in ContentFileNames.ALL) errors += "$name: 未知的資料檔(只認 ${ContentFileNames.ALL.joinToString()})"
 
         if (errors.isNotEmpty()) throw ContentDataException(errors.toList())
-        return ContentSpec(dungeon!!, namespace!!, stages, scene!!, objects, enemies, encounters, tools, hints)
+        return ContentSpec(dungeon!!, namespace!!, stages, scene!!, objects, enemies, encounters, tools, hints, bosses)
     }
 
     /** 可選檔案:回傳 (檔名, 最上層 key 底下的 Map)。檔案不存在 = 空。 */
@@ -372,8 +374,12 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                 val radius = node.num("radius", min = 0.0, exclusiveMin = true, required = true)
                 if (marker != null && radius != null) Condition.Reach(marker, radius) else null
             }
+            "boss-defeated" -> {
+                node.only(setOf("type", "boss"))
+                node.id("boss", required = true)?.let(Condition::BossDefeated)
+            }
             else -> {
-                node.err("type", "未知的完成條件「$type」(可用:encounter-cleared、object-state、reach)")
+                node.err("type", "未知的完成條件「$type」(可用:encounter-cleared、object-state、reach、boss-defeated)")
                 null
             }
         }
@@ -935,6 +941,294 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         return out
     }
 
+    // ---- bosses.yml(rc.23)----
+
+    private fun parseBosses(block: Node?): Map<String, BossSpec> {
+        val out = LinkedHashMap<String, BossSpec>()
+        block?.entries()?.forEach { (id, node) ->
+            node.only(
+                setOf(
+                    "stage", "base-entity", "model", "scale", "animations", "health", "by-players", "hit-weight", "powered-hit-weight",
+                    "hit-cooldown-ticks", "min-attack-strength", "start-delay-seconds", "spawn-cues", "points", "glide", "gap-seconds", "phase-up-seconds",
+                    "phases", "moves", "shield", "gems", "kneel", "pumpkins", "downed", "wipe", "defeat", "bar",
+                ),
+            )
+            val stage = node.id("stage", required = true)
+            val base = (node.str("base-entity") ?: "ZOMBIE").uppercase()
+            val anim = node.child("animations")
+            anim?.only(setOf("idle", "glide", "hit", "shield-spark", "kneel", "rise", "phase-up", "snuff", "defeat", "sit-end"))
+            val d = BossAnimations()
+            val animations = BossAnimations(
+                anim?.str("idle") ?: d.idle, anim?.str("glide") ?: d.glide, anim?.str("hit") ?: d.hit,
+                anim?.str("shield-spark") ?: d.shieldSpark, anim?.str("kneel") ?: d.kneel, anim?.str("rise") ?: d.rise,
+                anim?.str("phase-up") ?: d.phaseUp, anim?.str("snuff") ?: d.snuff, anim?.str("defeat") ?: d.defeat,
+                anim?.str("sit-end") ?: d.sitEnd,
+            )
+            val health = node.num("health", min = 0.0, exclusiveMin = true, required = true)
+            val byPlayers = LinkedHashMap<Int, BossMultipliers>()
+            if (node.child("by-players") != null) {
+                for ((n, v) in node.playerMap("by-players")) {
+                    val sub = v as? Map<*, *>
+                    if (sub == null) { node.err("by-players", "人數 $n 必須是區塊(health/damage 倍率)"); continue }
+                    for (k in sub.keys) if (k !in setOf("health", "damage")) node.err("by-players", "人數 $n 有未知欄位「$k」")
+                    fun mult(k: String): Double {
+                        val m = (sub[k] as? Number)?.toDouble() ?: 1.0
+                        if (m <= 0.0) node.err("by-players", "人數 $n 的 $k 倍率必須 > 0")
+                        return m
+                    }
+                    byPlayers[n] = BossMultipliers(mult("health"), mult("damage"))
+                }
+            }
+            val hitWeight = node.num("hit-weight", min = 0.0, max = 1000.0, exclusiveMin = true) ?: 1.0
+            val glideNode = node.child("glide")
+            glideNode?.only(setOf("speed", "dwell-seconds", "order"))
+            val orderId = glideNode?.str("order") ?: GlideOrder.CYCLE.id
+            val order = GlideOrder.of(orderId)
+            if (order == null) glideNode?.err("order", "未知的順序「$orderId」(可用:${GlideOrder.entries.joinToString { it.id }})")
+            val glide = BossGlideSpec(
+                glideNode?.num("speed", min = 0.1, max = 10.0) ?: 1.2,
+                glideNode?.num("dwell-seconds", min = 0.0, max = 60.0) ?: 3.0,
+                order ?: GlideOrder.CYCLE,
+            )
+            val phases = parseBossPhases(node)
+            val moves = LinkedHashMap<String, MoveSpec>()
+            val movesBlock = node.child("moves")
+            movesBlock?.entries()?.forEach { (moveId, m) -> parseMove(moveId, m, phases.size)?.let { moves[moveId] = it } }
+            if (movesBlock == null) node.err("moves", "缺少必要區塊(至少一招)")
+            else if (movesBlock.map.isEmpty()) movesBlock.err(null, "至少要有一招")
+            val points = node.idList("points")
+            if (points.isEmpty()) node.err("points", "至少要有一個滑行定點 marker")
+            val gems = parseGems(node)
+            val kneel = parseKneel(node)
+            val pumpkins = parsePumpkins(node, phases.size)
+            val downed = parseDowned(node)
+            val wipe = parseWipe(node)
+            val defeat = node.child("defeat")?.let { dn ->
+                dn.only(setOf("cues", "seconds"))
+                BossDefeatSpec(dn.idList("cues"), dn.num("seconds", min = 0.0, max = 60.0) ?: 3.0)
+            } ?: BossDefeatSpec(emptyList(), 3.0)
+            val bar = node.child("bar")?.let { b ->
+                b.only(setOf("text", "color", "overlay"))
+                val text = b.str("text", required = true)
+                val color = (b.str("color") ?: "RED").uppercase()
+                if (color !in BAR_COLORS) b.err("color", "未知的顏色「$color」(可用:${BAR_COLORS.joinToString()})")
+                val overlay = (b.str("overlay") ?: "PROGRESS").uppercase()
+                if (overlay !in BAR_OVERLAYS) b.err("overlay", "未知的樣式「$overlay」(可用:${BAR_OVERLAYS.joinToString()})")
+                if (text != null) BossBarSpec(text, color, overlay) else null
+            }
+            val shield = parseShield(node)
+            if (stage != null && health != null && points.isNotEmpty() && movesBlock != null && gems != null && kneel != null && downed != null && wipe != null) {
+                out[id] = BossSpec(
+                    id, stage, base, node.str("model"), node.num("scale", min = 0.0, max = 16.0, exclusiveMin = true), animations,
+                    health, byPlayers, hitWeight,
+                    node.num("powered-hit-weight", min = 0.0, max = 1000.0, exclusiveMin = true) ?: hitWeight,
+                    node.int("hit-cooldown-ticks", min = 0, max = 200) ?: 12,
+                    node.num("min-attack-strength", min = 0.0, max = 1.0) ?: 0.0,
+                    node.num("start-delay-seconds", min = 0.0, max = 120.0) ?: 3.0,
+                    node.idList("spawn-cues"), points, glide, node.num("gap-seconds", min = 0.0, max = 60.0) ?: 2.5,
+                    node.num("phase-up-seconds", min = 0.0, max = 30.0) ?: 2.0,
+                    phases, moves, shield, gems, kneel, pumpkins, downed, wipe, defeat, bar,
+                )
+            }
+        }
+        return out
+    }
+
+    /** `phases: [{ at: 1.0, cues, music, title, subtitle }, { at: 0.55 … }]`;第一個必須 at 1.0,之後嚴格遞減;沒寫 = 只有一個階段。 */
+    private fun parseBossPhases(boss: Node): List<BossPhaseSpec> {
+        if (boss.map["phases"] == null) return listOf(BossPhaseSpec(1, 1.0, StageEffects()))
+        val out = ArrayList<BossPhaseSpec>()
+        boss.mapList("phases").forEachIndexed { i, p ->
+            p.only(setOf("at", "cues", "music", "title", "subtitle"))
+            val at = p.num("at", min = 0.0, max = 1.0, exclusiveMin = i > 0, required = true) ?: return@forEachIndexed
+            val effects = StageEffects(
+                cues = p.idList("cues"), music = p.str("music"), titleKey = p.str("title"), subtitleKey = p.str("subtitle"),
+            )
+            out += BossPhaseSpec(i + 1, at, effects)
+        }
+        if (out.isEmpty()) boss.err("phases", "至少要有一個階段(不寫這個欄位就只有一個)")
+        if (out.isNotEmpty() && out.first().at != 1.0) boss.err("phases", "第一個階段的 at 必須是 1.0(進場即進入)")
+        for (i in 1 until out.size) if (out[i].at >= out[i - 1].at) boss.err("phases", "階段門檻 at 必須由大到小(第 ${i + 1} 階段 ${out[i].at} >= ${out[i - 1].at})")
+        if (out.size > MAX_PHASES) boss.err("phases", "最多 $MAX_PHASES 個階段")
+        return out
+    }
+
+    private fun parseShield(boss: Node): BossShieldSpec {
+        val n = boss.child("shield")
+        n?.only(setOf("up-cues", "break-cues", "spark-cues", "spark-cooldown-ticks", "halo-bone"))
+        return BossShieldSpec(
+            n?.idList("up-cues") ?: emptyList(), n?.idList("break-cues") ?: emptyList(), n?.idList("spark-cues") ?: emptyList(),
+            n?.int("spark-cooldown-ticks", min = 0, max = 400) ?: 10, n?.str("halo-bone"),
+        )
+    }
+
+    private fun parseGems(boss: Node): List<BossGemSpec>? {
+        if (boss.map["gems"] == null) { boss.err("gems", "缺少必要欄位(每顆寶石對應一盞場邊燈:[{ lamp: boss_lamp_1 }, …])"); return null }
+        val out = ArrayList<BossGemSpec>()
+        boss.mapList("gems").forEach { g ->
+            g.only(setOf("lamp", "bone", "beam-cues", "break-cues", "restore-cues"))
+            val lamp = g.id("lamp", required = true) ?: return@forEach
+            out += BossGemSpec(lamp, g.str("bone"), g.idList("beam-cues"), g.idList("break-cues"), g.idList("restore-cues"))
+        }
+        if (out.isEmpty()) { boss.err("gems", "至少要有一顆寶石"); return null }
+        val dup = out.groupBy { it.lamp }.filterValues { it.size > 1 }.keys
+        if (dup.isNotEmpty()) boss.err("gems", "場邊燈重複:${dup.joinToString()}")
+        return out
+    }
+
+    private fun parseKneel(boss: Node): BossKneelSpec? {
+        val n = boss.child("kneel")
+        n?.only(setOf("seconds", "cues", "rise-cues", "rise-seconds", "lamps-reset"))
+        val resetId = n?.str("lamps-reset") ?: LampReset.ON_RISE.id
+        val reset = LampReset.of(resetId)
+        if (reset == null) { n?.err("lamps-reset", "未知的策略「$resetId」(可用:${LampReset.entries.joinToString { it.id }})"); return null }
+        return BossKneelSpec(
+            seconds = n?.num("seconds", min = 1.0, max = 120.0) ?: 10.0,
+            cues = n?.idList("cues") ?: emptyList(),
+            riseCues = n?.idList("rise-cues") ?: emptyList(),
+            riseSeconds = n?.num("rise-seconds", min = 0.0, max = 30.0) ?: 1.5,
+            lampsReset = reset,
+        )
+    }
+
+    private fun parsePumpkins(boss: Node, phaseCount: Int): BossPumpkinSpec? {
+        val n = boss.child("pumpkins") ?: return null
+        n.only(setOf("objects", "from-phase"))
+        val objects = n.idList("objects")
+        if (objects.isEmpty()) n.err("objects", "至少要有一個 power-up 物件")
+        val from = n.int("from-phase", min = 1, max = MAX_PHASES) ?: 1
+        if (from > phaseCount) n.err("from-phase", "不可大於階段數($phaseCount)")
+        return BossPumpkinSpec(objects, from)
+    }
+
+    private fun parseDowned(boss: Node): DownedSpec? {
+        val n = boss.child("downed")
+        n?.only(
+            setOf(
+                "gamemode", "invisible", "glowing", "invulnerable", "speed-modifier", "revive-points", "move-to", "revive-health",
+                "cues", "mark-cue", "revive-cues", "title", "subtitle", "hud-text", "hud-every-seconds",
+            ),
+        )
+        val gm = (n?.str("gamemode") ?: "ADVENTURE").uppercase()
+        if (gm !in DOWNED_GAME_MODES) { n?.err("gamemode", "未知的遊戲模式「$gm」(可用:${DOWNED_GAME_MODES.joinToString()})"); return null }
+        val moveId = n?.str("move-to") ?: DownedMove.NEAREST_REVIVE.id
+        val move = DownedMove.of(moveId)
+        if (move == null) { n?.err("move-to", "未知的值「$moveId」(可用:${DownedMove.entries.joinToString { it.id }})"); return null }
+        val revivePoints = n?.idList("revive-points") ?: emptyList()
+        if (move == DownedMove.NEAREST_REVIVE && revivePoints.isEmpty()) n?.err("revive-points", "move-to 是 nearest-revive-point 就至少要有一個復活點 marker")
+        return DownedSpec(
+            gameMode = gm,
+            invisible = n?.bool("invisible") ?: false,
+            glowing = n?.bool("glowing") ?: false,
+            invulnerable = n?.bool("invulnerable") ?: true,
+            speedModifier = n?.num("speed-modifier", min = -0.99, max = 0.0) ?: -0.8,
+            revivePoints = revivePoints,
+            move = move,
+            reviveHealth = n?.num("revive-health", min = 1.0, max = 1024.0) ?: 10.0,
+            cues = n?.idList("cues") ?: emptyList(),
+            markCue = n?.id("mark-cue"),
+            reviveCues = n?.idList("revive-cues") ?: emptyList(),
+            titleKey = n?.str("title"),
+            subtitleKey = n?.str("subtitle"),
+            hudTextKey = n?.str("hud-text"),
+            hudEverySeconds = n?.num("hud-every-seconds", min = 0.5, max = 60.0) ?: 1.0,
+        )
+    }
+
+    private fun parseWipe(boss: Node): BossWipeSpec? {
+        val n = boss.child("wipe", required = true) ?: return null
+        n.only(setOf("checkpoint", "health", "phase", "restart-delay-seconds", "cues", "title", "subtitle"))
+        val checkpoint = n.id("checkpoint", required = true)
+        val healthId = n.str("health") ?: WipeHealth.FULL.id
+        val health = WipeHealth.of(healthId)
+        if (health == null) n.err("health", "未知的值「$healthId」(可用:${WipeHealth.entries.joinToString { it.id }})")
+        val phaseId = n.str("phase") ?: WipePhase.FIRST.id
+        val phase = WipePhase.of(phaseId)
+        if (phase == null) n.err("phase", "未知的值「$phaseId」(可用:${WipePhase.entries.joinToString { it.id }})")
+        if (checkpoint == null || health == null || phase == null) return null
+        return BossWipeSpec(
+            checkpoint, health, phase, n.num("restart-delay-seconds", min = 0.0, max = 120.0) ?: 5.0,
+            n.idList("cues"), n.str("title"), n.str("subtitle"),
+        )
+    }
+
+    private val MOVE_COMMON = setOf(
+        "shape", "weight", "cooldown-seconds", "phase", "warn-seconds", "recovery-seconds", "animation", "warn-cues", "hit-cues",
+        "damage-percent", "push", "origin-marker",
+    )
+
+    private fun parseMove(id: String, node: Node, phaseCount: Int): MoveSpec? {
+        val shapeId = node.str("shape", required = true) ?: return null
+        val specific: Set<String> = when (shapeId) {
+            "ring" -> setOf("max-radius", "band-width", "expand-seconds", "dodge-cues")
+            "circle" -> setOf("radius", "max-targets")
+            "cross" -> setOf("length", "half-width", "angle-offset")
+            "spin" -> setOf("radius", "inner-radius", "gap-degrees", "degrees-per-second", "duration-seconds", "hit-interval-ticks")
+            "summon" -> setOf("enemy", "markers", "count-by-players", "max-alive")
+            "snuff" -> setOf("flash-cues", "saved-cues", "snuff-cues")
+            else -> { node.err("shape", "未知的招式形狀「$shapeId」(可用:ring、circle、cross、spin、summon、snuff)"); return null }
+        }
+        val hurts = shapeId != "summon" && shapeId != "snuff"
+        val allowed = if (hurts) MOVE_COMMON + specific else (MOVE_COMMON - setOf("damage-percent", "push")) + specific
+        node.only(allowed)
+        val shape: MoveShape? = when (shapeId) {
+            "ring" -> MoveShape.Ring(
+                node.num("max-radius", min = 2.0, max = 48.0, required = true) ?: return null,
+                node.num("band-width", min = 0.5, max = 16.0) ?: 2.0,
+                node.num("expand-seconds", min = 0.2, max = 10.0) ?: 0.8,
+                node.idList("dodge-cues"),
+            )
+            "circle" -> MoveShape.Circle(
+                node.num("radius", min = 0.5, max = 16.0, required = true) ?: return null,
+                node.int("max-targets", min = 0, max = 16) ?: 0,
+            )
+            "cross" -> MoveShape.Cross(
+                node.num("length", min = 2.0, max = 48.0) ?: 14.0,
+                node.num("half-width", min = 0.3, max = 8.0) ?: 1.2,
+                node.num("angle-offset", min = -360.0, max = 360.0) ?: 45.0,
+            )
+            "spin" -> {
+                val radius = node.num("radius", min = 2.0, max = 48.0, required = true) ?: return null
+                val inner = node.num("inner-radius", min = 0.0, max = 47.0) ?: 2.0
+                if (inner >= radius) node.err("inner-radius", "必須小於 radius($radius)")
+                MoveShape.Spin(
+                    radius, inner,
+                    node.num("gap-degrees", min = 20.0, max = 180.0) ?: 80.0,
+                    node.num("degrees-per-second", min = 10.0, max = 360.0) ?: 45.0,
+                    node.num("duration-seconds", min = 1.0, max = 60.0) ?: 8.0,
+                    node.int("hit-interval-ticks", min = 4, max = 200) ?: 20,
+                )
+            }
+            "summon" -> {
+                val enemy = node.id("enemy", required = true)
+                val markers = node.idList("markers")
+                if (markers.isEmpty()) node.err("markers", "至少要有一個生成點 marker")
+                val counts = LinkedHashMap<Int, Int>()
+                for ((n, v) in node.playerMap("count-by-players")) {
+                    val c = (v as? Number)?.toInt()
+                    if (c == null || c < 1) node.err("count-by-players", "人數 $n 的隻數必須是 >= 1 的整數(目前 $v)") else counts[n] = c
+                }
+                if (enemy == null || markers.isEmpty()) return null
+                MoveShape.Summon(enemy, markers, counts, node.int("max-alive", min = 1, max = 32) ?: 4)
+            }
+            else -> MoveShape.Snuff(node.idList("flash-cues"), node.idList("saved-cues"), node.idList("snuff-cues"))
+        }
+        val from = node.int("phase", min = 1, max = MAX_PHASES) ?: 1
+        if (from > phaseCount) node.err("phase", "不可大於階段數($phaseCount)")
+        val damage = if (hurts) node.num("damage-percent", min = 0.0, max = 1.0, exclusiveMin = true, required = true) else 0.0
+        val push = node.child("push")?.let { p ->
+            p.only(setOf("strength", "lift"))
+            HarassEffect.Push(p.num("strength", min = 0.0, max = 2.0, required = true) ?: 0.0, p.num("lift", min = 0.0, max = 1.0) ?: 0.0)
+        }
+        if (shape == null) return null
+        return MoveSpec(
+            id, node.int("weight", min = 1, max = 100) ?: 1, node.num("cooldown-seconds", min = 0.0, max = 300.0) ?: 0.0, from,
+            node.num("warn-seconds", min = 0.2, max = 30.0) ?: 2.0, node.num("recovery-seconds", min = 0.0, max = 30.0) ?: 1.0,
+            node.str("animation"), node.idList("warn-cues"), node.idList("hit-cues"), damage ?: 0.0, push,
+            MoveOrigin(node.id("origin-marker")), shape,
+        )
+    }
+
     private companion object {
         val ASSET = Regex("[a-z0-9_.-]+:[a-z0-9_.-]+(/[a-z0-9_.-]+)*")
         val MATERIAL = Regex("[A-Za-z0-9_:]+")
@@ -942,6 +1236,9 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         const val MIN_SCAN_TICKS = 4
         const val MIN_FROZEN_SCAN_TICKS = 2
         const val MAX_SCAN_TICKS = 100
+        const val MAX_PHASES = 8
+        val BAR_OVERLAYS = setOf("PROGRESS", "NOTCHED_6", "NOTCHED_10", "NOTCHED_12", "NOTCHED_20")
+        val DOWNED_GAME_MODES = setOf("SURVIVAL", "ADVENTURE", "SPECTATOR")
         const val DEFAULT_RESOLVE_KEY = "cleared"
         const val DEFAULT_DIALOG_TIMEOUT = 120.0
         val DEFAULT_POSES = listOf("tilt_head", "reach", "hug_knees", "look_back").map { PoseSpec(it, it) }

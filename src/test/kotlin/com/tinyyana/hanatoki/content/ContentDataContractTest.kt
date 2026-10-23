@@ -70,7 +70,7 @@ class ContentDataContractTest {
     @Test
     fun `缺必要檔案和未知檔案都拒絕`() {
         assertTrue(errorsOf(mapOf("scene.yml" to null)).any { it.startsWith("scene.yml") && "缺少必要資料檔" in it })
-        assertTrue(errorsOf(mapOf("bosses.yml" to "x: 1")).any { it.startsWith("bosses.yml") && "未知的資料檔" in it })
+        assertTrue(errorsOf(mapOf("mystery.yml" to "x: 1")).any { it.startsWith("mystery.yml") && "未知的資料檔" in it })
     }
 
     @Test

@@ -13,9 +13,14 @@ import com.tinyyana.hanatoki.map.MapPos
 import com.tinyyana.hanatoki.map.MarkerKind
 import com.tinyyana.hanatoki.map.PlacedMap
 import com.tinyyana.hanatoki.map.PlacedPiece
+import com.tinyyana.hanatoki.folia.PlayerOp
+import com.tinyyana.hanatoki.hud.ActionBars
+import com.tinyyana.hanatoki.presentation.BossModelBones
 import com.tinyyana.hanatoki.presentation.BossModelHandle
 import com.tinyyana.hanatoki.stage.StageContext
 import com.destroystokyo.paper.entity.ai.GoalType
+import net.kyori.adventure.text.Component
+import org.bukkit.attribute.Attribute
 import org.bukkit.Bukkit
 import org.bukkit.FluidCollisionMode
 import org.bukkit.Location
@@ -32,6 +37,7 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedDeque
+import java.util.function.Consumer
 import java.util.function.IntConsumer
 
 /**
@@ -136,6 +142,8 @@ class SessionRun(
     private var scanPending = false
     private var scanAt = 0L
     private var lastScanAt = -1000L
+    /** 敵人掃描的輪替游標:上一輪視窗最後一隻的 actorId(超過單輪上限時，下一輪從它之後接著掃)。 */
+    private var scanCursor: String? = null
 
     private val mutator = StageWorldMutator { location, data ->
         if (!closed) ctx.mutate(location) { block -> block.blockData = data }
@@ -211,7 +219,7 @@ class SessionRun(
     }
 
     private fun log(event: String, detail: String) {
-        core.plugin.logger.info("[HanaToki/$dungeonId] $event $detail slot=$slotId")
+        core.plugin.logger.info("[HanaToki/$dungeonId] $event${if (detail.isEmpty()) "" else " $detail"} slot=$slotId")
     }
 
     private fun warn(message: String) {
@@ -321,6 +329,9 @@ class SessionRun(
         val stage = spec.stage(stageId) ?: run { warn("stage $stageId 不在 stages.yml"); return }
         currentStage = stage
         clearTransient("stage")
+        // boss 屬於它的 stage:離開時倒下的人還原、載體移除;進入有 boss 的 stage 時出場
+        stopBoss("stage", despawn = true)
+        spec.bosses.values.firstOrNull { it.stage == stageId }?.let { if (it.id !in defeatedBosses) startBoss(it) }
         markProgress()
         objectiveKey = null
         objectiveDirty = false
@@ -361,6 +372,7 @@ class SessionRun(
         is Condition.EncounterCleared -> encounters[c.encounter]?.phase == EncounterRt.Phase.DONE
         is Condition.ObjectState -> objectReached(c.objectId, c.state)
         is Condition.Reach -> c.marker in reached
+        is Condition.BossDefeated -> c.boss in defeatedBosses
     }
 
     private fun objectReached(objectId: String, state: String): Boolean {
@@ -420,6 +432,7 @@ class SessionRun(
         tickLanterns()
         tickPowerUps()
         tickPowered()
+        boss?.tick()
         tickEnemyRules()
         if (now % 10L == 0L) probeMarkers()
         if (presenceNeeded && now % 10L == 0L) probePresence()
@@ -481,7 +494,7 @@ class SessionRun(
                 // 過期的探測(已被較新的取代)不覆蓋結果
                 if (rt.probeAt != startedAt) return@submit
                 rt.probing = false
-                val people = if (error != null) rt.people else (list?.size ?: 0)
+                val people = if (error != null) rt.people else (list?.count { !isDowned(it) } ?: 0)
                 if (people != rt.people) log("object", "${rt.spec.id} people=$people")
                 rt.people = people
             }
@@ -537,6 +550,7 @@ class SessionRun(
         placeLight(rt.loc, lit)
         if (lit.clearsEnemies) clearEnemiesAround(rt.loc, lit.lightRadius)
         lit.opens?.let { gates[it]?.let(::openGate) }
+        boss?.onLampLit(spec.id)
         checkTriggers()
         evaluateStage()
     }
@@ -672,10 +686,15 @@ class SessionRun(
         enc.spawned++
         val enemySpec = spec.enemies.getValue(enc.spec.enemy)
         val actorId = "${enc.spec.id}-${index + 1}"
-        val rt = EnemyRt(actorId, enemySpec, enc.spec.id)
-        enemies[actorId] = rt
         enc.alive += actorId
         val at = group[(enc.spec.markerOffset + index) % group.size].location(world)
+        spawnEnemyAt(actorId, enemySpec, at, enc.spec.id)
+    }
+
+    /** 生一隻敵人。[encounterId] = null 是 boss 召喚的(不屬於任何波次)。 */
+    private fun spawnEnemyAt(actorId: String, enemySpec: EnemySpec, at: Location, encounterId: String?) {
+        val rt = EnemyRt(actorId, enemySpec, encounterId)
+        enemies[actorId] = rt
         val players = members().size.coerceAtLeast(1)
         val m = pickByPlayers(enemySpec.byPlayers, players, EnemyMultipliers())
         val actorSpec = ActorSpec().apply {
@@ -708,7 +727,7 @@ class SessionRun(
             return
         }
         rt.lastLoc = at
-        log("enemy-spawn", "${rt.actorId} enemy=${rt.spec.id} encounter=${rt.encounterId}")
+        log("enemy-spawn", "${rt.actorId} enemy=${rt.spec.id} encounter=${rt.encounterId ?: "boss"}")
         cues(rt.spec.spawnCues, at, core.actorController.entityOf(sessionId, rt.actorId))
         setMark(rt, rt.spec.needsFlash?.aliveCue)
         if (rt.spec.frameworkMoves) {
@@ -749,6 +768,7 @@ class SessionRun(
         if (!rt.machine.gone()) return
         setMark(rt, null)
         enemies.remove(rt.actorId)
+        boss?.onSummonGone(rt.actorId)
         val enc = rt.encounterId?.let { encounters[it] } ?: return
         enc.alive.remove(rt.actorId)
         log("enemy-gone", "${rt.actorId} reason=$reason")
@@ -901,10 +921,11 @@ class SessionRun(
         if (scanPeriod <= 0L || closed || now - lastScanAt < scanPeriod) return
         if (scanPending && now - scanAt <= PROBE_STALE_TICKS) return
         lastScanAt = now
-        val candidates = enemies.values
-            .filter { it.spec.scanned && it.machine.state == EnemyMachine.State.ALIVE }
-            .take(MAX_SCAN_ENEMIES)
-        if (candidates.isEmpty()) { publishDrain(emptyMap()); return }
+        // 超過單輪上限時輪替(round-robin):從上一輪視窗最後一隻之後接著掃，每隻都會輪到
+        val eligible = enemies.values.filter { it.spec.scanned && it.machine.state == EnemyMachine.State.ALIVE }
+        val candidates = rotatingWindow(eligible, scanCursor, MAX_SCAN_ENEMIES) { it.actorId }
+        val nextCursor: String? = if (eligible.size > MAX_SCAN_ENEMIES) candidates.lastOrNull()?.actorId else null
+        if (candidates.isEmpty()) { scanCursor = null; publishDrain(emptyMap()); return }
         scanPending = true
         scanAt = now
         val startedAt = now
@@ -917,7 +938,9 @@ class SessionRun(
                 if (scanAt != startedAt) return@submit // 較新的一輪已取代(這輪回得太晚)
                 scanPending = false
                 if (closed) return@submit
-                applyEnemyScan(locations.mapNotNull { it.getNow(null) }, snapshots.getNow(emptyMap()))
+                // 這一輪真的套用了才推進游標（太晚回來被丟掉的一輪，下一輪重掃同一批）
+                scanCursor = nextCursor
+                applyEnemyScan(locations.mapNotNull { it.getNow(null) }, withoutDowned(snapshots.getNow(emptyMap())))
             }
         }
     }
@@ -1128,6 +1151,9 @@ class SessionRun(
             val maxX = Math.floor(maxOf(cand.x, tx)).toInt() shr 4
             val minZ = Math.floor(minOf(cand.z, tz)).toInt() shr 4
             val maxZ = Math.floor(maxOf(cand.z, tz)).toInt() shr 4
+            // 簽章 isOwnedByCurrentRegion(World, minChunkX, minChunkZ, maxChunkX, maxChunkZ)——區塊座標、min 的 X、Z 在前，max 的 X、Z 在後:
+            // Lecithin 原始碼 paper-api/src/main/java/org/bukkit/Bukkit.java:2973 與 Server.java:2755(參數名 minChunkX/minChunkZ/maxChunkX/maxChunkZ，
+            // 語意是 x∈[minChunkX,maxChunkX]、z∈[minChunkZ,maxChunkZ] 的每個區塊都屬於目前 ticking 的 region)。這裡的 shr 4 就是方塊座標換區塊座標。
             check(Bukkit.isOwnedByCurrentRegion(w, minX, minZ, maxX, maxZ)) { "射線跨出這個 region" }
             val hit = w.rayTraceBlocks(
                 Location(w, cand.x, cand.eyeY, cand.z), Vector(dx / length, dy / length, dz / length), length - 0.3,
@@ -1247,7 +1273,9 @@ class SessionRun(
                     if (rt.probeAt != startedAt) return@submit
                     rt.probing = false
                     if (closed || list.isNullOrEmpty() || !stageActive(rt.spec.stage)) return@submit
-                    if (rt.machine.take(now)) pickUp(rt, list.first())
+                    // 倒下的人撿不起來
+                    val picker = list.firstOrNull { !isDowned(it) } ?: return@submit
+                    if (rt.machine.take(now)) pickUp(rt, picker)
                 }
             }
         }
@@ -1326,8 +1354,11 @@ class SessionRun(
     }
 
     /** stage 設了 clears-enemies:完成時場上剩下的敵人全部打散(不補燈火)。 */
-    private fun dissolveAllEnemies() {
-        val victims = enemies.values.filter { it.machine.state == EnemyMachine.State.ALIVE || it.machine.stunned }
+    private fun dissolveAllEnemies() = dissolveEnemies("stage-complete") { true }
+
+    /** 打散符合 [filter] 的敵人(不補燈火)。[tag] 寫進 log。 */
+    private fun dissolveEnemies(tag: String, filter: (EnemyRt) -> Boolean) {
+        val victims = enemies.values.filter { (it.machine.state == EnemyMachine.State.ALIVE || it.machine.stunned) && filter(it) }
         if (victims.isEmpty()) return
         val futures = victims.map { rt -> ctx.actors().locationOf(rt.actorId).handle { loc, _ -> rt to loc } }
         CompletableFuture.allOf(*futures.toTypedArray()).whenComplete { _, _ ->
@@ -1337,7 +1368,7 @@ class SessionRun(
                     val (rt, loc) = f.getNow(null) ?: continue
                     if (dissolve(rt, null, loc)) cleared++
                 }
-                log("enemies-cleared", "stage-complete count=$cleared")
+                log("enemies-cleared", "$tag count=$cleared")
             }
         }
     }
@@ -1445,6 +1476,8 @@ class SessionRun(
             "powered: " + poweredNow.joinToString(", ") { "${nameOf(it)}(${String.format(java.util.Locale.ROOT, "%.1f", powered.remainingTicks(it, now) / 20.0)}s)" }
         if (powerUps.isNotEmpty()) lines += "power-up: " + powerUps.values.joinToString(", ") { "${it.spec.id}=${it.machine.state.name.lowercase()}" }
         epilogueRun?.let { lines += "尾聲: 第 ${it.sequence.position + 1}/${it.resolve.epilogue.size} 步" }
+        boss?.let { lines += it.describe() }
+        lines += "倒下狀態玩家數=${boss?.downedCount() ?: 0}"
         lines += "cueRuns=${cueRuns.size} timers=${timers.size}"
         return lines
     }
@@ -1494,6 +1527,9 @@ class SessionRun(
     }
 
     fun onMemberLeft(playerId: UUID) {
+        quitMembers.remove(playerId)
+        // 離場的人已不在成員名單，身體狀態還原走 PlayerOp(不依賴名單)，見 BossHostImpl.restoreDowned
+        boss?.onMemberLeft(playerId)
         touch.forget(playerId)
         chaseTouch.forget(playerId)
         for (rt in enemies.values) if (rt.chaseTarget == playerId) rt.chaseTarget = null
@@ -1519,6 +1555,8 @@ class SessionRun(
         if (closed) return
         val tool = spec.tools[toolId] ?: return
         if (playerId !in members()) return
+        // 倒下的人不能點燈、不能閃光
+        if (isDowned(playerId)) return
         val last = lastFlash[playerId]
         if (last != null && now - last < tool.cooldownTicks) return
         lastFlash[playerId] = now
@@ -1558,6 +1596,11 @@ class SessionRun(
                 val angle = if (to.lengthSquared() < 1.0E-6) 0.0 else Math.toDegrees(Math.acos(to.normalize().dot(direction).coerceIn(-1.0, 1.0)))
                 misses += String.format(java.util.Locale.ROOT, "%s:dist=%.1f,angle=%.0f", rt.spec.id, if (close == Double.MAX_VALUE) -1.0 else close, angle)
             }
+        }
+        // boss 熄燈招式:閃光碰到被點名的場邊燈 = 保住
+        boss?.snuffTarget()?.let { lampId ->
+            val lamp = lanterns[lampId]
+            if (lamp != null && flashTouches(lamp, eye, direction, half, tool, feet)) boss?.onSnuffFlash(playerId)
         }
         if (lanternHits == 0 && misses.isNotEmpty()) {
             log("flash-miss", "player=${nameOf(playerId)} range=${tool.range} cone=${tool.coneAngle} ${misses.joinToString(" ")}")
@@ -1801,11 +1844,350 @@ class SessionRun(
         }
     }
 
+    // ---- Boss(rc.23)----
+
+    private var boss: BossRun? = null
+    /** 事件執行緒讀的 boss 參照(只讀 [BossRun.fightActive]／[BossRun.isDowned]，兩者都是執行緒安全的)。 */
+    @Volatile
+    private var bossView: BossRun? = null
+    @Volatile
+    private var bossActor: String? = null
+    @Volatile
+    private var bossModel: BossModelHandle? = null
+    private var bossBase: String? = null
+    private var bossPos: Pt? = null
+    private var bossYaw = 0f
+    private val defeatedBosses = HashSet<String>()
+    /** 斷線中的成員(寬限期內)。全滅判定不把他們算成存活。 */
+    private val quitMembers: MutableSet<UUID> = ConcurrentHashMap.newKeySet()
+    private val downedBodies = DownedBodyLedger()
+
+    private fun loc(p: Pt) = Location(world, p.x, p.y, p.z)
+
+    private fun startBoss(bossSpec: BossSpec) {
+        val run = BossRun(BossHostImpl(bossSpec), bossSpec, random)
+        boss = run
+        bossView = run
+        run.start()
+    }
+
+    /** stage 轉換或局結束:倒下的人還原、招式作廢、血量條收掉。[despawn] = 連載體一起移除。 */
+    private fun stopBoss(reason: String, despawn: Boolean) {
+        val run = boss ?: return
+        boss = null
+        bossView = null
+        run.shutdown(reason, despawn)
+        if (despawn) {
+            bossActor = null
+            bossModel = null
+            bossBase = null
+            bossPos = null
+        }
+    }
+
+    fun isBossActor(actorId: String): Boolean = actorId == bossActor
+
+    fun bossMinAttackStrength(): Double = bossView?.spec?.minAttackStrength ?: 0.0
+
+    /** 事件執行緒呼叫:玩家一下近戰打到 boss 載體(事件已取消，傷害由命中數取代)。 */
+    fun onBossAttacked(playerId: UUID, at: Location) {
+        ctx.submit { boss?.onHit(playerId, Pt(at.x, at.y, at.z)) }
+    }
+
+    /** 事件執行緒同步讀:這位成員目前是否倒下。 */
+    fun isDowned(id: UUID): Boolean = bossView?.isDowned(id) == true
+
+    /** 事件執行緒同步讀:boss 戰進行中（致死傷害不死亡，進入倒下）。 */
+    fun lethalGuardActive(): Boolean = bossView?.fightActive == true
+
+    fun onLethalDamage(id: UUID) {
+        ctx.submit { boss?.downMember(id) }
+    }
+
+    /** 事件執行緒呼叫（PlayerQuitEvent，玩家自己的執行緒）：同步還原倒下的身體狀態，再回 anchor 執行緒處理邏輯。 */
+    fun onMemberQuit(id: UUID) {
+        quitMembers += id
+        bossView?.onMemberQuitSync(id)
+        ctx.submit { boss?.onMemberQuit(id) }
+    }
+
+    /** 事件執行緒呼叫（PlayerJoinEvent，重連寬限期內回來）。 */
+    fun onMemberReconnected(id: UUID) {
+        quitMembers.remove(id)
+        ctx.submit { boss?.onMemberReconnected(id) }
+    }
+
+    private fun withoutDowned(snap: Map<UUID, DoubleArray>): Map<UUID, DoubleArray> {
+        val run = boss ?: return snap
+        if (run.downedCount() == 0) return snap
+        return snap.filterKeys { !run.isDowned(it) }
+    }
+
+    /** 熄燈招式:閃光碰得到被點名的場邊燈就保住(與點燃共用同一套錐形／點燃半徑量法)。 */
+    private fun flashTouches(rt: LanternRt, eye: Location, direction: Vector, half: Double, tool: ToolSpec, feet: Location): Boolean {
+        val base = rt.loc
+        val cone = inCone(eye, direction, base.clone().add(0.0, 0.5, 0.0), half, tool.range) ||
+            inCone(eye, direction, base.clone().add(0.0, 2.5, 0.0), half, tool.range)
+        val close: Double = if (feet.world == base.world) feet.distance(base) else Double.MAX_VALUE
+        return cone || (rt.spec.igniteRadius > 0.0 && close <= rt.spec.igniteRadius)
+    }
+
+    private inner class BossHostImpl(private val bossSpec: BossSpec) : BossHost {
+        override val now: Long get() = this@SessionRun.now
+
+        override fun schedule(delayTicks: Long, action: Runnable) { timers.schedule(now, delayTicks, action) }
+
+        override fun log(event: String, detail: String) { this@SessionRun.log(event, detail) }
+
+        override fun members(): List<UUID> = this@SessionRun.members()
+
+        override fun isOnline(id: UUID): Boolean = id !in quitMembers && Bukkit.getPlayer(id) != null
+
+        override fun nameOf(id: UUID): String = this@SessionRun.nameOf(id)
+
+        override fun markerPos(id: String): Pt? = markers[id]?.let { m -> val l = m.location(world); Pt(l.x, l.y, l.z) }
+
+        override fun cue(cueId: String, at: Pt) { this@SessionRun.cue(cueId, loc(at)) }
+
+        override fun cueFor(cueId: String, at: Pt, player: UUID) {
+            Bukkit.getPlayer(player)?.let { this@SessionRun.cue(cueId, loc(at), null, listOf(it)) }
+        }
+
+        override fun loopCue(cueId: String, at: Pt): Runnable {
+            val run = this@SessionRun.cue(cueId, loc(at))
+            return Runnable { run?.cancel() }
+        }
+
+        override fun followCue(cueId: String, player: UUID, at: Pt): Runnable {
+            val p = Bukkit.getPlayer(player) ?: return Runnable { }
+            val run = this@SessionRun.cue(cueId, loc(at), p)
+            return Runnable { run?.cancel() }
+        }
+
+        override fun music(cueId: String) { ctx.musicCue(cueId) }
+
+        override fun title(titleKey: String, subtitleKey: String?) { ctx.titleAll(titleKey, subtitleKey ?: "", emptyMap()) }
+
+        override fun titleFor(player: UUID, titleKey: String, subtitleKey: String?) { ctx.title(player, titleKey, subtitleKey ?: "") }
+
+        override fun actionBar(player: UUID, key: String) { ctx.actionBar(player, key) }
+
+        override fun bossBar(textKey: String, fraction: Double, color: String, overlay: String, params: Map<String, String>) {
+            var raw = core.texts.rawOrNull(textKey) ?: return
+            for ((k, v) in params) raw = raw.replace("{$k}", v)
+            ctx.bossBar(raw, fraction.coerceIn(0.0, 1.0), color, overlay)
+        }
+
+        override fun hideBossBar() { ctx.hideBossBar(); barPercent = -1 }
+
+        override fun spawnBoss(at: Pt) {
+            val actorId = "boss-${bossSpec.id}"
+            bossActor = actorId
+            bossPos = at
+            val actorSpec = ActorSpec().apply {
+                entityType = bossSpec.baseEntity
+                ai = false
+                collidable = true
+                invisible = bossSpec.model != null
+                removeWhenFarAway = false
+                immovable = false
+                invulnerable = false
+                gravity = false
+                silent = true
+                fireResistant = true
+                randomizeData = false
+                // 傷害一律在事件裡取消，血量用命中數表示；載體血量只是讓它不會被一般手段秒掉
+                maxHealth = BOSS_CARRIER_HEALTH
+                scale = bossSpec.scale
+            }
+            ctx.actors().spawn(actorId, loc(at), actorSpec).whenComplete { _, error ->
+                ctx.submit { afterBossSpawn(bossSpec, actorId, error) }
+            }
+        }
+
+        override fun moveBoss(to: Pt) {
+            val id = bossActor ?: return
+            val prev = bossPos
+            bossPos = to
+            if (prev != null) {
+                val dx = to.x - prev.x
+                val dz = to.z - prev.z
+                if (Math.abs(dx) > 1.0E-6 || Math.abs(dz) > 1.0E-6) bossYaw = Math.toDegrees(Math.atan2(-dx, dz)).toFloat()
+            }
+            ctx.actors().teleport(id, Location(world, to.x, to.y, to.z, bossYaw, 0f))
+        }
+
+        override fun faceBoss(toward: Pt) {
+            val id = bossActor ?: return
+            val from = bossPos ?: return
+            val dx = toward.x - from.x
+            val dz = toward.z - from.z
+            if (Math.abs(dx) < 1.0E-6 && Math.abs(dz) < 1.0E-6) return
+            bossYaw = Math.toDegrees(Math.atan2(-dx, dz)).toFloat()
+            ctx.actors().setRotation(id, bossYaw, 0f)
+        }
+
+        override fun playAnimation(name: String, loop: Boolean) {
+            val model = bossModel ?: return
+            if (loop) {
+                model.setBase(name)
+                bossBase = name
+            } else {
+                // 單次動畫前先收掉基底迴圈，播完由 BossRun 切回基底
+                bossBase?.let { model.stop(it) }
+                bossBase = null
+                model.play(name, false, null)
+            }
+        }
+
+        override fun setBone(bone: String, visible: Boolean) {
+            (bossModel as? BossModelBones)?.setBoneVisible(bone, visible)
+        }
+
+        override fun despawnBoss() {
+            val id = bossActor ?: return
+            ctx.actors().despawn(id)
+        }
+
+        override fun snapshots(callback: Consumer<Map<UUID, DoubleArray>>) {
+            ctx.memberSnapshots().whenComplete { snap, error ->
+                ctx.submit { if (!closed) callback.accept(if (error != null) emptyMap() else snap ?: emptyMap()) }
+            }
+        }
+
+        override fun damageFixed(id: UUID, fraction: Double, push: HarassEffect.Push?, from: Pt?, onLethal: Runnable) {
+            ctx.runOnMember(id) { p ->
+                if (p.isDead) return@runOnMember
+                val max = p.getAttribute(Attribute.MAX_HEALTH)?.value ?: 20.0
+                val amount = max * fraction
+                val health = p.health
+                // 固定比例、不看護甲、附魔與抗性:直接改血量;致死就留 1 滴血交給倒下機制
+                val lethal = health - amount <= 0.0
+                p.health = if (lethal) health.coerceAtMost(1.0).coerceAtLeast(0.5) else health - amount
+                runCatching { p.playHurtAnimation(0f) }
+                if (push != null && from != null) {
+                    val here = p.location
+                    val v = pushAway(from.x, from.z, here.x, here.z, push.strength)
+                    p.velocity = p.velocity.clone().add(Vector(v[0], push.lift, v[1]))
+                }
+                if (lethal) ctx.submit { onLethal.run() }
+            }
+        }
+
+        override fun applyDowned(id: UUID, spec: DownedSpec, revivePoints: List<Pt>) {
+            PlayerOp.dispatch(core.plugin, id) { p ->
+                downedBodies.apply(id, BukkitBody(p, core.plugin), spec.bodyState())
+                if (revivePoints.isNotEmpty() && p.world == world) {
+                    val here = p.location
+                    val best = revivePoints.minByOrNull { Math.hypot(it.x - here.x, it.z - here.z) }
+                    if (best != null) p.teleportAsync(Location(world, best.x, best.y, best.z, here.yaw, here.pitch))
+                }
+            }
+        }
+
+        override fun restoreDowned(id: UUID, health: Double?) {
+            PlayerOp.dispatch(core.plugin, id) { p ->
+                if (!downedBodies.restore(id, BukkitBody(p, core.plugin))) return@dispatch
+                if (health != null) {
+                    val max = p.getAttribute(Attribute.MAX_HEALTH)?.value ?: 20.0
+                    p.health = health.coerceIn(1.0, max)
+                }
+                ActionBars.show(p, Component.empty())
+            }
+        }
+
+        override fun restoreDownedSync(id: UUID) {
+            Bukkit.getPlayer(id)?.let { downedBodies.restore(id, BukkitBody(it, core.plugin)) }
+        }
+
+        override fun teleportPlayer(id: UUID, to: Pt) {
+            ctx.runOnMember(id) { p -> p.teleportAsync(loc(to)) }
+        }
+
+        override fun lampUsed(lamp: String): Boolean = lanterns[lamp]?.machine?.state.let { it != null && it != LanternMachine.State.UNLIT }
+
+        override fun lampPos(lamp: String): Pt? = lanterns[lamp]?.loc?.let { Pt(it.x, it.y, it.z) }
+
+        override fun resetLamp(lamp: String) {
+            val rt = lanterns[lamp] ?: return
+            rt.machine.reset()
+            rt.hold?.cancel(); rt.hold = null
+            rt.people = -1
+            rt.probing = false
+            rt.milestonesFired = 0
+            rt.drainRate = 0.0; rt.drainers = 0; rt.contestedSince = -1
+            clearLanternHints(lamp)
+            rt.spec.states[ObjectStates.LANTERN_UNLIT]?.let { applyBlocks(marker(rt.spec.markerId), it.blocks) }
+            this@SessionRun.log("object", "$lamp reset->unlit")
+        }
+
+        override fun setPumpkinsAvailable(objects: List<String>, available: Boolean) {
+            for (id in objects) {
+                val rt = powerUps[id] ?: continue
+                if (available) {
+                    rt.machine.forceReady()
+                    rt.spec.states[ObjectStates.POWER_UP_READY]?.let { applyBlocks(rt.marker, it.blocks) }
+                } else {
+                    rt.machine.forceTaken()
+                    rt.spec.states[ObjectStates.POWER_UP_TAKEN]?.let { applyBlocks(rt.marker, it.blocks) }
+                }
+                this@SessionRun.log("power-up", "$id ${if (available) "available" else "hidden"}")
+            }
+        }
+
+        override fun isPowered(id: UUID): Boolean = powered.isPowered(id, now)
+
+        override fun endPowered(reason: String) {
+            if (powered.active) this@SessionRun.endPowered(reason)
+        }
+
+        override fun spawnSummon(actorId: String, enemyId: String, at: Pt): Boolean {
+            val enemySpec = spec.enemies[enemyId] ?: return false
+            spawnEnemyAt(actorId, enemySpec, loc(at), null)
+            return true
+        }
+
+        override fun dissolveSummons(actorIds: Collection<String>) {
+            val ids = actorIds.toSet()
+            dissolveEnemies("boss") { it.actorId in ids }
+        }
+
+        override fun onBossDefeated() {
+            defeatedBosses += bossSpec.id
+            markProgress()
+            evaluateStage()
+        }
+    }
+
+    private fun afterBossSpawn(bossSpec: BossSpec, actorId: String, error: Throwable?) {
+        if (closed || bossActor != actorId) return
+        if (error != null || ctx.actors().entityIdOf(actorId) == null) {
+            warn("boss ${bossSpec.id} 載體生成失敗${error?.let { ":${it.message}" } ?: ""}")
+            return
+        }
+        val modelId = bossSpec.model ?: return
+        ctx.actors().bindModel(actorId, modelId).whenComplete { handle, _ ->
+            ctx.submit {
+                if (closed || bossActor != actorId) return@submit
+                bossModel = handle
+                if (handle == null) {
+                    warn("boss ${bossSpec.id} 的模型 $modelId 綁定失敗(BetterModel 缺席或模型不存在),載體保持可見")
+                    ctx.actors().runOnEntity(actorId) { e -> (e as? LivingEntity)?.isInvisible = false }
+                } else {
+                    handle.setBase(bossSpec.animations.idle)
+                    bossBase = bossSpec.animations.idle
+                }
+            }
+        }
+    }
+
     // ---- 收尾 ----
 
     /** 局結束:取消所有 CueRun 與排程、停掉 mutator。場地回滾由引擎在這之後做。 */
     fun close(reason: String = "closed") {
         if (closed) return
+        // boss 先收（倒下的人還原身體狀態、血量條收掉）；這時 closed 還是 false，host 的演出呼叫才不會被擋
+        stopBoss(reason, despawn = false)
         closed = true
         timers.clear()
         touch.clear()
@@ -1836,6 +2218,8 @@ class SessionRun(
         const val SNEAKING = 8
         /** 敵人規則掃描單輪上限,以及啃燈判定允許的高度差、啃燈速率過期時間。 */
         const val MAX_SCAN_ENEMIES = 24
+        /** boss 載體的血量上限:傷害一律在事件取消，只是讓它不被一般手段（指令、環境）秒掉。 */
+        const val BOSS_CARRIER_HEALTH = 1024.0
         const val CONTEST_HEIGHT = 3.0
         const val DRAIN_STALE_TICKS = 60L
         const val HINT_SLACK = 1.0

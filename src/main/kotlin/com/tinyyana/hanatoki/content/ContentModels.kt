@@ -17,6 +17,8 @@ data class ContentSpec(
     val encounters: Map<String, EncounterSpec>,
     val tools: Map<String, ToolSpec>,
     val hints: Map<String, HintSpec>,
+    /** rc.23:bosses.yml(沒有檔案 = 空)。 */
+    val bosses: Map<String, BossSpec> = emptyMap(),
 ) {
     val startStage: String get() = stages.first().id
     fun stage(id: String): StageSpec? = stages.firstOrNull { it.id == id }
@@ -85,6 +87,8 @@ sealed interface Condition {
     data class EncounterCleared(val encounter: String) : Condition
     data class ObjectState(val objectId: String, val state: String) : Condition
     data class Reach(val marker: String, val radius: Double) : Condition
+    /** rc.23:bosses.yml 的 boss 已被打倒(log `boss-defeated <bossId>`)。 */
+    data class BossDefeated(val boss: String) : Condition
 }
 
 // ---- scene.yml ----

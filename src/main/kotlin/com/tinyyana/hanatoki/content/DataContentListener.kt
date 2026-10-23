@@ -12,6 +12,8 @@ import org.bukkit.event.block.BlockPlaceEvent
 import org.bukkit.event.entity.EntityDamageByEntityEvent
 import org.bukkit.event.entity.EntityDamageEvent
 import org.bukkit.event.player.PlayerInteractEvent
+import org.bukkit.event.player.PlayerJoinEvent
+import org.bukkit.event.player.PlayerQuitEvent
 import org.bukkit.inventory.EquipmentSlot
 
 /**
@@ -43,6 +45,47 @@ class DataContentListener(private val core: HanaTokiCore, private val runtime: D
         run.onFlash(player.uniqueId, toolId, player.eyeLocation.clone(), player.eyeLocation.direction.clone(), player.location.clone())
     }
 
+    /**
+     * Boss 戰中的致死傷害（任何來源：招式、人偶、幽靈、摔落…）：玩家不死亡，進入倒下狀態。
+     * 排在其他插件改完傷害之後（HIGHEST）；虛空、/kill、世界邊界放行（真的離開戰場就是離開）。
+     * 事件執行緒只讀 volatile／並行狀態，狀態變更一律 submit 回 anchor 執行緒。
+     * [EntityDamageEvent.getFinalDamage] 已經扣掉吸收（ABSORPTION 是它的 modifier），直接和血量比。
+     */
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    fun onPlayerLethal(event: EntityDamageEvent) {
+        if (!runtime.hasRuns) return
+        val victim = event.entity as? Player ?: return
+        when (event.cause) {
+            EntityDamageEvent.DamageCause.VOID, EntityDamageEvent.DamageCause.KILL, EntityDamageEvent.DamageCause.WORLD_BORDER -> return
+            else -> {}
+        }
+        val run = runtime.runOfPlayer(victim.uniqueId) ?: return
+        if (!run.lethalGuardActive()) return
+        val downed = run.isDowned(victim.uniqueId)
+        if (!downed && event.finalDamage < victim.health) return
+        event.isCancelled = true
+        if (!downed) run.onLethalDamage(victim.uniqueId)
+    }
+
+    /** 斷線：在玩家自己的執行緒上同步還原倒下的身體狀態（玩家資料存檔前），邏輯狀態留著（寬限期內回來還是倒下）。 */
+    @EventHandler(priority = EventPriority.NORMAL)
+    fun onQuit(event: PlayerQuitEvent) {
+        if (!runtime.hasRuns) return
+        runtime.runOfPlayer(event.player.uniqueId)?.onMemberQuit(event.player.uniqueId)
+    }
+
+    /**
+     * 登入：晚於 HanaTokiListener 的重連判定（MONITOR）。仍在這一局而且還是倒下 → 重新套用；不是 → 身上若留著上次關服或當機時的
+     * 倒下記號（PDC）就整組還原。
+     */
+    @EventHandler(priority = EventPriority.MONITOR)
+    fun onJoin(event: PlayerJoinEvent) {
+        val player = event.player
+        val run = runtime.runOfPlayer(player.uniqueId)
+        if (run != null) run.onMemberReconnected(player.uniqueId)
+        if (run == null || !run.isDowned(player.uniqueId)) BukkitBody.restoreLeftover(player, core.plugin)
+    }
+
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
     fun onPlace(event: BlockPlaceEvent) {
         if (runtime.toolItems.idOf(event.itemInHand) != null) event.isCancelled = true
@@ -60,6 +103,18 @@ class DataContentListener(private val core: HanaTokiCore, private val runtime: D
             EntityDamageEvent.DamageCause.VOID, EntityDamageEvent.DamageCause.KILL, EntityDamageEvent.DamageCause.WORLD_BORDER -> return
             else -> {}
         }
+        // 倒下的玩家不能攻擊(敵人、boss 都一樣)
+        if (event is EntityDamageByEntityEvent) {
+            val attacker = when (val d = event.damager) {
+                is Player -> d
+                is Projectile -> d.shooter as? Player
+                else -> null
+            }
+            if (attacker != null && runtime.runOfPlayer(attacker.uniqueId)?.isDowned(attacker.uniqueId) == true) {
+                event.isCancelled = true
+                return
+            }
+        }
         // harasses-players 的 suppress-melee:這種敵人打到玩家的原版近戰整個取消(只剩資料裡的效果)
         if (event.entity is Player) {
             val hit = (event as? EntityDamageByEntityEvent)?.damager ?: return
@@ -71,6 +126,18 @@ class DataContentListener(private val core: HanaTokiCore, private val runtime: D
         }
         val (sessionId, actorId) = core.actorController.actorIdOf(event.entity.uniqueId) ?: return
         val run = runtime.runOf(sessionId) ?: return
+        // boss 載體:傷害一律取消，血量用命中數表示。只有玩家的近戰（ENTITY_ATTACK，不含橫掃）算一下有效攻擊，
+        // 蓄力、冷卻與護盾判定交給 BossRun。Paper 在傷害事件之前就重置玩家的蓄力計時（Lecithin Player.java:1117 onAttack，
+        // :1146 才 hurtOrSimulate），事件裡的 attackCooldown 幾乎是 0，所以 min-attack-strength 預設 0，限頻靠 hit-cooldown-ticks。
+        if (run.isBossActor(actorId)) {
+            event.isCancelled = true
+            val byEntity = event as? EntityDamageByEntityEvent ?: return
+            val hitter = byEntity.damager as? Player ?: return
+            if (event.cause != EntityDamageEvent.DamageCause.ENTITY_ATTACK) return
+            if (hitter.attackCooldown < run.bossMinAttackStrength()) return
+            run.onBossAttacked(hitter.uniqueId, event.entity.location.clone())
+            return
+        }
         val enemy = run.enemy(actorId) ?: return
         // needs-flash、人偶、追擊者、會逃的敵人都不吃一般傷害:只能被閃光打散(needs-flash)或被 powered 成員碰散
         if (!enemy.spec.immuneToDamage) return

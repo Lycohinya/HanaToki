@@ -1,4 +1,4 @@
-# 資料驅動副本內容（1.0.0-rc.22）
+# 資料驅動副本內容（1.0.0-rc.23）
 
 內容插件只給 **一個資料夾 + texts**，行為由框架內建的 `DataDrivenBehavior` 依資料執行，內容端不寫 Kotlin。另做一座副本只換設定檔與資產。判準：加第 N+1 盞燈籠、第 N+1 種幽靈、第 N+1 段提示，只改一筆 YAML。
 
@@ -10,7 +10,7 @@
 ## 註冊用法
 
 ```kotlin
-// 內容插件 onEnable（depend: HanaToki）。dataDir 內放 dungeons.yml、七個 YAML、map-assets/
+// 內容插件 onEnable（depend: HanaToki）。dataDir 內放 dungeons.yml、八個 YAML（bosses.yml 可省略）、map-assets/
 val engine = (server.pluginManager.getPlugin("HanaToki") as HanaTokiPlugin).core
 engine.registerDataContent(this, File(dataFolder, "content"), texts)   // texts: Map<String, String>
     .whenComplete { handle, error -> /* handle.closeAsync() 在 onDisable，同 registerContent */ }
@@ -24,7 +24,7 @@ engine.registerDataContent(this, File(dataFolder, "content"), texts)   // texts:
 content/
   dungeons.yml       引擎副本定義（正好一座；id = stages.yml 的 dungeon）
   stages.yml  scene.yml                      必要
-  objects.yml  enemies.yml  encounters.yml  tool.yml  hints.yml   可省略（= 空）
+  objects.yml  enemies.yml  encounters.yml  tool.yml  hints.yml  bosses.yml   可省略（= 空）
   map-assets/<namespace>/structure/<path>.nbt   資料夾沒有的資產退回內容插件 jar 內同路徑的 map-assets/
 ```
 
@@ -53,6 +53,7 @@ stages:                       # 宣告順序；第一個 = 起始 stage
       - { type: encounter-cleared, encounter: intro }
       - { type: object-state, object: lantern_a, state: lit }
       - { type: reach, marker: candle_path, radius: 3 }   # 任一成員在 trigger marker 半徑內
+      - { type: boss-defeated, boss: nun }                # rc.23:bosses.yml 的 boss 已被打倒（log `boss-defeated nun`）
     on-complete: { cues: [], title: ..., subtitle: ... }
     next: lantern_court       # 省略 = 最後一段：完成後播 on-complete、打 `slice end` log，不結算、不發獎（除非寫了 resolve，見下）
     clears-enemies: false     # 選填（rc.22，預設 false）：完成時場上剩下的敵人全部打散（不補燈火）
@@ -211,7 +212,7 @@ enemies:
 
 啃燈語意（`LanternMachine.drain`）：只在 `burning` 生效（暫停中也扣，離開燈籠不能躲掉）；進度可退、**夾在 0**、不退回 `unlit`、不觸發完成，所以只有「站著撐住」而沒有打散她們就完成不了，但沒有失敗或倒數；燈亮後不再扣；milestone 只觸發一次（退回再升不重播）。**僵直中的敵人不啃、不碰人**——閃光把她們照住就是解法。啃燈速率每輪掃描發布，超過 60 tick 沒更新視為 0。
 
-掃描：每 `scan-ticks` 一輪（單輪最多 24 隻、在 session 的 anchor region 執行緒用 `locationOf` 與 `memberSnapshots` 的結果一次處理完），全程走既有的 EntityScheduler／PlayerOp，沒有新增跨插件介面方法；來不及回來的一輪不會疊加，也不會覆蓋較新的結果。
+掃描：每 `scan-ticks` 一輪（單輪最多 24 隻，超過時跨輪輪替（round-robin，依 actorId 排序接著上一輪掃，每隻都會輪到；boss 本身不佔名額）、在 session 的 anchor region 執行緒用 `locationOf` 與 `memberSnapshots` 的結果一次處理完），全程走既有的 EntityScheduler／PlayerOp，沒有新增跨插件介面方法；來不及回來的一輪不會疊加，也不會覆蓋較新的結果。
 
 ### 敵人規則 frozen-when-watched／chases-players／flees-when-powered（rc.22，選填）
 
@@ -235,7 +236,7 @@ enemies:
       cue-cooldown-ticks: 6    # 預設 6（0..400）：move-cues 兩次之間的最短間隔，視線在邊緣來回掃時不洗聲
 ```
 
-掃描：視錐與距離在 anchor 執行緒用成員快照（`x,y,z,yaw,pitch,…,sneaking`；眼睛高度站 1.62、蹲 1.27）算；只有已在視錐內的候選才派 `rayTraceBlocks` 到**該敵人自己的 region**（`Bukkit.isOwnedByCurrentRegion` 確認射線經過的區塊都歸本 region，否則當作被看到並 WARN 一次），AI 開關與路徑指令在同一個回呼裡套用。單輪最多 24 隻。姿勢只在「移動 → 凍結」那一刻換一次，不連續兩次同一個。
+掃描：視錐與距離在 anchor 執行緒用成員快照（`x,y,z,yaw,pitch,…,sneaking`；眼睛高度站 1.62、蹲 1.27）算；只有已在視錐內的候選才派 `rayTraceBlocks` 到**該敵人自己的 region**（`Bukkit.isOwnedByCurrentRegion` 確認射線經過的區塊都歸本 region，否則當作被看到並 WARN 一次），AI 開關與路徑指令在同一個回呼裡套用。單輪最多 24 隻（超過時輪替，見上）。姿勢只在「移動 → 凍結」那一刻換一次，不連續兩次同一個。
 
 **chases-players（大幽靈）**：追一位成員；碰到的效果寫在內嵌的 `contact`（欄位與型別同 `harasses-players`，不能和 `harasses-players` 同時寫；冷卻獨立一份）。
 
@@ -273,6 +274,118 @@ enemies:
 被碰散不補燈火、記 `powered-reversal`；同時有 needs-flash 的敵人仍可被閃光打散（走原本的路）。
 
 清理：凍結旗標、追擊目標、逃跑外觀與 powered 在 stage 轉換、局結束時清掉；成員離場移除他的 powered 與追擊目標；僵直結束統一走 `syncBody`（AI 只在 ALIVE 且沒凍結時開）。
+
+## bosses.yml(rc.23)
+
+一個 boss = 一座場地上的「必打」敵人。框架不認得任何特定角色:血量用**命中數**表示,階段、招式時間軸、光環護盾與寶石(場邊燈)、跪下輸出窗口、倒下與全滅重來全部是資料。其他副本寫一個區塊就能用;沒有這個檔案的副本完全不經過這套程式。
+
+- 一個 stage 只能有一個 boss;boss 在它的 `stage` 開始時出場,離開該 stage(轉場、局結束)時整個收掉。
+- 載體是原版 Mob(`base-entity`,預設 ZOMBIE,AI 關閉,隱形並綁 BetterModel 模型)。**對載體的任何傷害一律取消**,玩家的一下有效近戰(`ENTITY_ATTACK`,不含橫掃;攻擊者沒倒下)才換算成命中數,所以不看武器與護甲。
+- 護盾(光環)亮著時近戰打不動:取消傷害、在命中點濺 `shield.spark-cues`(有冷卻)。跪下時任何人有效;**powered**(吃南瓜燈,見 power-up)的成員可無視光環,那一下用 `powered-hit-weight`。
+- Paper 在傷害事件**之前**就重置玩家的蓄力計時(Lecithin `Player.java:1117` `onAttack`,`:1146` 才 `hurtOrSimulate`),事件裡讀到的蓄力幾乎是 0,所以 `min-attack-strength` 預設 0(不限);限頻靠 `hit-cooldown-ticks`(每位玩家各算)。
+
+| 欄位 | 語意 |
+|---|---|
+| `stage` | 必填。boss 所在的 stage(stages.yml);該 stage 常用 `complete: [{ type: boss-defeated, boss: <id> }]` |
+| `base-entity`／`model`／`scale`／`animations` | 載體型別(預設 ZOMBIE)、BetterModel 模型 id、縮放(同時放大 hitbox)、動畫名。動畫預設值就是共用契約名:`idle glide hit shield-spark kneel rise phase-up snuff defeat sit-end`(底線版本 `shield_spark` 等) |
+| `health` | 必填。1 人的總命中數;`by-players: { 2: { health: 1.6, damage: 1.0 } }` 乘上去(血量)與乘在招式傷害上。n 人用 ≤ n 的最大 key,沒寫 = 1.0 |
+| `hit-weight`／`powered-hit-weight`／`hit-cooldown-ticks`／`min-attack-strength` | 一下有效近戰扣幾點(預設 1)、powered 穿過護盾那一下(預設同 hit-weight)、每位玩家兩下之間至少隔幾 tick(預設 12)、蓄力下限(預設 0,見上) |
+| `start-delay-seconds`／`spawn-cues` | 出場後多久開打(預設 3)、出場 cue |
+| `points`／`glide` | 滑行定點 marker(必填,至少一個);`glide: { speed: 1.2, dwell-seconds: 3, order: cycle｜random }` 格/秒。不追人、不近戰,招式施放時停下 |
+| `gap-seconds`／`phase-up-seconds` | 一招結束後到下一招的閒置秒數(預設 2.5)、閒置時換階段的演出秒數(預設 2) |
+| `phases` | `[{ at: 1.0, cues, music, title, subtitle }, { at: 0.55, … }]`:血量比例 ≤ at 進入;第一個必須 1.0,之後嚴格遞減,最多 8 個;不寫 = 單一階段。換階段播 `phase-up` 動畫(閒置時),`boss-phase <n>` |
+| `moves` | 招式表,見下 |
+| `shield` | `{ up-cues, break-cues, spark-cues, spark-cooldown-ticks (10), halo-bone }`。`halo-bone`:模型骨骼,護盾碎時隱藏、起身時顯示 |
+| `gems` | 必填。`[{ lamp: <lantern 物件>, bone, beam-cues, break-cues, restore-cues }]`。**寶石 = 目前亮著的場邊燈**:每點亮一盞,在燈上播 `beam-cues`、在 boss 身上播 `break-cues`、隱藏 `bone`;燈被熄掉(熄燈招式、起身重置)寶石恢復;全部同時亮著 → 護盾碎 |
+| `kneel` | `{ seconds: 10, cues, rise-cues, rise-seconds: 1.5, lamps-reset: on-rise｜never }`。跪下輸出窗口;起身後護盾恢復、(on-rise)所有場邊燈重置為暗。跪下期間打到階段門檻,階段**延到起身後**才換 |
+| `pumpkins` | `{ objects: [power-up 物件], from-phase: 3 }`。階段到之前這些南瓜燈是「拿走」狀態(看不到、拿不到),到了才上架;全滅回第一階段時再次下架 |
+| `downed` | 倒下狀態,見下 |
+| `wipe` | 必填。全滅重來,見下 |
+| `defeat` | `{ cues, seconds: 3 }`。打倒後播 `defeat` 動畫與 cue,`seconds` 後接 `sit-end` 迴圈 |
+| `bar` | `{ text: texts key（{percent} {phase}）, color, overlay }`。boss 血量條(StageContext.bossBar,和燈籠的 `progress-bar` 共用同一條,所以場邊燈不可有 progress-bar) |
+
+### 招式 moves
+
+共通欄位:`shape`(必填)、`weight`(預設 1)、`cooldown-seconds`(同一招的最短間隔,預設 0)、`phase`(第幾階段起開放,預設 1;至少要有一招 phase 1)、`warn-seconds`(預警,預設 2)、`recovery-seconds`(判定後到下一招,預設 1)、`animation`(施放時播的模型動畫,單次)、`warn-cues`(預警開始時在原點播)、`hit-cues`(判定時播)、`origin-marker`(判定區原點;預設 boss 腳下)、`damage-percent`(命中扣玩家**最大血量**的比例,必填,0..1)、`push: { strength, lift }`。`summon`／`snuff` 沒有傷害,不可寫 `damage-percent`／`push`。傷害是**固定比例**:直接改血量,不看護甲、附魔與抗性,再乘人數倍率 `by-players.damage`;致死不會死亡,進入倒下。框架只負責排程、判定區域與 log,地面預警的視覺走 `warn-cues`(LycoLib cue／VFX)。
+
+| shape | 欄位 | 判定 |
+|---|---|---|
+| `ring` 掃地 | `max-radius`(必填)、`band-width`(2)、`expand-seconds`(0.8)、`dodge-cues` | 預警後環形波從原點往外推;波前掃過時**在地上**的人受傷,跳起來(快照 onGround = 0)的躲過並收到 `dodge-cues`(只給他)。取樣每 2 tick,用「掃過的區間」判定,取樣再疏也不漏 |
+| `circle` 落雷 | `radius`(必填)、`max-targets`(0 = 所有人) | 每位目標腳下一個圈(預警開始時定位,不跟隨),時間到圈內的人受傷(每人最多一次) |
+| `cross` 雙杖十字 | `length`(14)、`half-width`(1.2)、`angle-offset`(45) | 通過原點的兩條垂直線(X),線上的人受傷,楔形空格安全 |
+| `spin` 光環迴旋 | `radius`(必填)、`inner-radius`(2)、`gap-degrees`(80)、`degrees-per-second`(45)、`duration-seconds`(8)、`hit-interval-ticks`(20) | 光束環留一個缺口,缺口從預警開始時離 boss 最近的人的方位起以固定角速度旋轉;缺口外(inner-radius..radius)的人每 `hit-interval-ticks` 受傷一次 |
+| `summon` 喚敵 | `enemy`(enemies.yml,必填)、`markers`(必填)、`count-by-players`、`max-alive`(4) | 預警後在 markers 生出敵人(用幾個由人數決定,起點輪替);同種敵人場上已達 `max-alive` 就不抽這一招。喚鬼用 needs-flash 敵人,喚人偶用 frozen-when-watched 敵人 |
+| `snuff` 熄燈 | `flash-cues`(第一個是閃爍的持續 cue,其餘一次性)、`saved-cues`、`snuff-cues` | 點名一盞**亮著**的場邊燈,`warn-seconds` 內有人對它閃光(同點燃的錐形／ignite-radius 判定)就保住;沒保住燈熄(重置為暗)、寶石恢復、播 `snuff-cues` 與 `snuff` 動畫。沒有亮著的場邊燈時抽不到 |
+
+**同一位玩家同時最多一個地面預警**:招式一次只進行一招;每個地面預警(`ring`／`cross`／`spin` 對所有在線成員,`circle` 對被選中的目標)登記到預警帳本,已有預警的目標被跳過(`circle`)或整招延後(其餘),都沒有目標就放棄這一招。log 每位目標一行 `boss-telegraph <moveId> target=<player>`;這一招結束(`boss-move-end`)、被取消(`boss-move-cancel`)或放棄(`boss-move-abort`)時才釋放。
+
+### 場邊燈與護盾
+
+場邊燈是 objects.yml 的 `lantern` 物件(`stage` 省略或等於 boss 的 stage),用既有的燃燒機制:對它閃光燒 `burn-seconds` 秒點亮(要有人在 `stay-radius` 內)。給 boss 用的燈不可有 `progress-bar`、`on-lit.light-radius`(必須 0,放出的光源方塊不會收回)、`on-lit.opens`、`on-lit.clears-enemies`、`milestones`,也不能被兩個 boss 共用。這些燈**可以被重置為未點亮**(熄燈招式、起身、全滅重來):狀態機回 `unlit`、進度歸零、重新套用 `states.unlit` 的方塊、收掉持續 cue,之後可以再點亮(再記一次 `lantern-lit`)。一般燈籠的「不倒退」不變式不受影響,只有 boss 引用的燈會被重置。
+
+### 倒下 downed
+
+玩家受到**致死傷害**(任何來源:招式、人偶、幽靈、摔落…;虛空、`/kill`、世界邊界放行)時不死亡,進入倒下:套用下列身體狀態、(依 `move-to`)移到最近的復活點、不能攻擊、不能點燈與閃光、撿不起南瓜燈、不算守燈人數、不被敵人當目標。她下一次**跪下**時所有倒下的人復活(血量設成 `revive-health`),身體狀態整組還原。
+
+| 欄位 | 預設 |
+|---|---|
+| `gamemode` | `ADVENTURE`(SURVIVAL／ADVENTURE／SPECTATOR) |
+| `invisible`／`glowing`／`invulnerable` | false／false／true |
+| `speed-modifier` | -0.8:移動速度屬性乘數修正(`MULTIPLY_SCALAR_1`,transient,斷線與重啟不會留下) |
+| `revive-points`／`move-to` | 復活點 marker 清單;`nearest-revive-point`(預設)或 `stay`(原地保護) |
+| `revive-health` | 10(點) |
+| `cues`／`mark-cue`／`revive-cues` | 倒下時播(在玩家位置)、倒下期間跟著玩家的持續 cue、復活時播 |
+| `title`／`subtitle`／`hud-text`／`hud-every-seconds` | 倒下時給他的標題、持續的 ActionBar 提示(預設每 1 秒) |
+
+**還原不變式**(`BossRunTest`):倒下時**斷線**(在玩家自己的執行緒上、玩家資料存檔前同步還原)、**離場**、**局結束**、**stage 轉換**、**全滅重來**、**跪下復活**、**打倒**,都把 gamemode、隱形、發光、無敵、移動速度整組還原成倒下前的值,只還原一次;還原一律走該玩家自己的 EntityScheduler,不依賴成員名單(離場與局結束時名單已不含他)。倒下前的狀態另存在玩家 PDC(`hanatoki:downed_body`),關服或當機時回呼來不及跑,下次上線自動還原(移動速度修正是 transient,本來就不會留下)。**斷線重連(寬限期內)**:邏輯上仍倒下——回來後重新套用倒下狀態並回復活點;若這段時間她已經跪下過(把他算作復活),回來的人是活的,直接回 `wipe.checkpoint`。重連的既有傳送會把資料驅動副本的玩家送回入口,boss 戰中會在 10 tick 後再送一次。
+
+**全滅**:在線的成員至少一位而且全部倒下(離線的成員不算存活,也不擋全滅)。
+
+### 全滅重來 wipe
+
+```yaml
+    wipe:
+      checkpoint: front_door     # 必填,marker:所有人回到這裡
+      health: full               # full（預設,血量回滿）｜keep
+      phase: first               # first（預設,回第一階段）｜keep
+      restart-delay-seconds: 5   # 預設 5:這段時間後重新開打
+      cues: []                   # 選填;title／subtitle 選填（texts key）
+```
+
+全滅時:作廢進行中的招式與預警、打散召喚的敵人、結束 powered、場邊燈全部重置、護盾恢復、身體狀態還原(再傳送)、boss 回起點並依策略重置血量與階段。**前面各段點亮的燈與已開的門不熄、不回滾**(只有 boss 引用的場邊燈會重置)。
+
+### 範例(熄燈修女,節錄)
+
+```yaml
+bosses:
+  nun:
+    stage: front_court
+    model: lamp_nun
+    scale: 2.0
+    health: 40
+    by-players: { 2: { health: 1.6 }, 3: { health: 2.2, damage: 0.8 } }
+    points: [nun_point_a, nun_point_b, nun_point_c]
+    phases: [ { at: 1.0, music: boss.p1 }, { at: 0.55, cues: [phase_2] }, { at: 0.25, cues: [phase_3] } ]
+    moves:
+      sweep: { shape: ring, weight: 3, max-radius: 9, damage-percent: 0.25, animation: tele_sweep, warn-cues: [sweep_warn] }
+      strike: { shape: circle, weight: 3, radius: 2.5, damage-percent: 0.3, animation: tele_strike }
+      summon: { shape: summon, weight: 2, enemy: mist, markers: [mist_1, mist_2, mist_3], max-alive: 3, animation: tele_summon }
+      snuff: { shape: snuff, weight: 2, warn-seconds: 3, animation: tele_snuff, snuff-cues: [nun_hum] }
+      cross: { shape: cross, phase: 2, damage-percent: 0.3, animation: tele_cross }
+      spin: { shape: spin, phase: 3, radius: 11, damage-percent: 0.2, animation: tele_spin }
+    gems: [ { lamp: boss_lamp_1, bone: gem_1 }, { lamp: boss_lamp_2, bone: gem_2 }, { lamp: boss_lamp_3, bone: gem_3 }, { lamp: boss_lamp_4, bone: gem_4 } ]
+    shield: { halo-bone: halo, spark-cues: [shield_spark] }
+    pumpkins: { objects: [pumpkin_boss_1, pumpkin_boss_2], from-phase: 3 }
+    downed: { revive-points: [revive_1, revive_2, revive_3], hud-text: boss.downed.hud }
+    wipe: { checkpoint: front_door }
+```
+
+### 執行緒與已知限制
+
+- 所有 boss 狀態只在 session 的 anchor region 執行緒讀寫;事件執行緒只讀 volatile／並行狀態(致死傷害攔截、攻擊取消),狀態變更一律 `ctx.submit`。世界與實體操作走 `StageContext`／`ActorHandle`／`ctx.mutate`,計時只用 session 的 `TimerQueue`(每個計時帶 epoch,跪下、全滅、打倒、局結束時舊計時自己失效)。
+- 骨骼顯示／隱藏(`halo-bone`、`gems[].bone`)走 `BossModelBones`(選配介面,BetterModel 實作用 `TrackerUpdateAction.togglePart`);**只有編譯驗證,實機行為待測試服**,骨骼名不存在時略過不丟例外。
+- 地面預警的取樣用成員快照(環形波每 2 tick、迴旋每 4 tick 一次);boss 的滑行用 `ActorHandle.teleport` 每 2 tick 一小步。`hit` 與 `shield_spark` 只在閒置時播(不蓋掉施放動畫)。
+- 熄燈的「保住」判定只認錐形與 `ignite-radius`,不做視線遮擋(同閃光的既有限制)。
 
 ## encounters.yml
 
@@ -392,9 +505,32 @@ rc.22 新增（紙燈別院全程契約的 tag，bot 認這些字串；`<enemyId
 
 另有 `enemies-cleared stage-complete count=N`（stage 的 `clears-enemies`）。
 
+rc.23 新增（Boss；`<player>` 是玩家名，`<lamp>` 是場邊燈物件 id）：
+
+| 事件 | 時機 |
+|---|---|
+| `boss-start <bossId> hits=<n> players=<n>` | boss 出場（總命中數已含人數倍率） |
+| `boss-phase <n>` | 進入第 n 階段（開打時 1；全滅回第一階段重來時再記一次 1） |
+| `boss-telegraph <moveId> target=<player>` | 地面預警，每位目標一行；同一位玩家在 `boss-move-end`／`-cancel`／`-abort` 之前不會再出現第二個 |
+| `boss-hit <moveId> player=<player>` / `boss-dodge <moveId> player=<player>` | 招式命中／跳過環形波 |
+| `boss-summon <moveId> enemy=<id> count=<n>` | 喚敵 |
+| `boss-snuff-warn <lamp>` / `boss-snuff-saved <lamp> by=<player>` / `boss-snuff <lamp>` | 熄燈：點名閃爍／被保住／燈熄 |
+| `boss-move-end <moveId>` / `boss-move-cancel <moveId> reason=…` / `boss-move-abort <moveId> reason=…` | 一招結束／被作廢（跪下、全滅、打倒、局結束）／放棄（預警被占用、沒有目標） |
+| `boss-shield-broken` | 四盞場邊燈同時亮、光環碎 |
+| `boss-kneel seconds=<s>` | 她跪下（輸出窗口） |
+| `member-downed <player>` | 玩家進入倒下 |
+| `member-revived <player> reason=<kneel｜defeat>` | 倒下的人復活（她跪下時／她被打倒時） |
+| `member-restored <player> reason=<wipe｜left｜stage｜session-end…>` | 倒下的人的身體狀態被還原（不是復活：全滅回檢查點、離場、轉場、局結束） |
+| `boss-wipe-restart checkpoint=<marker>` | 全滅：所有人回檢查點、boss 重置 |
+| `boss-defeated <bossId>` | boss 被打倒（隨後 stage 完成條件 `boss-defeated` 成立，接尾聲與 resolve） |
+| `boss-stop <bossId> reason=<stage｜session-end…>` | boss 被收掉 |
+| `object <lamp> reset->unlit` / `power-up <id> available｜hidden` | 場邊燈被重置／boss 的南瓜燈上架或下架 |
+
+`lantern-lit <lamp>` 沿用（場邊燈每次重新點亮都會再記一次）。
+
 ## Debug 指令
 
-`/hanatoki admin entities [slotId|all]`（權限 `hanatoki.admin`）：每一局列出 actor／prop／BetterModel tracker 數，以及資料驅動內容的現況（stage、敵人各狀態隻數、凍結／追擊／逃跑隻數、powered 成員與剩餘秒數、power-up 狀態、尾聲進度、CueRun 與計時數）。`all`（預設）最後比對「session 已結束卻還登記著的 actor／prop／tracker」，供斷線、離場、局結束後清理驗證（剛結束、場地還在收斂的一局會短暫出現，持續出現才是外洩）。內容現況在 session 的 anchor region 執行緒上組好才輸出。倒下狀態玩家數待 Boss 交接加入倒下機制後在這裡列出。
+`/hanatoki admin entities [slotId|all]`（權限 `hanatoki.admin`）：每一局列出 actor／prop／BetterModel tracker 數，以及資料驅動內容的現況（stage、敵人各狀態隻數、凍結／追擊／逃跑隻數、powered 成員與剩餘秒數、power-up 狀態、尾聲進度、CueRun 與計時數）。`all`（預設）最後比對「session 已結束卻還登記著的 actor／prop／tracker」，供斷線、離場、局結束後清理驗證（剛結束、場地還在收斂的一局會短暫出現，持續出現才是外洩）。內容現況在 session 的 anchor region 執行緒上組好才輸出。rc.23 起有 boss 的局另列一行 boss 現況（狀態、階段、命中數、護盾、寶石、倒下人數、進行中的預警與召喚數、進行中的招式）與 `倒下狀態玩家數=<n>`（沒有 boss 的局固定 0）。
 
 ## 執行緒
 
@@ -402,8 +538,9 @@ rc.22 新增（紙燈別院全程契約的 tag，bot 認這些字串；`<enemyId
 
 ## 範圍與已知限制
 
-- 敵人規則 `needs-flash`、`seeks-object`、`harasses-players`、`frozen-when-watched`、`chases-players`、`flees-when-powered`，物件 `lantern`／`gate`／`power-up`，局內道具 `flash`。Boss 時間軸、倒下狀態、常駐場景還不在內。最後一段完成預設只播 cue 與打 `slice end`，不 `resolve`、不發獎；要結算須在該 stage 寫 `resolve`（見上）；stage 逾時仍不結算。
+- 敵人規則 `needs-flash`、`seeks-object`、`harasses-players`、`frozen-when-watched`、`chases-players`、`flees-when-powered`，物件 `lantern`／`gate`／`power-up`，局內道具 `flash`，boss（`bosses.yml`：階段、招式時間軸、光環護盾與場邊燈、跪下窗口、倒下與復活、全滅重來）。常駐場景還不在內。最後一段完成預設只播 cue 與打 `slice end`，不 `resolve`、不發獎；要結算須在該 stage 寫 `resolve`（見上）；stage 逾時仍不結算。
 - 人偶的遮擋檢查在人偶自己的 region 上做；射線若跨出該 region 就當作被看到（偏向玩家，WARN 一次）。遮擋以方塊碰撞外形判定，玻璃之類會擋視線。
+- rc.23 的 boss 時間軸、判定區、護盾、倒下與全滅流程用假的 host 做了完整流程單元測試（`BossRunTest`），但實體生成、模型動畫與骨骼切換、玩家身體狀態的 Bukkit 實作、致死傷害攔截與斷線／登入事件的實機行為待測試服驗證。
 - rc.22 的 raycast、AI 開關與 region 行為只有單元測試覆蓋純邏輯（視錐、狀態機、解析、驗證）；實機行為待測試服驗證。
 - 閃光不做視線遮擋判定（隔著牆的幽靈會被照到）。
 - 場景每局重放（`maps().place`）；常駐模式未做。

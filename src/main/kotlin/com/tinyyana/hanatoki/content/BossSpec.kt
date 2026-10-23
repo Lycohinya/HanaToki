@@ -1,0 +1,244 @@
+package com.tinyyana.hanatoki.content
+
+/*
+ * bosses.yml(rc.23)的不可變規格。純 Kotlin、不碰 Bukkit,解析與驗證可單元測試。
+ * 一個 boss = 一座場地上的「必打」敵人:血量用命中數表示,階段、招式時間軸、光環護盾與寶石(場邊燈)、跪下輸出窗口、
+ * 倒下與全滅重來全部是資料。框架不認得任何特定角色,其他副本寫一個區塊就能用。
+ */
+
+/** boss 人數倍率:血量(命中數)與招式傷害。沒寫的人數 = 1.0。 */
+data class BossMultipliers(val health: Double = 1.0, val damage: Double = 1.0)
+
+/** boss 模型動畫名(BetterModel);預設值就是共用契約的動畫名。 */
+data class BossAnimations(
+    val idle: String = "idle",
+    val glide: String = "glide",
+    val hit: String = "hit",
+    val shieldSpark: String = "shield_spark",
+    val kneel: String = "kneel",
+    val rise: String = "rise",
+    val phaseUp: String = "phase_up",
+    val snuff: String = "snuff",
+    val defeat: String = "defeat",
+    val sitEnd: String = "sit_end",
+)
+
+enum class GlideOrder(val id: String) {
+    CYCLE("cycle"), RANDOM("random");
+
+    companion object {
+        fun of(id: String): GlideOrder? = entries.firstOrNull { it.id == id }
+    }
+}
+
+/** 在 [BossSpec.points] 之間緩慢滑行:[speed] 格/秒,到點停 [dwellSeconds] 秒再走下一個點。 */
+data class BossGlideSpec(val speed: Double, val dwellSeconds: Double, val order: GlideOrder)
+
+/**
+ * 一個階段:血量比例 <= [at] 就進入(第一階段 at = 1.0,進場即進入)。換階段的演出放 [onEnter]
+ * (cues、音樂、title)。招式要幾階段才開放寫在招式自己的 `phase`。
+ */
+data class BossPhaseSpec(val number: Int, val at: Double, val onEnter: StageEffects)
+
+/** 光環護盾的演出:亮著時近戰打不動(取消傷害)。[haloBone] 是模型骨骼(選填),護盾碎時隱藏、恢復時顯示。 */
+data class BossShieldSpec(
+    val upCues: List<String>,
+    val breakCues: List<String>,
+    /** 護盾擋下近戰時在命中點播(濺金色火花、鏗一聲)。 */
+    val sparkCues: List<String>,
+    val sparkCooldownTicks: Int,
+    val haloBone: String?,
+)
+
+/**
+ * 一顆寶石 = 一盞場邊燈([lamp],lantern 物件)。寶石數量由「目前亮著的場邊燈」推出:燈被熄掉寶石就恢復,
+ * 四盞同時亮著光環才碎。[bone] 是模型骨骼(選填,碎時隱藏);[beamCues] 在亮起的燈上播(光束)。
+ */
+data class BossGemSpec(
+    val lamp: String,
+    val bone: String?,
+    val beamCues: List<String>,
+    val breakCues: List<String>,
+    val restoreCues: List<String>,
+)
+
+enum class LampReset(val id: String) {
+    ON_RISE("on-rise"), NEVER("never");
+
+    companion object {
+        fun of(id: String): LampReset? = entries.firstOrNull { it.id == id }
+    }
+}
+
+/** 跪下輸出窗口:[seconds] 秒內任何近戰都有效;起身後依 [lampsReset] 重置場邊燈、光環恢復。 */
+data class BossKneelSpec(
+    val seconds: Double,
+    val cues: List<String>,
+    val riseCues: List<String>,
+    val riseSeconds: Double,
+    val lampsReset: LampReset,
+)
+
+/** 吃到這些 power-up 物件可無視光環打她;[fromPhase] 之前它們是「拿走」狀態(看不到也拿不到)。 */
+data class BossPumpkinSpec(val objects: List<String>, val fromPhase: Int)
+
+enum class DownedMove(val id: String) {
+    NEAREST_REVIVE("nearest-revive-point"), STAY("stay");
+
+    companion object {
+        fun of(id: String): DownedMove? = entries.firstOrNull { it.id == id }
+    }
+}
+
+/**
+ * 倒下狀態:玩家受到致死傷害時不死亡,套用這個身體狀態([gameMode] 是 Bukkit GameMode 常數名)。
+ * 不能攻擊、不能點燈、不吃傷害;她下一次跪下時全部復活。外觀與提示都是資料。
+ */
+data class DownedSpec(
+    val gameMode: String,
+    val invisible: Boolean,
+    val glowing: Boolean,
+    val invulnerable: Boolean,
+    /** 移動速度屬性的乘數修正(MULTIPLY_SCALAR_1):-0.8 = 只剩兩成速度;0 = 不改。transient,斷線與重啟都不會留下。 */
+    val speedModifier: Double,
+    val revivePoints: List<String>,
+    val move: DownedMove,
+    /** 復活時設定的血量(點數)。 */
+    val reviveHealth: Double,
+    val cues: List<String>,
+    val markCue: String?,
+    val reviveCues: List<String>,
+    val titleKey: String?,
+    val subtitleKey: String?,
+    val hudTextKey: String?,
+    val hudEverySeconds: Double,
+)
+
+enum class WipeHealth(val id: String) {
+    FULL("full"), KEEP("keep");
+
+    companion object {
+        fun of(id: String): WipeHealth? = entries.firstOrNull { it.id == id }
+    }
+}
+
+enum class WipePhase(val id: String) {
+    FIRST("first"), KEEP("keep");
+
+    companion object {
+        fun of(id: String): WipePhase? = entries.firstOrNull { it.id == id }
+    }
+}
+
+/** 全滅重來:所有人回到 [checkpoint] marker,boss 依 [health]／[phase] 重置,場邊燈重置;前面各段點亮的燈與已開的門不動。 */
+data class BossWipeSpec(
+    val checkpoint: String,
+    val health: WipeHealth,
+    val phase: WipePhase,
+    val restartDelaySeconds: Double,
+    val cues: List<String>,
+    val titleKey: String?,
+    val subtitleKey: String?,
+)
+
+data class BossDefeatSpec(val cues: List<String>, val seconds: Double)
+
+/** boss 血量條(StageContext.bossBar):[textKey] 是 texts key,參數 {percent} {phase}。 */
+data class BossBarSpec(val textKey: String, val color: String, val overlay: String)
+
+/** 地面判定區的原點:boss 腳下(預設),或指定 marker。 */
+data class MoveOrigin(val marker: String?)
+
+sealed interface MoveShape {
+    /** 掃地:金圈 [MoveSpec.warnSeconds] 後從原點往外推 [expandSeconds] 秒到 [maxRadius];跳起來(不在地上)的人躲過。 */
+    data class Ring(val maxRadius: Double, val bandWidth: Double, val expandSeconds: Double, val dodgeCues: List<String>) : MoveShape
+
+    /** 落雷:每位目標腳下一個圈(預警開始時定位,不跟隨);圈內的人在 [MoveSpec.warnSeconds] 後受傷。[maxTargets] = 0 表示所有人。 */
+    data class Circle(val radius: Double, val maxTargets: Int) : MoveShape
+
+    /** 雙杖十字:兩條垂直的線(X),線寬 [halfWidth]*2、各向兩端延伸 [length];站進線之間的空格。[angleOffset] 度。 */
+    data class Cross(val length: Double, val halfWidth: Double, val angleOffset: Double) : MoveShape
+
+    /** 光環迴旋:半徑 [innerRadius]..[radius] 的光束環,留一個 [gapDegrees] 度的缺口,每秒轉 [degreesPerSecond] 度,持續 [durationSeconds] 秒。 */
+    data class Spin(
+        val radius: Double,
+        val innerRadius: Double,
+        val gapDegrees: Double,
+        val degreesPerSecond: Double,
+        val durationSeconds: Double,
+        val hitIntervalTicks: Int,
+    ) : MoveShape
+
+    /** 喚敵:在 [markers] 生出 [enemy](enemies.yml 的敵人);[countByPlayers] 決定用幾個 marker(沒寫 = 全部)。同種敵人場上最多 [maxAlive] 隻。 */
+    data class Summon(val enemy: String, val markers: List<String>, val countByPlayers: Map<Int, Int>, val maxAlive: Int) : MoveShape
+
+    /** 熄燈:指向一盞亮著的場邊燈,[MoveSpec.warnSeconds] 秒內有人對它閃光就保住,否則燈熄(寶石恢復)。 */
+    data class Snuff(
+        val flashCues: List<String>,
+        val savedCues: List<String>,
+        val snuffCues: List<String>,
+    ) : MoveShape
+}
+
+/** 一招。[fromPhase] = 第幾階段起開放;[weight]／[cooldownSeconds] 決定抽中機率與同一招的最短間隔。 */
+data class MoveSpec(
+    val id: String,
+    val weight: Int,
+    val cooldownSeconds: Double,
+    val fromPhase: Int,
+    /** 預警秒數:演出開始到判定的時間。 */
+    val warnSeconds: Double,
+    /** 判定後多久才能接下一招。 */
+    val recoverySeconds: Double,
+    val animation: String?,
+    val warnCues: List<String>,
+    val hitCues: List<String>,
+    /** 命中時扣玩家最大血量的比例(0..1),不看護甲。 */
+    val damagePercent: Double,
+    val push: HarassEffect.Push?,
+    val origin: MoveOrigin,
+    val shape: MoveShape,
+)
+
+data class BossSpec(
+    val id: String,
+    /** boss 所在的 stage:這個 stage 開始時 boss 出場。 */
+    val stage: String,
+    val baseEntity: String,
+    val model: String?,
+    val scale: Double?,
+    val animations: BossAnimations,
+    /** 基準血量,單位是「命中數」(1 人)。 */
+    val health: Double,
+    val byPlayers: Map<Int, BossMultipliers>,
+    /** 一下有效近戰扣幾點;[poweredHitWeight] 是 powered(南瓜燈)成員穿過光環那一下。 */
+    val hitWeight: Double,
+    val poweredHitWeight: Double,
+    val hitCooldownTicks: Int,
+    /**
+     * 攻擊蓄力比例低於這個值不算有效近戰(預設 0 = 不限)。注意:Paper 在傷害事件**之前**就重置蓄力計時
+     * (Lecithin `Player.java:1117` onAttack、`:1146` hurtOrSimulate),事件裡讀到的蓄力幾乎是 0,所以預設不能 > 0;
+     * 限頻靠 [hitCooldownTicks]。
+     */
+    val minAttackStrength: Double,
+    val startDelaySeconds: Double,
+    val spawnCues: List<String>,
+    val points: List<String>,
+    val glide: BossGlideSpec,
+    /** 一招結束後到下一招之間的閒置秒數。 */
+    val gapSeconds: Double,
+    /** 換階段的演出時間(閒置時換階段才暫停出招)。 */
+    val phaseUpSeconds: Double,
+    val phases: List<BossPhaseSpec>,
+    val moves: Map<String, MoveSpec>,
+    val shield: BossShieldSpec,
+    val gems: List<BossGemSpec>,
+    val kneel: BossKneelSpec,
+    val pumpkins: BossPumpkinSpec?,
+    val downed: DownedSpec,
+    val wipe: BossWipeSpec,
+    val defeat: BossDefeatSpec,
+    val bar: BossBarSpec?,
+) {
+    val lampIds: List<String> get() = gems.map { it.lamp }
+}

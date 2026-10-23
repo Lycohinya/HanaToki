@@ -29,7 +29,7 @@ import java.util.concurrent.CompletableFuture
  * 任何一筆錯誤 → 整份拒絕(future 以 [ContentDataException] 失敗),不半載入。
  *
  * 資料夾結構:`dungeons.yml`(引擎的副本定義)、`stages.yml` `scene.yml` `objects.yml` `enemies.yml`
- * `encounters.yml` `tool.yml` `hints.yml`,以及 `map-assets/<namespace>/structure/<path>.nbt`
+ * `encounters.yml` `tool.yml` `hints.yml` `bosses.yml`(rc.23,可省略),以及 `map-assets/<namespace>/structure/<path>.nbt`
  * (資料夾裡沒有的資產退回內容插件 jar 內同路徑的 `map-assets/` 資源)。見 docs/CONTENT-DATA.md。
  *
  * ⚠ 在呼叫端執行緒做檔案 IO 與驗證(內容插件的 onEnable)。

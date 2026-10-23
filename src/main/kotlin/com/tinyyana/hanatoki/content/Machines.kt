@@ -37,6 +37,16 @@ class LanternMachine(private val burnTicks: Double) {
         return taken
     }
 
+    /**
+     * 重置回 UNLIT、進度歸零(rc.23,**只有 boss 的場邊燈會呼叫**:熄燈招式、跪下起身後、全滅重來)。
+     * 一般燈籠不倒退的不變式不受影響——沒有任何其他路徑呼叫它。
+     */
+    fun reset() {
+        state = State.UNLIT
+        progress = 0.0
+        paused = false
+    }
+
     /** 只有 UNLIT 點得起來;已在燒或已亮回 false(不重置進度)。 */
     fun ignite(): Boolean {
         if (state != State.UNLIT) return false
