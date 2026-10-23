@@ -30,6 +30,7 @@ import com.tinyyana.hanatoki.inventory.InstanceItemGuard
 import com.tinyyana.hanatoki.inventory.InstanceJournal
 import com.tinyyana.hanatoki.prop.PropController
 import com.tinyyana.hanatoki.reward.CompletionResult
+import com.tinyyana.hanatoki.reward.DepartureSettlement
 import com.tinyyana.hanatoki.reward.RewardDispatcher
 import com.tinyyana.hanatoki.stage.InstanceState
 import com.tinyyana.hanatoki.stage.StageEngine
@@ -388,6 +389,10 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         val now = System.currentTimeMillis()
         val result = sessionManager.tick(now)
         for (e in result.ended) {
+            // 整局逾時:結束當下還在名單上、有收集帳的人補一筆 `timeout` 結算(先於 finishSession,它會移除 stage 狀態)。
+            if (e.reason == EndReason.TIMEOUT) {
+                for (id in e.memberIds) settleDeparture(e.sessionId, e.dungeonId, id, DepartureSettlement.TIMEOUT, e.startedAtMs)
+            }
             finishSession(e)
         }
         // 2026-09-02 修:grace 逾時個別掉出去的成員(session 對其他人還活著)走跟 [kick] 一樣的
@@ -403,12 +408,21 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         slotCleanups.pumpAll()
     }
 
-    fun kick(playerId: UUID, reason: String = "kick") {
+    /**
+     * @param settleCollected false = 呼叫端已經替這位玩家結算過(例如 [resolveMember]),不再補離場結算。
+     *   預設 true:有收集帳的人會補一筆 `left` 結算,見 [settleDeparture]。
+     */
+    fun kick(playerId: UUID, reason: String = "kick", settleCollected: Boolean = true) {
         // 離開前先記住是哪個 session——`sessionManager.kick` 會把他從成員表拿掉,拿掉之後就
         // 查不到了。多人局裡其他人還在場的話(下面 `ended == null`)要通知內容層清自己的
         // 平行登記表(見 [onMemberLeft] KDoc)。
         val session = sessionManager.sessionOf(playerId)
+        val departing = settleCollected && session != null && !session.persistent && playerId in session.activeMembers()
         val ended = sessionManager.kick(playerId)
+        // 離場結算要趁 stage 狀態還在(整局結束時 finishSession 會移除它),所以排在兩條分支之前。
+        if (departing) {
+            settleDeparture(session.sessionId, session.dungeonId, playerId, DepartureSettlement.LEFT, session.startedAtMs)
+        }
         // 這個人的永久背包一定要還,不論整局有沒有跟著結束。多人局裡其他人還在打時
         // `ended` 是 null,下面那條 handleSessionEnded 不會跑到——少了這一句,單獨離場的
         // 那位就會帶著局內背包走出去,而他的永久背包留在 journal 裡等到下次登入才還。
@@ -447,7 +461,11 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
     fun abandon(playerId: UUID, reason: String) {
         // 同 [kick]:成員表拿掉之後就查不到 session 了,先記著。
         val session = sessionManager.sessionOf(playerId)
+        val departing = session != null && !session.persistent && playerId in session.activeMembers()
         val ended = sessionManager.kick(playerId)
+        if (departing) {
+            settleDeparture(session.sessionId, session.dungeonId, playerId, DepartureSettlement.LEFT, session.startedAtMs)
+        }
         if (ended == null) {
             instanceInventory.restoreForPlayer(playerId, reason)
             // 多人局裡其他人還在打:內容層那份平行的成員登記表要跟著清(見 [kick])。
@@ -686,6 +704,8 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
         val session = sessionManager.sessionById(sessionId) ?: return
         if (playerId !in session.activeMembers()) return
         val durationMs = System.currentTimeMillis() - session.startedAtMs
+        // 這筆結算已經帶著整份 stats(含收集帳):認領掉離場結算,之後整局逾時不會再補一筆。
+        state.claimDeparture(playerId)
         rewardDispatcher.dispatch(
             CompletionResult(
                 completionId = UUID.randomUUID(),
@@ -696,7 +716,24 @@ class HanaTokiCore(val plugin: Plugin) : PresenceBridge, DungeonAccess {
                 stats = state.stats.toMap(),
             ),
         )
-        kick(playerId, resultKey)
+        kick(playerId, resultKey, settleCollected = false)
+    }
+
+    /**
+     * 中途離場／整局逾時時,替有收集帳的玩家補一筆 [CompletionResult](resultKey = [DepartureSettlement.LEFT]／
+     * [DepartureSettlement.TIMEOUT]),交給 [rewardDispatcher];integration 的規則決定發什麼。
+     * 不是通關:不結束 session、不改離場流程,任何失敗只記 log。沒有 collectible 的副本沒有收集帳,不會有任何動作。
+     */
+    private fun settleDeparture(sessionId: UUID, dungeonId: String, playerId: UUID, resultKey: String, startedAtMs: Long) {
+        try {
+            val state = stageEngine.stateOf(sessionId) ?: return
+            val durationMs = if (startedAtMs > 0L) System.currentTimeMillis() - startedAtMs else 0L
+            val result = DepartureSettlement.plan(state, playerId, dungeonId, resultKey, durationMs) ?: return
+            rewardDispatcher.dispatch(result)
+            plugin.logger.info("[HanaToki] 離場結算 result=$resultKey dungeon=$dungeonId player=$playerId completionId=${result.completionId}")
+        } catch (t: Throwable) {
+            plugin.logger.warning("[HanaToki] 離場結算失敗(離場流程照常):result=$resultKey dungeon=$dungeonId player=$playerId ${t.javaClass.simpleName}: ${t.message}")
+        }
     }
 
     private fun finishSession(ended: com.tinyyana.hanatoki.instance.EndedSession, drainingWorld: String? = null): CompletableFuture<Void> {

@@ -29,6 +29,8 @@ data class EndedSession(
     val slotId: String,
     val reason: EndReason,
     val memberIds: List<UUID> = emptyList(),
+    /** 這局開始的時刻(離場／逾時結算算 duration 用);0 = 不知道。 */
+    val startedAtMs: Long = 0L,
 )
 
 /**
@@ -202,7 +204,7 @@ class SessionManager<A>(private val slotPool: SlotPool<A>) {
         persistentByDungeon.remove(session.dungeonId, session.sessionId)
         val members = session.memberIds()
         members.forEach { byPlayer.remove(it) }
-        return EndedSession(session.sessionId, session.dungeonId, session.slotId, reason, members)
+        return EndedSession(session.sessionId, session.dungeonId, session.slotId, reason, members, session.startedAtMs)
     }
 
     /** 世界 diff 回滾完成後呼叫,slot 才真正回到可分配池(ARCH §5.1 硬規則)。*/

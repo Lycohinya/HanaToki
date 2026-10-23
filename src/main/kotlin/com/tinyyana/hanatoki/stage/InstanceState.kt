@@ -36,6 +36,14 @@ class InstanceState(val graph: StageGraph) {
 
     fun claimResolution(): Boolean = resolutionClaimed.compareAndSet(false, true)
 
+    /**
+     * 中途離場／逾時結算(見 [com.tinyyana.hanatoki.reward.DepartureSettlement])的每人一次認領。
+     * 不隨 [enterStage] 重置:一位玩家一局最多替他補一筆離場結算。
+     */
+    private val departureClaimed = java.util.concurrent.ConcurrentHashMap.newKeySet<UUID>()
+
+    fun claimDeparture(playerId: UUID): Boolean = departureClaimed.add(playerId)
+
     fun enterStage(stageId: String, nowMs: Long) {
         currentStageId = stageId
         stageEnteredAtMs = nowMs
