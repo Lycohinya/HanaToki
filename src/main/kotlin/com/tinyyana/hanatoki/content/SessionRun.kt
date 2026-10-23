@@ -97,6 +97,9 @@ class SessionRun(
     private val nearProbePending = HashSet<String>()
 
     private val cueRuns = ConcurrentLinkedDeque<CueRun>()
+
+    /** 取樣用的短促 cue(boss 迴旋的光束標示)只留最近 [MAX_TRANSIENT_CUE_RUNS] 個,局結束一併取消;只在 anchor region 執行緒使用。 */
+    private val transientRuns = java.util.ArrayDeque<CueRun>()
     private val portNotes = HashSet<String>()
     private var barPercent = -1
 
@@ -245,12 +248,17 @@ class SessionRun(
     }
 
     /** 播 cue。沒有 CuePort 實作者 = no-op(每局 INFO 一次);cue 失敗不得影響狀態機。 */
-    private fun cue(id: String?, origin: Location, follow: Entity? = null, only: Collection<Player>? = null): CueRun? {
+    private fun cue(id: String?, origin: Location, follow: Entity? = null, only: Collection<Player>? = null, track: Boolean = true): CueRun? {
         if (id == null || closed) return null
         val port: CuePort = runtime.cuePort() ?: run { noteNoPort("CuePort"); return null }
         return try {
             val run = port.play(spec.namespace, id, origin, only ?: audience(), follow, mutator)
-            cueRuns.add(run)
+            if (track) {
+                cueRuns.add(run)
+            } else {
+                transientRuns.addLast(run)
+                while (transientRuns.size > MAX_TRANSIENT_CUE_RUNS) transientRuns.pollFirst()
+            }
             run
         } catch (t: Throwable) {
             warn("cue $id 播放失敗:${t.javaClass.simpleName}: ${t.message}")
@@ -373,6 +381,8 @@ class SessionRun(
         is Condition.ObjectState -> objectReached(c.objectId, c.state)
         is Condition.Reach -> c.marker in reached
         is Condition.BossDefeated -> c.boss in defeatedBosses
+        Condition.Powered -> powered.poweredIds(now).isNotEmpty()
+        is Condition.BossKneel -> boss?.let { it.spec.id == c.boss && it.state == BossState.KNEELING } == true
     }
 
     private fun objectReached(objectId: String, state: String): Boolean {
@@ -411,6 +421,8 @@ class SessionRun(
         markProgress()
         log("stage-complete", stage.id)
         playEffects(stage.onComplete, stage, "on-complete")
+        // rc.24:stage 完成直接開門(gates 與 timers 跨 stage 存在,滑門不會被轉場砍掉)
+        for (gate in stage.onComplete.opens) gates[gate]?.let(::openGate)
         if (stage.clearsEnemies) dissolveAllEnemies()
         val next = stage.next
         if (next != null) {
@@ -1953,6 +1965,8 @@ class SessionRun(
             Bukkit.getPlayer(player)?.let { this@SessionRun.cue(cueId, loc(at), null, listOf(it)) }
         }
 
+        override fun sampleCue(cueId: String, at: Pt) { this@SessionRun.cue(cueId, loc(at), track = false) }
+
         override fun loopCue(cueId: String, at: Pt): Runnable {
             val run = this@SessionRun.cue(cueId, loc(at))
             return Runnable { run?.cancel() }
@@ -2203,6 +2217,10 @@ class SessionRun(
             val run = cueRuns.pollFirst() ?: break
             try { run.cancel() } catch (t: Throwable) { warn("CueRun.cancel 失敗:${t.message}") }
         }
+        while (true) {
+            val run = transientRuns.pollFirst() ?: break
+            try { run.cancel() } catch (t: Throwable) { warn("CueRun.cancel 失敗:${t.message}") }
+        }
         enemies.clear()
         log("session-end", "$reason cancelledCues=done")
     }
@@ -2210,6 +2228,8 @@ class SessionRun(
     private companion object {
         const val TICK_PERIOD = 2L
         const val PROBE_STALE_TICKS = 40L
+        /** 取樣 cue 的 CueRun 保留上限(每輪最多 80 個、每 4 tick 一輪,保留約 1.6 輪,短促 cue 早已自己結束)。 */
+        const val MAX_TRANSIENT_CUE_RUNS = 128
         /** [StageContext.MEMBER_SNAPSHOT_FIELDS] 的 heldSlot 欄位。 */
         const val HELD_SLOT = 9
         /** [StageContext.MEMBER_SNAPSHOT_FIELDS] 的 health 欄位。 */

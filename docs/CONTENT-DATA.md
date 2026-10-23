@@ -1,4 +1,4 @@
-# 資料驅動副本內容（1.0.0-rc.23）
+# 資料驅動副本內容（1.0.0-rc.24）
 
 內容插件只給 **一個資料夾 + texts**，行為由框架內建的 `DataDrivenBehavior` 依資料執行，內容端不寫 Kotlin。另做一座副本只換設定檔與資產。判準：加第 N+1 盞燈籠、第 N+1 種幽靈、第 N+1 段提示，只改一筆 YAML。
 
@@ -54,12 +54,14 @@ stages:                       # 宣告順序；第一個 = 起始 stage
       - { type: object-state, object: lantern_a, state: lit }
       - { type: reach, marker: candle_path, radius: 3 }   # 任一成員在 trigger marker 半徑內
       - { type: boss-defeated, boss: nun }                # rc.23:bosses.yml 的 boss 已被打倒（log `boss-defeated nun`）
-    on-complete: { cues: [], title: ..., subtitle: ... }
+    on-complete: { cues: [], title: ..., subtitle: ..., opens: [gate_front] }   # opens(rc.24):這個 stage 完成時打開的 gate 物件
     next: lantern_court       # 省略 = 最後一段：完成後播 on-complete、打 `slice end` log，不結算、不發獎（除非寫了 resolve，見下）
     clears-enemies: false     # 選填（rc.22，預設 false）：完成時場上剩下的敵人全部打散（不補燈火）
 ```
 
 stage 鏈不可繞圈，每個 stage 都要沿 `next` 走得到；有 `next` 的 stage 必須寫 `complete`。
+
+**`on-complete.opens`(rc.24，選填，預設空)**:gate 物件 ID 清單(單一 ID 可寫純量)。stage 完成、播完 `on-complete` 的 cue／title／對話後、轉場之前，依序開這些門(同柵門被燈籠 `on-lit.opens` 開啟的動畫與 log `gate-open`；已開的門不重複開)。計時用 session 的 TimerQueue，滑門不會被轉場砍掉。**只有 `on-complete` 可寫**(`on-start`、boss 階段寫了報「未知的欄位」)；載入時核對每個 ID 都是 objects.yml 的 gate。用法:完成條件是 `reach`(走到出口)而不必再放一盞「開門用的燈」。
 
 ### 最後一段結算 resolve（rc.22，選填，預設關）
 
@@ -94,6 +96,13 @@ stage 鏈不可繞圈，每個 stage 都要沿 `next` 走得到；有 `next` 的
 ```
 
 - 顯示「第一個 until 還沒達成」的步驟；`until` 沿用 `complete` 的條件（`encounter-cleared`／`object-state`／`reach`）。沒寫 `until` 的步驟永遠停在那一步，只能放最後一個。`reach` 只有寫在**同一個 stage 的 `complete`** 裡的 marker 才偵測得到，其他的載入時拒絕。
+- **`while`(rc.24，選填)**:步驟加 `while: {條件}`，只在條件成立期間才輪得到這一步，不成立就跳過、回來又顯示(跟 `until` 並用時兩者都要符合:`while` 成立且 `until` 還沒達成)。有 `while` 的步驟不受「沒寫 until 只能放最後」限制。`while`／`until` 另可用兩個**狀態型條件**(會來去，只能寫在 objective，不能當 stage 的 `complete`，載入時拒絕):`{ type: powered }`(任一成員目前 powered，需要至少一個 power-up 物件)、`{ type: boss-kneel, boss: <id> }`(該 boss 目前正在跪下，boss 必須在這個 stage)。重畫由 `objective-every-seconds` 與「顯示的步驟換了」觸發，所以進出 powered／跪下的瞬間就會換字。
+
+```yaml
+    objective:
+      - { text: goal.strike, while: { type: boss-kneel, boss: nun } }    # 她跪下期間:上前揮刀
+      - { text: goal.lamps, until: { type: boss-defeated, boss: nun } }  # 其餘時間:點亮場邊燈
+```
 - 文字是 texts key（同 `title`），參數 `{charges}` `{max}` `{pips}`（`●●○○○` 燈火條）取 tool.yml 第一個道具、每位玩家各自的值。燈火條要一直看得見，就用 `objective-every-seconds: 1`，不再另用 tool 的 `hud-text`（同一個 ActionBar 組，後送的蓋掉先送的）。
 - 沒寫 `objective` 的 stage（以及整個舊副本）完全不經過這段。
 
@@ -303,6 +312,24 @@ enemies:
 | `wipe` | 必填。全滅重來,見下 |
 | `defeat` | `{ cues, seconds: 3 }`。打倒後播 `defeat` 動畫與 cue,`seconds` 後接 `sit-end` 迴圈 |
 | `bar` | `{ text: texts key（{percent} {phase}）, color, overlay }`。boss 血量條(StageContext.bossBar,和燈籠的 `progress-bar` 共用同一條,所以場邊燈不可有 progress-bar) |
+| `hit-cues` | rc.24,選填。玩家一下**有效**近戰命中時在命中點播(被光環擋下、玩家冷卻內、出場等待中的不算;擋下走 `shield.spark-cues`)。頻率受 `hit-cooldown-ticks` 限制 |
+| `intro` | rc.24,選填，見下「出場演出」。沒寫 = 直接在 `points` 第一個點出場(同舊版) |
+
+### 出場演出 intro(rc.24)
+
+```yaml
+    start-delay-seconds: 30          # 出場後多久開打;hold-seconds + glide-seconds 不可超過它
+    intro:
+      marker: nun_roof_main          # 必填:出場(生成)位置,場景 marker
+      cues: [nun_intro_cue]          # 出場時在 marker 播
+      animation: phase_up            # 選填:出場時播一次的模型動畫(載體剛生成,模型綁好後約 1 秒才播);省略 = 不播
+      animation-seconds: 3           # 預設 3(0.2..60):動畫播多久後回 idle
+      hold-seconds: 26               # 預設 2(0..120):在 marker 停留多久才下來
+      then-glide-to: nun_point_a     # 選填:落地的 marker;預設 points 第一個
+      glide-seconds: 2.5             # 預設 2(0..30):下來花多久;0 = 直接傳送
+```
+
+出場時先 log `boss-intro <bossId> marker=<id>`，再 `boss-start`(格式不變);停留結束後用 `ActorHandle.teleport` 每 2 tick 一小步直線滑到落點(`glide` 動畫)，落地記 `boss-intro-done <bossId> point=<id>`，之後仍等到 `start-delay-seconds` 才開打(開打時若還沒落地會先補落地，不會在半空出招)。出場等待期間照舊:近戰只濺火花、不扣血、沒有招式。全滅重來**不重播**出場演出，直接回 `points` 第一個點。marker 與 `then-glide-to` 載入時核對場景。
 
 ### 招式 moves
 
@@ -313,9 +340,18 @@ enemies:
 | `ring` 掃地 | `max-radius`(必填)、`band-width`(2)、`expand-seconds`(0.8)、`dodge-cues` | 預警後環形波從原點往外推;波前掃過時**在地上**的人受傷,跳起來(快照 onGround = 0)的躲過並收到 `dodge-cues`(只給他)。取樣每 2 tick,用「掃過的區間」判定,取樣再疏也不漏 |
 | `circle` 落雷 | `radius`(必填)、`max-targets`(0 = 所有人) | 每位目標腳下一個圈(預警開始時定位,不跟隨),時間到圈內的人受傷(每人最多一次) |
 | `cross` 雙杖十字 | `length`(14)、`half-width`(1.2)、`angle-offset`(45) | 通過原點的兩條垂直線(X),線上的人受傷,楔形空格安全 |
-| `spin` 光環迴旋 | `radius`(必填)、`inner-radius`(2)、`gap-degrees`(80)、`degrees-per-second`(45)、`duration-seconds`(8)、`hit-interval-ticks`(20) | 光束環留一個缺口,缺口從預警開始時離 boss 最近的人的方位起以固定角速度旋轉;缺口外(inner-radius..radius)的人每 `hit-interval-ticks` 受傷一次 |
+| `spin` 光環迴旋 | `radius`(必填)、`inner-radius`(2)、`gap-degrees`(80)、`degrees-per-second`(45)、`duration-seconds`(8)、`hit-interval-ticks`(20);rc.24 視覺取樣:`gap-cues`、`beam-cues`、`sample-ticks`(4)、`beams`(3)、`points-per-line`(6) | 光束環留一個缺口,缺口從預警開始時離 boss 最近的人的方位起以固定角速度旋轉;缺口外(inner-radius..radius)的人每 `hit-interval-ticks` 受傷一次。視覺取樣見下 |
 | `summon` 喚敵 | `enemy`(enemies.yml,必填)、`markers`(必填)、`count-by-players`、`max-alive`(4) | 預警後在 markers 生出敵人(用幾個由人數決定,起點輪替);同種敵人場上已達 `max-alive` 就不抽這一招。喚鬼用 needs-flash 敵人,喚人偶用 frozen-when-watched 敵人 |
 | `snuff` 熄燈 | `flash-cues`(第一個是閃爍的持續 cue,其餘一次性)、`saved-cues`、`snuff-cues` | 點名一盞**亮著**的場邊燈,`warn-seconds` 內有人對它閃光(同點燃的錐形／ignite-radius 判定)就保住;沒保住燈熄(重置為暗)、寶石恢復、播 `snuff-cues` 與 `snuff` 動畫。沒有亮著的場邊燈時抽不到 |
+
+**光環迴旋的缺口取樣(rc.24)**:cue 原點沒有朝向、keyframe 不能旋轉，旋轉的缺口畫不出來，所以框架依目前旋轉角**算出取樣點**，對每點播資料指定的短 cue(由內容的 vfx 決定長什麼樣:display、粒子都可以)。
+
+- 取樣從**預警開始**就跑(缺口停在起始方位不動)，迴旋開始後跟著轉，直到 `duration-seconds`；每 `sample-ticks` tick(4..40，預設 4)一輪。
+- `gap-cues`:缺口兩側邊緣(缺口中心 ± `gap-degrees`/2)兩條射線；`beam-cues`:缺口外實心弧內均分的 `beams`(1..8，預設 3)條光束線，第 i 條在實心弧起點後 (i + 0.5) / beams 處。兩者可只寫其一，都不寫 = 不取樣(舊行為)。
+- 每條線上 `points-per-line`(1..12，預設 6)個點，從 `inner-radius` 到 `radius` 等距(取格子中心，不貼邊)，y = 判定區原點。
+- **數量上限**:每一輪播出的 cue 數 = 2 × `gap-cues` 數 × 點數 + `beams` × `beam-cues` 數 × 點數，**不可超過 80**(載入時拒絕)。例如 gap 1 個 cue、beam 1 個 cue、3 條、每線 5 點 = 10 + 15 = 25 / 輪。
+- 取樣 cue 必須是**短促、非 loop** 的(建議 ≤ 0.3 秒、1 個 display)；框架只保留最近 128 個 CueRun(局結束一併取消)，不會隨迴旋次數無上限累積。vfx 的 `max-total-displays` 要把「每輪 cue 數 × 存活時間 / 取樣週期」算進去。
+- 招式被作廢(跪下、全滅、打倒、局結束)時取樣立刻停止。
 
 **同一位玩家同時最多一個地面預警**:招式一次只進行一招;每個地面預警(`ring`／`cross`／`spin` 對所有在線成員,`circle` 對被選中的目標)登記到預警帳本,已有預警的目標被跳過(`circle`)或整招延後(其餘),都沒有目標就放棄這一招。log 每位目標一行 `boss-telegraph <moveId> target=<player>`;這一招結束(`boss-move-end`)、被取消(`boss-move-cancel`)或放棄(`boss-move-abort`)時才釋放。
 
@@ -336,6 +372,7 @@ enemies:
 | `revive-health` | 10(點) |
 | `cues`／`mark-cue`／`revive-cues` | 倒下時播(在玩家位置)、倒下期間跟著玩家的持續 cue、復活時播 |
 | `title`／`subtitle`／`hud-text`／`hud-every-seconds` | 倒下時給他的標題、持續的 ActionBar 提示(預設每 1 秒) |
+| `self-hint-cues`／`ally-hint-cues`／`ally-hud-text` | rc.24。倒下提示:`self-hint-cues` 只播給**倒下的人自己**(例如 HUD bark);`ally-hint-cues` 只播給**其他在線、沒倒下**的成員；`ally-hud-text`(texts key)是給這些隊友的一次性 ActionBar(**有 `objective` 的 stage 會每秒重畫目標列，同一組 ActionBar 後送的蓋先送的，所以一次性的 `ally-hud-text` 一秒內就被蓋掉；這種 stage 請改用 `ally-hint-cues` 的 HUD bark**)。這次倒下造成全滅時不提示。`cues` 仍是對全隊播(不分對象)。HUD bark 同組(如 `mist.bark`)後到取代先到:提示 cue 要在 cue 裡用 `delay-seconds` 錯開 `cues` 裡的 bark |
 
 **還原不變式**(`BossRunTest`):倒下時**斷線**(在玩家自己的執行緒上、玩家資料存檔前同步還原)、**離場**、**局結束**、**stage 轉換**、**全滅重來**、**跪下復活**、**打倒**,都把 gamemode、隱形、發光、無敵、移動速度整組還原成倒下前的值,只還原一次;還原一律走該玩家自己的 EntityScheduler,不依賴成員名單(離場與局結束時名單已不含他)。倒下前的狀態另存在玩家 PDC(`hanatoki:downed_body`),關服或當機時回呼來不及跑,下次上線自動還原(移動速度修正是 transient,本來就不會留下)。**斷線重連(寬限期內)**:邏輯上仍倒下——回來後重新套用倒下狀態並回復活點;若這段時間她已經跪下過(把他算作復活),回來的人是活的,直接回 `wipe.checkpoint`。重連的既有傳送會把資料驅動副本的玩家送回入口,boss 戰中會在 10 tick 後再送一次。
 
@@ -509,6 +546,8 @@ rc.23 新增（Boss；`<player>` 是玩家名，`<lamp>` 是場邊燈物件 id�
 
 | 事件 | 時機 |
 |---|---|
+| `boss-intro <bossId> marker=<id>` | rc.24。有 `intro` 時先記這行(boss 在 intro marker 現身)，隨後才是 `boss-start` |
+| `boss-intro-done <bossId> point=<id>` | rc.24。出場演出落地(滑行結束或補落地) |
 | `boss-start <bossId> hits=<n> players=<n>` | boss 出場（總命中數已含人數倍率） |
 | `boss-phase <n>` | 進入第 n 階段（開打時 1；全滅回第一階段重來時再記一次 1） |
 | `boss-telegraph <moveId> target=<player>` | 地面預警，每位目標一行；同一位玩家在 `boss-move-end`／`-cancel`／`-abort` 之前不會再出現第二個 |
@@ -541,6 +580,7 @@ rc.23 新增（Boss；`<player>` 是玩家名，`<lamp>` 是場邊燈物件 id�
 - 敵人規則 `needs-flash`、`seeks-object`、`harasses-players`、`frozen-when-watched`、`chases-players`、`flees-when-powered`，物件 `lantern`／`gate`／`power-up`，局內道具 `flash`，boss（`bosses.yml`：階段、招式時間軸、光環護盾與場邊燈、跪下窗口、倒下與復活、全滅重來）。常駐場景還不在內。最後一段完成預設只播 cue 與打 `slice end`，不 `resolve`、不發獎；要結算須在該 stage 寫 `resolve`（見上）；stage 逾時仍不結算。
 - 人偶的遮擋檢查在人偶自己的 region 上做；射線若跨出該 region 就當作被看到（偏向玩家，WARN 一次）。遮擋以方塊碰撞外形判定，玻璃之類會擋視線。
 - rc.23 的 boss 時間軸、判定區、護盾、倒下與全滅流程用假的 host 做了完整流程單元測試（`BossRunTest`），但實體生成、模型動畫與骨骼切換、玩家身體狀態的 Bukkit 實作、致死傷害攔截與斷線／登入事件的實機行為待測試服驗證。
+- rc.24 的 boss 出場演出、被擊中 cue、倒下提示與迴旋取樣用假 host 做了完整流程單元測試(`BossRunTest`、`Rc24DataTest`、`BossLogicTest`)；stage `opens`、目標列狀態條件(powered／boss-kneel)的**執行期**(`SessionRun` 開門、`conditionMet`)只有編譯驗證加解析／驗證／`pickObjective` 單元測試，實機行為待測試服；出場滑行的模型動畫與迴旋取樣 cue 的顯示數量／效能同樣待測試服實測。
 - rc.22 的 raycast、AI 開關與 region 行為只有單元測試覆蓋純邏輯（視錐、狀態機、解析、驗證）；實機行為待測試服驗證。
 - 閃光不做視線遮擋判定（隔著牆的幽靈會被照到）。
 - 場景每局重放（`maps().place`）；常駐模式未做。

@@ -410,4 +410,54 @@ class BossLogicTest {
         assertTrue(pumpkin.take(0))
         assertEquals(PowerUpMachine.State.TAKEN, pumpkin.state)
     }
+
+    // ---- rc.24:迴旋取樣點 ----
+
+    @Test
+    fun `缺口中心：預警（elapsed 不大於 0）不動，之後每秒轉 degrees-per-second，繞回 0 到 360`() {
+        assertEquals(30.0, spinGapCenter(30.0, 40.0, -40))
+        assertEquals(30.0, spinGapCenter(30.0, 40.0, 0))
+        assertEquals(70.0, spinGapCenter(30.0, 40.0, 20), 1.0E-9)
+        assertEquals(30.0, spinGapCenter(350.0, 40.0, 20), 1.0E-9)
+        assertEquals(0.0, spinGapCenter(0.0, 90.0, 80), 1.0E-9)
+    }
+
+    @Test
+    fun `取樣點：缺口兩側邊緣各 pointsPerLine 個、光束 beams × pointsPerLine 個，數量固定`() {
+        val s = spinSamplePoints(Pt(0.0, 5.0, 0.0), 2.0, 11.0, 90.0, 80.0, beams = 3, pointsPerLine = 4)
+        assertEquals(8, s.gapEdge.size)
+        assertEquals(12, s.beam.size)
+        assertTrue((s.gapEdge + s.beam).all { it.y == 5.0 })
+        assertEquals(0, spinSamplePoints(Pt(0.0, 0.0, 0.0), 2.0, 11.0, 0.0, 80.0, beams = 0, pointsPerLine = 4).beam.size)
+        assertEquals(0, spinSamplePoints(Pt(0.0, 0.0, 0.0), 2.0, 11.0, 0.0, 80.0, beams = 3, pointsPerLine = 4, withGap = false).gapEdge.size)
+        assertEquals(SpinSamples(emptyList(), emptyList()), spinSamplePoints(Pt(0.0, 0.0, 0.0), 2.0, 11.0, 0.0, 80.0, 3, 0))
+    }
+
+    @Test
+    fun `取樣點：邊緣在缺口中心 ± 半張角，沿線從內圈到外圈等距，不貼邊`() {
+        val c = Pt(10.0, 0.0, -4.0)
+        val s = spinSamplePoints(c, 2.0, 11.0, 90.0, 80.0, beams = 1, pointsPerLine = 3)
+        val first = s.gapEdge.take(3)
+        val second = s.gapEdge.drop(3)
+        for (p in first) assertEquals(50.0, angleDegrees(p.x - c.x, p.z - c.z), 1.0E-9)
+        for (p in second) assertEquals(130.0, angleDegrees(p.x - c.x, p.z - c.z), 1.0E-9)
+        val radii = first.map { Math.hypot(it.x - c.x, it.z - c.z) }
+        assertEquals(listOf(3.5, 6.5, 9.5), radii.map { Math.round(it * 1000) / 1000.0 }, "格子中心：2 + 9 × (k + 0.5) / 3")
+        assertTrue(radii.zipWithNext().all { (a, b) -> Math.abs((b - a) - 3.0) < 1.0E-9 }, "等距")
+    }
+
+    @Test
+    fun `取樣點：光束都在實心弧內（會受傷的區域），邊緣在缺口邊界上，缺口中心方向沒有光束`() {
+        val c = Pt(0.0, 0.0, 0.0)
+        for (gapCenter in listOf(0.0, 90.0, 200.0, 355.0)) {
+            val s = spinSamplePoints(c, 2.0, 11.0, gapCenter, 80.0, beams = 4, pointsPerLine = 5)
+            assertTrue(s.beam.all { inSpinBeam(it.x, 0.0, it.z, 2.0, 11.0, gapCenter, 80.0) }, "光束點都在危險區：gap=$gapCenter")
+            // 光束均分實心弧(280 度)：相鄰光束 70 度，離缺口邊緣 35 度
+            val angles = s.beam.chunked(5).map { angleDegrees(it[0].x, it[0].z) }
+            val fromEdge = angles.map { ((it - (gapCenter + 40.0)) % 360.0 + 360.0) % 360.0 }
+            assertEquals(listOf(35.0, 105.0, 175.0, 245.0), fromEdge.map { Math.round(it * 1000) / 1000.0 }, "gap=$gapCenter")
+            for (p in s.gapEdge) assertEquals(40.0, angleDiffDegrees(angleDegrees(p.x, p.z), gapCenter), 1.0E-9)
+            assertTrue(s.beam.none { angleDiffDegrees(angleDegrees(it.x, it.z), gapCenter) < 40.0 }, "缺口裡沒有光束")
+        }
+    }
 }

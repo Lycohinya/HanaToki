@@ -39,6 +39,9 @@ class BossRunTest {
         val markers = HashMap<String, Pt>()
         val cuesPlayed = ArrayList<String>()
         val cuesFor = ArrayList<Pair<String, UUID>>()
+        val sampled = ArrayList<Triple<Long, String, Pt>>()
+        val spawnedAt = ArrayList<Pt>()
+        val bossMoves = ArrayList<Pt>()
         val anims = ArrayList<String>()
         val positions = HashMap<UUID, Pt>()
         val airborne = HashSet<UUID>()
@@ -115,6 +118,7 @@ class BossRunTest {
         override fun markerPos(id: String): Pt? = markers[id]
         override fun cue(cueId: String, at: Pt) { cuesPlayed += cueId }
         override fun cueFor(cueId: String, at: Pt, player: UUID) { cuesFor += cueId to player }
+        override fun sampleCue(cueId: String, at: Pt) { sampled += Triple(clock, cueId, at) }
         override fun loopCue(cueId: String, at: Pt): Runnable { cuesPlayed += "loop:$cueId"; return Runnable { cuesPlayed += "cancel:$cueId" } }
         override fun followCue(cueId: String, player: UUID, at: Pt): Runnable { cuesPlayed += "follow:$cueId"; return Runnable { cuesPlayed += "cancel:$cueId" } }
         override fun music(cueId: String) { musics += cueId }
@@ -123,8 +127,8 @@ class BossRunTest {
         override fun actionBar(player: UUID, key: String) { actionBars += player to key }
         override fun bossBar(textKey: String, fraction: Double, color: String, overlay: String, params: Map<String, String>) { barFractions += fraction }
         override fun hideBossBar() { barHidden++ }
-        override fun spawnBoss(at: Pt) {}
-        override fun moveBoss(to: Pt) {}
+        override fun spawnBoss(at: Pt) { spawnedAt += at }
+        override fun moveBoss(to: Pt) { bossMoves += to }
         override fun faceBoss(toward: Pt) {}
         override fun playAnimation(name: String, loop: Boolean) { anims += name }
         override fun setBone(bone: String, visible: Boolean) { bones += bone to visible }
@@ -903,5 +907,199 @@ class BossRunTest {
         assertTrue(line.startsWith("boss nun: state="), line)
         assertTrue("倒下=1" in line, line)
         assertEquals(1, run.downedCount())
+    }
+
+    // ---- rc.24:出場演出、被擊中 cue、倒下提示、迴旋取樣 ----
+
+    private fun introSpec(hold: Double = 2.0, glide: Double = 1.0, animation: String? = "phase_up"): BossSpec =
+        baseSpec.copy(
+            startDelaySeconds = 4.0,
+            intro = BossIntroSpec("nun_roof_main", listOf("intro_cue"), animation, 1.0, hold, glide, null),
+        )
+
+    @Test
+    fun `出場演出：先在屋頂現身播 cue 與動畫，停留後滑到起點才開打，boss-intro 在 boss-start 前`() {
+        val (host, run) = setup(spec = introSpec())
+        host.markers["nun_roof_main"] = Pt(0.0, 12.0, -4.0)
+        run.start()
+        assertEquals(listOf("boss-intro nun marker=nun_roof_main", "boss-start nun hits=40 players=1"), host.logs.take(2))
+        assertEquals(listOf(Pt(0.0, 12.0, -4.0)), host.spawnedAt, "在屋頂 marker 生成")
+        assertTrue("intro_cue" in host.cuesPlayed)
+        // 停留期間(2 秒)不動，動畫在載體綁好模型之後(20 tick)才播
+        host.advance(30)
+        assertTrue(host.bossMoves.isEmpty(), "停留期間不滑行")
+        assertTrue("phase_up" in host.anims)
+        assertEquals(BossState.WAITING, run.state)
+        // 停留結束(40 tick)後開始往起點滑，中途的高度介於屋頂與地面之間
+        host.advance(20)
+        assertTrue(host.bossMoves.isNotEmpty())
+        val mid = host.bossMoves.last()
+        assertTrue(mid.y in 0.1..11.9, "滑行中途 y=${mid.y}")
+        assertTrue("glide" in host.anims)
+        // 落地(60 tick)：在 nun_point_a，記 boss-intro-done，此時還沒開打
+        host.advance(12)
+        assertEquals(Pt(0.0, 0.0, 0.0), host.bossMoves.last())
+        assertEquals(listOf("boss-intro-done nun point=nun_point_a"), host.logged("boss-intro-done"))
+        assertEquals(BossState.WAITING, run.state)
+        assertTrue(host.logged("boss-phase").isEmpty())
+        // start-delay(80 tick)到才開打
+        host.advance(30)
+        assertEquals(BossState.IDLE, run.state)
+        assertEquals(listOf("boss-phase 1"), host.logged("boss-phase"))
+        assertTrue("idle" in host.anims)
+    }
+
+    @Test
+    fun `出場演出：glide-seconds 0 是直接傳送；到開打時還沒落地也會先補落地`() {
+        val (host, run) = setup(spec = introSpec(hold = 1.0, glide = 0.0))
+        host.markers["nun_roof_main"] = Pt(0.0, 12.0, -4.0)
+        run.start()
+        host.advance(30)
+        assertEquals(listOf(Pt(0.0, 0.0, 0.0)), host.bossMoves, "停留結束直接傳送到起點")
+        assertEquals(1, host.logged("boss-intro-done").size)
+        // 停留很久、start-delay 先到：begin 之前補落地，不會在屋頂上開戰
+        val long = baseSpec.copy(startDelaySeconds = 2.0, intro = BossIntroSpec("nun_roof_main", emptyList(), null, 1.0, 5.0, 0.0, null))
+        val (h2, r2) = setup(spec = long)
+        h2.markers["nun_roof_main"] = Pt(0.0, 12.0, -4.0)
+        r2.start()
+        h2.advance(50)
+        assertEquals(BossState.IDLE, r2.state)
+        assertEquals(Pt(0.0, 0.0, 0.0), h2.bossMoves.first())
+        assertEquals(1, h2.logged("boss-intro-done").size)
+    }
+
+    @Test
+    fun `出場演出只在開場一次：全滅重來不再 boss-intro`() {
+        val (host, run) = setup(spec = introSpec(hold = 1.0, glide = 1.0))
+        host.markers["nun_roof_main"] = Pt(0.0, 12.0, -4.0)
+        run.start()
+        host.advance(100)
+        assertEquals(BossState.IDLE, run.state)
+        run.downMember(alice)
+        assertEquals(BossState.WIPED, run.state)
+        host.advance(200)
+        assertEquals(1, host.logs.count { it.startsWith("boss-intro ") })
+        assertEquals(1, host.logged("boss-intro-done").size)
+    }
+
+    @Test
+    fun `沒有 intro 的 boss 行為不變：直接在第一個點出場，沒有 boss-intro`() {
+        val (host, run) = setup()
+        run.start()
+        assertEquals(listOf(Pt(0.0, 0.0, 0.0)), host.spawnedAt)
+        assertTrue(host.logs.none { it.startsWith("boss-intro") })
+    }
+
+    @Test
+    fun `hit-cues 只在有效命中播，光環擋下的不播`() {
+        val spec = baseSpec.copy(hitCues = listOf("nun_hit"))
+        val (host, run) = setup(spec = spec)
+        begin(host, run)
+        run.onHit(alice, Pt(1.0, 1.0, 1.0))
+        assertTrue("nun_hit" !in host.cuesPlayed, "護盾亮著只濺火花")
+        assertTrue("shield_spark" in host.cuesPlayed)
+        kneel(host, run)
+        run.onHit(alice, Pt(1.0, 1.0, 1.0))
+        assertEquals(1, host.cuesPlayed.count { it == "nun_hit" })
+        // 同一玩家冷卻內的第二下無效，不播
+        val cooled = baseSpec.copy(hitCues = listOf("nun_hit"), hitCooldownTicks = 12)
+        val (h2, r2) = setup(spec = cooled)
+        begin(h2, r2)
+        kneel(h2, r2)
+        r2.onHit(alice, Pt(0.0, 0.0, 0.0))
+        r2.onHit(alice, Pt(0.0, 0.0, 0.0))
+        assertEquals(1, h2.cuesPlayed.count { it == "nun_hit" })
+    }
+
+    @Test
+    fun `倒下提示：自己的提示只給倒下的人，隊友的提示只給其他在線沒倒下的人，全滅時不提示`() {
+        val spec = baseSpec.copy(downed = baseSpec.downed.copy(selfHintCues = listOf("hint_self"), allyHintCues = listOf("hint_ally"), allyHudTextKey = "boss.ally.hud"))
+        val (host, run) = setup(players = listOf(alice, bob, cara), spec = spec)
+        begin(host, run)
+        host.online -= cara // 斷線的不收提示
+        run.downMember(alice)
+        assertEquals(listOf("hint_self" to alice, "hint_ally" to bob), host.cuesFor)
+        assertEquals(listOf(bob to "boss.ally.hud"), host.actionBars.filter { it.second == "boss.ally.hud" })
+        // 第二位倒下：bob 的自己提示給 bob，隊友（沒倒下又在線的人）已經沒有 → 不給 alice
+        run.downMember(bob)
+        assertEquals(BossState.WIPED, run.state, "在線的人全倒 = 全滅")
+        assertEquals(2, host.cuesFor.size, "全滅時不再提示")
+    }
+
+    private fun spinVisualSpec(beamCues: List<String> = listOf("spin_beam"), gapCues: List<String> = listOf("spin_gap")): BossSpec {
+        val spec = only(baseSpec, "spin").copy(gapSeconds = 0.5)
+        val spin = spec.moves.getValue("spin")
+        val shape = (spin.shape as MoveShape.Spin).copy(beamCues = beamCues, gapCues = gapCues, sampleTicks = 4, beams = 2, pointsPerLine = 3)
+        // 冷卻拉長：一局測試內只放一次，招式結束後才能斷言「不再取樣」
+        return spec.copy(moves = mapOf("spin" to spin.copy(shape = shape, cooldownSeconds = 300.0)))
+    }
+
+    private fun edgeAngle(p: Pt): Double = angleDegrees(p.x, p.z)
+
+    @Test
+    fun `迴旋取樣：預警期間缺口邊緣就畫出來且不轉，迴旋開始後每輪轉 degrees-per-second × 取樣週期，每輪 cue 數有上限`() {
+        val spec = spinVisualSpec()
+        val shape = spec.moves.getValue("spin").shape as MoveShape.Spin
+        assertEquals(12, shape.cuesPerSample)
+        val (host, run) = setup(players = listOf(alice), spec = spec)
+        host.positions[alice] = Pt(6.0, 0.0, 0.0)
+        begin(host, run)
+        assertTrue(host.advanceUntil(900) { host.logged("boss-telegraph").isNotEmpty() })
+        val castAt = host.clock
+        assertTrue(host.advanceUntil(1500) { host.logged("boss-move-end").isNotEmpty() })
+        val groups = host.sampled.groupBy { it.first }.toSortedMap()
+        // 每輪的 cue 數 <= 上限，且恰好是 6 個缺口邊緣 + 6 個光束
+        assertTrue(groups.values.all { it.size <= shape.cuesPerSample }, "每輪上限")
+        assertTrue(groups.values.all { g -> g.count { it.second == "spin_gap" } == 6 && g.count { it.second == "spin_beam" } == 6 })
+        // 取樣週期 4 tick；預警 2 秒就開始（在迴旋開始前畫）
+        val times = groups.keys.toList()
+        assertTrue(times.zipWithNext().all { (a, b) -> b - a == 4L }, "每 4 tick 一輪：$times")
+        assertTrue(times.first() - castAt <= 4, "預警一開始就畫出缺口：first=${times.first()} cast=$castAt")
+        // 缺口邊緣角度：玩家在 0 度，缺口 80 度 → 邊緣在 -40 度(=320)，預警 10 輪不動，之後每輪 +8 度
+        val edge = groups.values.map { g -> edgeAngle(g.first { it.second == "spin_gap" }.third) }
+        assertEquals(50, edge.size, "預警 2 秒 + 迴旋 8 秒，每 4 tick 一輪：elapsed -40..156 共 50 輪（第 160 tick 招式結束，不再取樣）")
+        for (i in 0 until 10) assertEquals(320.0, edge[i], 0.01, "預警期間缺口不轉（第 $i 輪）")
+        for (i in 10 until edge.size) assertEquals((320.0 + 8.0 * (i - 10)) % 360.0, edge[i], 0.01, "迴旋第 ${i - 10} 輪")
+        // 點都落在 inner..radius 之間
+        assertTrue(host.sampled.all { (_, _, p) -> Math.hypot(p.x, p.z) in 2.0..11.0 })
+        // 招式結束後不再取樣
+        val total = host.sampled.size
+        host.advance(200)
+        assertEquals(total, host.sampled.size)
+    }
+
+    @Test
+    fun `迴旋取樣：只寫缺口 cue 或只寫光束 cue 時只畫那一種；沒有 cue 完全不取樣`() {
+        val gapOnly = spinVisualSpec(beamCues = emptyList())
+        val (h1, r1) = setup(spec = gapOnly)
+        h1.positions[alice] = Pt(6.0, 0.0, 0.0)
+        begin(h1, r1)
+        assertTrue(h1.advanceUntil(1500) { h1.logged("boss-move-end").isNotEmpty() })
+        assertTrue(h1.sampled.isNotEmpty() && h1.sampled.all { it.second == "spin_gap" })
+        val beamOnly = spinVisualSpec(gapCues = emptyList())
+        val (h2, r2) = setup(spec = beamOnly)
+        h2.positions[alice] = Pt(6.0, 0.0, 0.0)
+        begin(h2, r2)
+        assertTrue(h2.advanceUntil(1500) { h2.logged("boss-move-end").isNotEmpty() })
+        assertTrue(h2.sampled.isNotEmpty() && h2.sampled.all { it.second == "spin_beam" })
+        val none = spinVisualSpec(beamCues = emptyList(), gapCues = emptyList())
+        val (h3, r3) = setup(spec = none)
+        h3.positions[alice] = Pt(6.0, 0.0, 0.0)
+        begin(h3, r3)
+        assertTrue(h3.advanceUntil(1500) { h3.logged("boss-move-end").isNotEmpty() })
+        assertTrue(h3.sampled.isEmpty())
+    }
+
+    @Test
+    fun `迴旋取樣：招式被作廢（跪下）後立刻停，不留下計時`() {
+        val (host, run) = setup(spec = spinVisualSpec())
+        host.positions[alice] = Pt(6.0, 0.0, 0.0)
+        begin(host, run)
+        assertTrue(host.advanceUntil(900) { host.sampled.size >= 24 })
+        kneel(host, run)
+        val total = host.sampled.size
+        host.advance(300)
+        assertEquals(total, host.sampled.size)
+        assertEquals(1, host.logged("boss-move-cancel").size)
     }
 }

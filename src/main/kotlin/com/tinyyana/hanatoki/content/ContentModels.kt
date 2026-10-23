@@ -70,8 +70,11 @@ data class EpilogueStep(
     val marker: String?,
 )
 
-/** 一步目標:[textKey] 是 texts key(參數 {charges} {max} {pips});[until] 達成就換下一步,null = 一直停在這步。 */
-data class ObjectiveStep(val textKey: String, val until: Condition?)
+/**
+ * 一步目標:[textKey] 是 texts key(參數 {charges} {max} {pips});[until] 達成就換下一步,null = 一直停在這步。
+ * rc.24:[during] 非 null 時,這一步只在該條件成立期間顯示(不成立就跳過這一步,例如 powered 期間、boss 跪下期間)。
+ */
+data class ObjectiveStep(val textKey: String, val until: Condition?, val during: Condition? = null)
 
 /** stage 開始/完成時的演出:cue、音樂、對話、標題。 */
 data class StageEffects(
@@ -81,6 +84,8 @@ data class StageEffects(
     val dialog: String? = null,
     val titleKey: String? = null,
     val subtitleKey: String? = null,
+    /** rc.24:只有 stage 的 `on-complete` 可寫。stage 完成時要打開的 gate 物件 id。 */
+    val opens: List<String> = emptyList(),
 )
 
 sealed interface Condition {
@@ -89,6 +94,15 @@ sealed interface Condition {
     data class Reach(val marker: String, val radius: Double) : Condition
     /** rc.23:bosses.yml 的 boss 已被打倒(log `boss-defeated <bossId>`)。 */
     data class BossDefeated(val boss: String) : Condition
+
+    /** rc.24(只能用在 objective 的 until／while):任一成員目前 powered(吃了 power-up)。 */
+    data object Powered : Condition
+
+    /** rc.24(只能用在 objective 的 until／while):boss 目前正在跪下(輸出窗口)。 */
+    data class BossKneel(val boss: String) : Condition
+
+    /** 狀態型條件:隨時間來去,不能當 stage 的完成條件。 */
+    val isTransient: Boolean get() = this is Powered || this is BossKneel
 }
 
 // ---- scene.yml ----

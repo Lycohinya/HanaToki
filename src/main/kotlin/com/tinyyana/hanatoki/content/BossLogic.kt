@@ -67,6 +67,41 @@ fun inSpinBeam(dx: Double, dy: Double, dz: Double, innerRadius: Double, radius: 
     return angleDiffDegrees(angleDegrees(dx, dz), gapCenterDegrees) > gapDegrees / 2.0
 }
 
+/** 迴旋缺口的中心角(度,0..360):預警期間([elapsedTicks] <= 0)停在 [startAngle],之後以 [degreesPerSecond] 轉。 */
+fun spinGapCenter(startAngle: Double, degreesPerSecond: Double, elapsedTicks: Long): Double {
+    val a = (startAngle + degreesPerSecond * elapsedTicks.coerceAtLeast(0L) / 20.0) % 360.0
+    return if (a < 0) a + 360.0 else a
+}
+
+/** 迴旋一輪取樣出來的點:[beam] 在缺口外的實心弧上,[gapEdge] 在缺口兩側邊緣。 */
+data class SpinSamples(val beam: List<Pt>, val gapEdge: List<Pt>)
+
+/**
+ * 光環迴旋的視覺取樣點(rc.24),純幾何。依目前缺口中心 [gapCenterDegrees] 與張角 [gapDegrees]:
+ * - 缺口邊緣:缺口中心 ± gap/2 的兩條射線(只有 [withGap] 時),
+ * - 光束:實心弧(360 - gap)內均分的 [beams] 條射線,第 i 條在實心弧起點(= 缺口中心 + gap/2)後 (i + 0.5) / beams 的位置(只有 [beams] > 0 時)。
+ * 每條射線上取 [pointsPerLine] 個點,從 [innerRadius] 到 [radius] 等距(各取格子中心,不貼邊)。角度慣例同 [angleDegrees]。
+ */
+fun spinSamplePoints(
+    center: Pt, innerRadius: Double, radius: Double, gapCenterDegrees: Double, gapDegrees: Double,
+    beams: Int, pointsPerLine: Int, withGap: Boolean = true,
+): SpinSamples {
+    if (pointsPerLine <= 0) return SpinSamples(emptyList(), emptyList())
+    fun line(angle: Double): List<Pt> {
+        val a = Math.toRadians(angle)
+        val dx = Math.cos(a)
+        val dz = Math.sin(a)
+        return List(pointsPerLine) { k ->
+            val r = innerRadius + (radius - innerRadius) * (k + 0.5) / pointsPerLine
+            Pt(center.x + dx * r, center.y, center.z + dz * r)
+        }
+    }
+    val edges = if (withGap) line(gapCenterDegrees - gapDegrees / 2.0) + line(gapCenterDegrees + gapDegrees / 2.0) else emptyList()
+    val solid = 360.0 - gapDegrees
+    val beam = (0 until beams.coerceAtLeast(0)).flatMap { i -> line(gapCenterDegrees + gapDegrees / 2.0 + solid * (i + 0.5) / beams) }
+    return SpinSamples(beam, edges)
+}
+
 /** 判定區的高度容許(腳底差)。 */
 const val BOSS_HEIGHT = 3.0
 

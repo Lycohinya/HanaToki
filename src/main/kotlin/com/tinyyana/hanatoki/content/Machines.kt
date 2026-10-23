@@ -230,9 +230,12 @@ fun chargePips(charges: Int, max: Int): String {
     return "●".repeat(full) + "○".repeat(max - full)
 }
 
-/** 目前目標:依序第一個 until 還沒達成的步驟(沒寫 until 的步驟永遠停在那一步);全部達成 = null。 */
+/**
+ * 目前目標:依序第一個「while 成立(沒寫 = 一律成立)而且 until 還沒達成」的步驟(沒寫 until 的步驟永遠停在那一步);全部不符 = null。
+ * while 不成立的步驟被跳過,不算達成,條件回來時又會顯示。
+ */
 fun pickObjective(steps: List<ObjectiveStep>, met: (Condition) -> Boolean): ObjectiveStep? =
-    steps.firstOrNull { step -> step.until == null || !met(step.until) }
+    steps.firstOrNull { step -> (step.during == null || met(step.during)) && (step.until == null || !met(step.until)) }
 
 /** 同一種敵人在同一座燈籠旁的啃燈情況:[inRange] 隻(活著、沒僵直、在 contest-radius 內),最多 [max] 隻有效,每隻每秒 [perSecond] 個 burn-second。 */
 data class DrainGroup(val inRange: Int, val max: Int, val perSecond: Double)

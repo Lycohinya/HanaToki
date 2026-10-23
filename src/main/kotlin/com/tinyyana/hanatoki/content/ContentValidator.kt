@@ -35,26 +35,43 @@ object ContentValidator {
                     is Condition.Reach -> {}
                     is Condition.BossDefeated ->
                         if (c.boss !in spec.bosses) errors += "$where.complete[$i].boss: 引用不存在的 boss「${c.boss}」(bosses.yml)"
+                    Condition.Powered, is Condition.BossKneel ->
+                        errors += "$where.complete[$i]: ${c::class.simpleName} 會來去,不能當 stage 的完成條件(只能用在 objective)"
                 }
+            }
+            // on-complete.opens:要打開的 gate 物件
+            stage.onComplete.opens.forEachIndexed { i, gate ->
+                if (spec.objects[gate] !is GateSpec) errors += "$where.on-complete.opens[$i]: 「$gate」不是 gate 物件(objects.yml)"
             }
             if (stage.complete.isEmpty() && stage.next != null) errors += "$where.complete: 有下一段(next)的 stage 必須寫完成條件"
             if (stage.resolve != null && stage.next != null) errors += "$where.resolve: 有下一段(next)的 stage 不能結算"
             // objective 的 until:跟 complete 同一套條件,引用要存在;reach 只有 stage.complete 裡探測得到的 marker 才會達成
-            stage.objective.forEachIndexed { i, step ->
-                when (val c = step.until) {
+            fun objectiveCondition(at: String, c: Condition?) {
+                when (c) {
                     null -> {}
                     is Condition.EncounterCleared ->
-                        if (c.encounter !in spec.encounters) errors += "$where.objective[$i].until.encounter: 引用不存在的波次「${c.encounter}」(encounters.yml)"
-                    is Condition.ObjectState -> stateOk(c.objectId, c.state)?.let { errors += "$where.objective[$i].until: $it" }
+                        if (c.encounter !in spec.encounters) errors += "$at.encounter: 引用不存在的波次「${c.encounter}」(encounters.yml)"
+                    is Condition.ObjectState -> stateOk(c.objectId, c.state)?.let { errors += "$at: $it" }
                     is Condition.Reach ->
                         if (stage.complete.none { it is Condition.Reach && it.marker == c.marker }) {
-                            errors += "$where.objective[$i].until.marker: reach 只有寫在這個 stage 的 complete 裡的 marker「${c.marker}」才會被偵測"
+                            errors += "$at.marker: reach 只有寫在這個 stage 的 complete 裡的 marker「${c.marker}」才會被偵測"
                         }
                     is Condition.BossDefeated ->
-                        if (c.boss !in spec.bosses) errors += "$where.objective[$i].until.boss: 引用不存在的 boss「${c.boss}」(bosses.yml)"
+                        if (c.boss !in spec.bosses) errors += "$at.boss: 引用不存在的 boss「${c.boss}」(bosses.yml)"
+                    Condition.Powered ->
+                        if (spec.objects.values.none { it is PowerUpSpec }) errors += "$at: powered 需要至少一個 power-up 物件(objects.yml),否則永遠不會成立"
+                    is Condition.BossKneel -> {
+                        val boss = spec.bosses[c.boss]
+                        if (boss == null) errors += "$at.boss: 引用不存在的 boss「${c.boss}」(bosses.yml)"
+                        else if (boss.stage != stage.id) errors += "$at.boss: boss「${c.boss}」在 stage「${boss.stage}」,這個 stage 看不到她跪下"
+                    }
                 }
-                if (step.until == null && i != stage.objective.lastIndex) {
-                    errors += "$where.objective[$i].until: 沒寫 until 的步驟永遠停在這一步,只能放最後一個"
+            }
+            stage.objective.forEachIndexed { i, step ->
+                objectiveCondition("$where.objective[$i].until", step.until)
+                objectiveCondition("$where.objective[$i].while", step.during)
+                if (step.until == null && step.during == null && i != stage.objective.lastIndex) {
+                    errors += "$where.objective[$i].until: 沒寫 until 的步驟永遠停在這一步,只能放最後一個(有 while 的步驟不受限)"
                 }
             }
         }
@@ -249,6 +266,10 @@ object ContentValidator {
             boss.points.forEachIndexed { i, id -> need("points[$i]", id) }
             boss.downed.revivePoints.forEachIndexed { i, id -> need("downed.revive-points[$i]", id) }
             need("wipe.checkpoint", boss.wipe.checkpoint)
+            boss.intro?.let { intro ->
+                need("intro.marker", intro.marker)
+                intro.glideTo?.let { need("intro.then-glide-to", it) }
+            }
             for (move in boss.moves.values) {
                 move.origin.marker?.let { need("moves.${move.id}.origin-marker", it) }
                 (move.shape as? MoveShape.Summon)?.markers?.forEachIndexed { i, id -> need("moves.${move.id}.markers[$i]", id) }
@@ -333,6 +354,7 @@ object ContentValidator {
             check(f, "bosses.${b.id}.downed.title", b.downed.titleKey)
             check(f, "bosses.${b.id}.downed.subtitle", b.downed.subtitleKey)
             check(f, "bosses.${b.id}.downed.hud-text", b.downed.hudTextKey)
+            check(f, "bosses.${b.id}.downed.ally-hud-text", b.downed.allyHudTextKey)
             check(f, "bosses.${b.id}.wipe.title", b.wipe.titleKey)
             check(f, "bosses.${b.id}.wipe.subtitle", b.wipe.subtitleKey)
             b.phases.forEach { p ->

@@ -112,6 +112,12 @@ data class DownedSpec(
     val subtitleKey: String?,
     val hudTextKey: String?,
     val hudEverySeconds: Double,
+    /** rc.24:自己倒下時只給他的提示 cue(例如 HUD bark)。 */
+    val selfHintCues: List<String> = emptyList(),
+    /** rc.24:有人倒下時只給其他在線、沒倒下的成員的提示 cue。 */
+    val allyHintCues: List<String> = emptyList(),
+    /** rc.24:有人倒下時給其他在線、沒倒下的成員的一次性 ActionBar 提示(texts key)。 */
+    val allyHudTextKey: String? = null,
 )
 
 enum class WipeHealth(val id: String) {
@@ -143,6 +149,22 @@ data class BossWipeSpec(
 
 data class BossDefeatSpec(val cues: List<String>, val seconds: Double)
 
+/**
+ * 出場演出(rc.24,選填):boss 先在 [marker] 現身(播 [cues] 與一次性 [animation]),停 [holdSeconds] 秒後
+ * 用 [glideSeconds] 秒滑(0 = 直接傳送)到 [glideTo](預設 `points` 第一個)落地,再等 start-delay 到才開打。
+ * 全滅重來不重播出場演出。
+ */
+data class BossIntroSpec(
+    val marker: String,
+    val cues: List<String>,
+    val animation: String?,
+    /** 出場動畫播多久後回到 idle。 */
+    val animationSeconds: Double,
+    val holdSeconds: Double,
+    val glideSeconds: Double,
+    val glideTo: String?,
+)
+
 /** boss 血量條(StageContext.bossBar):[textKey] 是 texts key,參數 {percent} {phase}。 */
 data class BossBarSpec(val textKey: String, val color: String, val overlay: String)
 
@@ -167,7 +189,28 @@ sealed interface MoveShape {
         val degreesPerSecond: Double,
         val durationSeconds: Double,
         val hitIntervalTicks: Int,
-    ) : MoveShape
+        /** rc.24:光束取樣點播的 cue(沿 [beams] 條光束線,短促、非 loop)。空 = 不畫光束。 */
+        val beamCues: List<String> = emptyList(),
+        /** rc.24:缺口兩側邊緣取樣點播的 cue。空 = 不畫缺口邊緣。預警期間就開始播(缺口停在起始方位)。 */
+        val gapCues: List<String> = emptyList(),
+        /** rc.24:取樣週期(tick,4..40);預警與迴旋期間每隔這麼久取樣一輪。 */
+        val sampleTicks: Int = 4,
+        /** rc.24:缺口外的實心弧上畫幾條光束線(只在有 [beamCues] 時用)。 */
+        val beams: Int = 3,
+        /** rc.24:每條線(光束線或缺口邊緣)上最多幾個取樣點,從內圈到外圈等距。 */
+        val pointsPerLine: Int = 6,
+    ) : MoveShape {
+        /** 每一輪取樣最多播出幾個 cue(載入時限制 <= [MAX_SAMPLE_CUES])。 */
+        val cuesPerSample: Int
+            get() = (if (gapCues.isEmpty()) 0 else 2 * gapCues.size * pointsPerLine) +
+                (if (beamCues.isEmpty()) 0 else beams * beamCues.size * pointsPerLine)
+
+        val hasVisual: Boolean get() = gapCues.isNotEmpty() || beamCues.isNotEmpty()
+
+        companion object {
+            const val MAX_SAMPLE_CUES = 80
+        }
+    }
 
     /** 喚敵:在 [markers] 生出 [enemy](enemies.yml 的敵人);[countByPlayers] 決定用幾個 marker(沒寫 = 全部)。同種敵人場上最多 [maxAlive] 隻。 */
     data class Summon(val enemy: String, val markers: List<String>, val countByPlayers: Map<Int, Int>, val maxAlive: Int) : MoveShape
@@ -239,6 +282,10 @@ data class BossSpec(
     val wipe: BossWipeSpec,
     val defeat: BossDefeatSpec,
     val bar: BossBarSpec?,
+    /** rc.24:玩家有效近戰命中時(護盾擋下的不算)在命中點播。 */
+    val hitCues: List<String> = emptyList(),
+    /** rc.24:出場演出;null = 直接在 points 第一個點出場(同舊版)。 */
+    val intro: BossIntroSpec? = null,
 ) {
     val lampIds: List<String> get() = gems.map { it.lamp }
 }

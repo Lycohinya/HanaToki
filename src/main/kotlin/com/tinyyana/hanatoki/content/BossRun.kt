@@ -33,6 +33,12 @@ interface BossHost {
     /** 只放給一位玩家看的 cue。 */
     fun cueFor(cueId: String, at: Pt, player: UUID)
 
+    /**
+     * 取樣用的短促 cue(光環迴旋的光束與缺口標示,每幾 tick 一大把)。實作端不要無上限保留它們的 CueRun
+     * (SessionRun 只留最近一小段,局結束時取消);預設等同 [cue]。cue 必須是短促、非 loop 的。
+     */
+    fun sampleCue(cueId: String, at: Pt) { cue(cueId, at) }
+
     /** 持續型 cue,回傳取消用的 Runnable。 */
     fun loopCue(cueId: String, at: Pt): Runnable
 
@@ -99,6 +105,9 @@ interface BossHost {
     fun onBossDefeated()
 }
 
+/** 出場演出的進度(rc.24)。 */
+private enum class IntroPhase { NONE, HOLD, DESCEND, DONE }
+
 /** BossRun 的狀態。 */
 enum class BossState { WAITING, IDLE, CASTING, KNEELING, RISING, PHASE_SHIFT, WIPED, DEFEATED, STOPPED }
 
@@ -148,6 +157,12 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
     private var nextPositions = 0L
     private var pendingPhase = false
     private var pumpkinsAvailable: Boolean? = null
+
+    private var introPhase = IntroPhase.NONE
+    private var introHoldEnd = 0L
+    private var descendStart = 0L
+    private var descendEnd = 0L
+    private var descendFrom: Pt = Pt(0.0, 0.0, 0.0)
 
     private val lastUsed = HashMap<String, Long>()
     private var lastMove: String? = null
@@ -215,9 +230,14 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
     /** stage 開始:boss 出場,等 start-delay 後開打。 */
     fun start() {
         val first = host.markerPos(spec.points.first()) ?: Pt(0.0, 0.0, 0.0)
-        pos = first
-        host.spawnBoss(first)
-        cues(spec.spawnCues, first)
+        val intro = spec.intro
+        // 有出場演出:先在 intro marker(例如屋頂)現身,停一會兒再落到 then-glide-to;沒有就同舊版直接在第一個點
+        val spawnAt = intro?.let { host.markerPos(it.marker) } ?: first
+        pos = spawnAt
+        host.spawnBoss(spawnAt)
+        cues(spec.spawnCues, spawnAt)
+        introPhase = IntroPhase.NONE
+        if (intro != null) beginIntro(intro, spawnAt)
         state = BossState.WAITING
         startAt = host.now + ticks(spec.startDelaySeconds)
         targetIdx = if (spec.points.size > 1) 1 else 0
@@ -230,7 +250,57 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
         host.log("boss-start", "${spec.id} hits=${fmt(health.maxHits)} players=${host.members().size}")
     }
 
+    // ---- 出場演出 ----
+
+    private fun introLanding(intro: BossIntroSpec): Pt =
+        host.markerPos(intro.glideTo ?: spec.points.first()) ?: host.markerPos(spec.points.first()) ?: pos
+
+    private fun beginIntro(intro: BossIntroSpec, at: Pt) {
+        introPhase = IntroPhase.HOLD
+        introHoldEnd = host.now + ticks(intro.holdSeconds)
+        host.log("boss-intro", "${spec.id} marker=${intro.marker}")
+        cues(intro.cues, at)
+        // 載體剛生成、模型還在綁定:晚一點再播單次動畫才不會掉
+        val animation = intro.animation ?: return
+        later(INTRO_ANIM_DELAY_TICKS) {
+            if (introPhase == IntroPhase.HOLD) {
+                playAnim(animation, false)
+                later(ticks(intro.animationSeconds)) { if (introPhase == IntroPhase.HOLD) resumeAnim() }
+            }
+        }
+    }
+
+    private fun tickIntro() {
+        val intro = spec.intro ?: return
+        val now = host.now
+        if (introPhase == IntroPhase.HOLD && now >= introHoldEnd) {
+            if (intro.glideSeconds <= 0.0) { landIntro(intro); return }
+            introPhase = IntroPhase.DESCEND
+            descendFrom = pos
+            descendStart = now
+            descendEnd = now + ticks(intro.glideSeconds).coerceAtLeast(1)
+            playAnim(spec.animations.glide, true)
+        }
+        if (introPhase == IntroPhase.DESCEND) {
+            if (now >= descendEnd) { landIntro(intro); return }
+            val to = introLanding(intro)
+            val f = ((now - descendStart).toDouble() / (descendEnd - descendStart)).coerceIn(0.0, 1.0)
+            pos = Pt(descendFrom.x + (to.x - descendFrom.x) * f, descendFrom.y + (to.y - descendFrom.y) * f, descendFrom.z + (to.z - descendFrom.z) * f)
+            host.moveBoss(pos)
+        }
+    }
+
+    private fun landIntro(intro: BossIntroSpec) {
+        val to = introLanding(intro)
+        pos = to
+        host.moveBoss(to)
+        introPhase = IntroPhase.DONE
+        resumeAnim()
+        host.log("boss-intro-done", "${spec.id} point=${intro.glideTo ?: spec.points.first()}")
+    }
+
     private fun begin() {
+        spec.intro?.let { if (introPhase == IntroPhase.HOLD || introPhase == IntroPhase.DESCEND) landIntro(it) }
         if (health.taken <= 0.0) health = BossHealth(scaled(), spec.phases.map { it.at })
         resumeAnim()
         enterPhase(phase)
@@ -244,7 +314,10 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
         val now = host.now
         when (state) {
             BossState.STOPPED, BossState.DEFEATED -> return
-            BossState.WAITING -> if (now >= startAt) begin()
+            BossState.WAITING -> {
+                tickIntro()
+                if (now >= startAt) begin()
+            }
             BossState.WIPED -> if (now >= restartAt) restartFight()
             BossState.IDLE -> {
                 glide()
@@ -377,6 +450,7 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
         if (last != null && now - last < spec.hitCooldownTicks) return
         lastHitAt[attacker] = now
         health.hit(if (shieldUp) spec.poweredHitWeight else spec.hitWeight)
+        cues(spec.hitCues, at)
         updateBar()
         if (state == BossState.IDLE) shortAnim(spec.animations.hit)
         if (health.defeated) { defeat(); return }
@@ -548,6 +622,8 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
                 if (!ledger.tryBeginAll(members, c.id)) { abortCast(c, "telegraph-busy"); return }
                 announce(c, members, origin, loop = true)
                 val start = nearest(origin, snap)?.let { angleDegrees(it.second.x - origin.x, it.second.z - origin.z) } ?: 0.0
+                // 缺口方向從預警就畫出來(停在起始方位),迴旋開始後跟著轉
+                if (shape.hasVisual) spinVisual(c, shape, origin, start, -warn)
                 later(warn) { spinStep(c, shape, origin, start, 0L) }
             }
             is MoveShape.Summon -> {
@@ -684,6 +760,21 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
         else endCast(c)
     }
 
+    /**
+     * 光環迴旋的視覺取樣(rc.24):每 [MoveShape.Spin.sampleTicks] tick 依目前缺口方位算出光束線與缺口邊緣上的取樣點,
+     * 對每點播資料指定的 cue。[elapsed] 是距迴旋開始的 tick(預警期間為負,缺口不動)。每輪 cue 數有上限
+     * ([MoveShape.Spin.MAX_SAMPLE_CUES],載入時檢查),招式被作廢時自己停。
+     */
+    private fun spinVisual(c: Cast, s: MoveShape.Spin, center: Pt, startAngle: Double, elapsed: Long) {
+        if (!alive(c)) return
+        val gap = spinGapCenter(startAngle, s.degreesPerSecond, elapsed)
+        val samples = spinSamplePoints(center, s.innerRadius, s.radius, gap, s.gapDegrees, if (s.beamCues.isEmpty()) 0 else s.beams, s.pointsPerLine, withGap = s.gapCues.isNotEmpty())
+        for (pt in samples.gapEdge) for (id in s.gapCues) host.sampleCue(id, pt)
+        for (pt in samples.beam) for (id in s.beamCues) host.sampleCue(id, pt)
+        val next = elapsed + s.sampleTicks
+        if (next <= ticks(s.durationSeconds)) later(s.sampleTicks.toLong()) { spinVisual(c, s, center, startAngle, next) }
+    }
+
     // 喚敵
     private fun summon(c: Cast, s: MoveShape.Summon) {
         if (!alive(c)) return
@@ -777,7 +868,14 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
         d.markCue?.let { markRuns[id] = host.followCue(it, id, positions[id] ?: pos) }
         d.titleKey?.let { host.titleFor(id, it, d.subtitleKey) }
         d.hudTextKey?.let { host.actionBar(id, it) }
-        checkWipe()
+        // 全滅時不必再提示「等她跪下」;否則自己與隊友各一則(隊友 = 在線、沒倒下的其他成員)
+        if (checkWipe()) return
+        d.selfHintCues.forEach { host.cueFor(it, positions[id] ?: pos, id) }
+        for (ally in onlineMembers()) {
+            if (ally == id || downed.contains(ally)) continue
+            d.allyHintCues.forEach { host.cueFor(it, positions[ally] ?: pos, ally) }
+            d.allyHudTextKey?.let { host.actionBar(ally, it) }
+        }
     }
 
     private fun revive(id: UUID, reason: String, withHealth: Boolean) {
@@ -796,9 +894,12 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
         for (id in downed.ids()) revive(id, reason, withHealth = true)
     }
 
-    private fun checkWipe() {
-        if (!fightActive || state == BossState.WIPED || state == BossState.WAITING) return
-        if (isWipe(host.members(), host::isOnline, downed::contains)) wipe()
+    /** 全員倒下就全滅重來;回傳這次是否觸發了全滅。 */
+    private fun checkWipe(): Boolean {
+        if (!fightActive || state == BossState.WIPED || state == BossState.WAITING) return false
+        if (!isWipe(host.members(), host::isOnline, downed::contains)) return false
+        wipe()
+        return true
     }
 
     private fun wipe() {
@@ -963,6 +1064,7 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
         const val SHORT_ANIM_TICKS = 12L
         const val POSITION_REFRESH_TICKS = 10L
         const val RECONNECT_DELAY_TICKS = 10L
+        const val INTRO_ANIM_DELAY_TICKS = 20L
 
         /** [com.tinyyana.hanatoki.stage.StageContext.MEMBER_SNAPSHOT_FIELDS] 的欄位。 */
         const val SX = 0

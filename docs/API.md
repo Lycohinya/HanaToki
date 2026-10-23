@@ -1009,6 +1009,13 @@ interface DialogPort {
 - 事件：`DataContentListener` 新增致死傷害攔截（`EntityDamageEvent`，HIGHEST）、斷線（`PlayerQuitEvent`）與登入（`PlayerJoinEvent`，MONITOR）處理，只對資料驅動副本的成員、boss 戰進行中生效；沒有 `bosses.yml` 的副本完全不經過。
 - 敵人規則掃描（rc.21 起單輪最多 24 隻）改為跨輪輪替（round-robin），超過上限時每隻都會輪到。
 
+### rc.24：stage 開門、目標列狀態條件、Boss 出場／被擊中／倒下提示／迴旋取樣
+
+- 全部是資料驅動框架的選填欄位，預設零影響；schema 見 [CONTENT-DATA.md](CONTENT-DATA.md)：stage `on-complete.opens`、objective `while` 與條件 `powered`／`boss-kneel`、bosses.yml `intro`／`hit-cues`、`downed.self-hint-cues`／`ally-hint-cues`／`ally-hud-text`、`spin` 的 `gap-cues`／`beam-cues`／`sample-ticks`／`beams`／`points-per-line`。
+- 型別(都在 `com.tinyyana.hanatoki.content`，新欄位一律在 data class 尾端有預設值，既有簽章不變):`StageEffects.opens`、`ObjectiveStep.during`、`Condition.Powered`／`Condition.BossKneel`(sealed 新子型別，只有框架內部 `when` 用到)、`BossSpec.hitCues`／`intro`(`BossIntroSpec`)、`DownedSpec` 三個提示欄位、`MoveShape.Spin` 取樣欄位。
+- `BossHost` 新增有預設實作的 `sampleCue(cueId, at)`(預設等同 `cue`)；`SessionRun` 覆寫成只保留最近 128 個 CueRun。
+- 新 log:`boss-intro`、`boss-intro-done`。
+
 ### rc.19：`world-time`
 
 `dungeons.yml` 新增可選欄位 `world-time`（0..23999，一天內的 tick；沒寫 = 維持原行為）。`DungeonWorldProvisioner.ensureWorld(..., worldTime)` 在 void 世界建立後、以及世界已載入時（預載入、熱插拔）呼叫 `World#setTime`；`advance_time`（DO_DAYLIGHT_CYCLE）本來就被 provisioner 關掉，所以時間固定。在 global region tick thread 以外會派到 `GlobalRegionScheduler`。解析規則：`world-create: false` 或有 `world-generator` 時報錯（那種世界的日夜循環不受 HanaToki 鎖定）。
