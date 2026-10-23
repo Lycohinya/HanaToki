@@ -123,7 +123,11 @@ class SessionRun(
     /** 需要每 10 tick 抓一次成員快照(位置、主手格)的功能是否有任何一個開著。 */
     private val presenceNeeded: Boolean = spec.tools.values.any { it.passiveRegenSeconds != null || it.zoneRegen != null } ||
         spec.objects.values.any { it is LanternSpec && it.hint != null } ||
-        spec.hints.values.any { it.trigger is HintTrigger.UnequippedNearEnemy }
+        spec.hints.values.any { it.trigger is HintTrigger.UnequippedNearEnemy } ||
+        spec.stages.any { st -> st.objective.any { step -> core.texts.rawOrNull(step.textKey)?.contains("{nearest:") == true } }
+
+    /** rc.27:最近一輪成員快照(presence 探測)，目標文字 `{nearest:power-up}` 算方向用。 */
+    private var lastSnap: Map<UUID, DoubleArray> = emptyMap()
 
     // 敵人規則 seeks-object／harasses-players:兩者共用同一輪有界掃描。內容沒有任何敵人用到時 scanPeriod = 0,整套不動。
     private val touch = TouchCooldowns()
@@ -193,6 +197,12 @@ class SessionRun(
         var probeAt = 0L
         /** rc.25:在架上期間持續播的標示 cue(beacon-cue)。 */
         var beacon: CueRun? = null
+        /** rc.27:浮空實體 prop：已要求生成／生成完成可以擺姿勢／下一次擺姿勢的 tick／第幾個半週期。 */
+        var propOn = false
+        var propReady = false
+        var propNextPose = 0L
+        var propPhase = 0
+        var propWarned = false
     }
 
     /** 最後一段結算前的尾聲:[token] 每換一步加一,舊步驟的計時與對話回呼靠它失效。 */
@@ -1412,9 +1422,51 @@ class SessionRun(
         else if (!want && rt.beacon != null) { rt.beacon?.cancel(); rt.beacon = null }
     }
 
+    /**
+     * rc.27:power-up 的浮空實體。在架上(ready、所屬 stage 進行中)才有:生成 item display(part)，之後每半個週期擺一次姿勢
+     * (客戶端補間成緩慢上下浮動與慢轉，伺服器只送少量封包)；被拿走、換 stage 就移除。生成完成前不移除(避免競態)。
+     */
+    private fun syncProp(rt: PowerUpRt) {
+        val prop = rt.spec.prop ?: return
+        val want = !closed && stageActive(rt.spec.stage) && rt.machine.state == PowerUpMachine.State.READY
+        val propId = "powerup-" + rt.spec.id
+        if (want) {
+            if (!rt.propOn) {
+                val material = Material.matchMaterial(prop.item)
+                if (material == null) {
+                    if (!rt.propWarned) { rt.propWarned = true; warn("power-up ${rt.spec.id} 的 prop.item「${prop.item}」不是 Material，不生成浮空實體") }
+                    return
+                }
+                rt.propOn = true
+                rt.propReady = false
+                rt.propPhase = 0
+                val at = rt.loc.clone().add(0.0, prop.height, 0.0)
+                ctx.props().spawnPart(propId, at, org.bukkit.inventory.ItemStack(material), 0).whenComplete { _, error ->
+                    ctx.submit {
+                        if (error != null) warn("power-up ${rt.spec.id} 浮空實體生成失敗:${error.message}")
+                        else { rt.propReady = true; rt.propNextPose = now }
+                    }
+                }
+            } else if (rt.propReady && now >= rt.propNextPose) {
+                val half = Math.max(1, Math.round(prop.bobSeconds * 10.0).toInt())
+                val up = rt.propPhase % 2 == 0
+                val ty = (if (up) prop.bob / 2.0 else -prop.bob / 2.0).toFloat()
+                val yaw = (prop.spinDegrees * (rt.propPhase + 1)).toFloat()
+                ctx.props().pose(propId, 0f, ty, 0f, 0f, yaw, 0f, prop.scale.toFloat(), half)
+                rt.propPhase++
+                rt.propNextPose = now + half
+            }
+        } else if (rt.propOn && rt.propReady) {
+            rt.propOn = false
+            rt.propReady = false
+            ctx.props().despawn(propId)
+        }
+    }
+
     private fun tickPowerUps() {
         if (powerUps.isEmpty()) return
         for (rt in powerUps.values) syncBeacon(rt)
+        for (rt in powerUps.values) syncProp(rt)
         for (rt in powerUps.values) {
             if (rt.machine.tryRespawn(now)) {
                 log("power-up", "${rt.spec.id} taken->ready")
@@ -1902,14 +1954,42 @@ class SessionRun(
         return chargePips(Math.round(best * BURN_PIPS).toInt(), BURN_PIPS)
     }
 
+    /**
+     * rc.27:目標文字 `{nearest:power-up}`:這位成員面向看，最近一顆 ready 的 power-up(所屬 stage 進行中)在哪個方位、多遠，
+     * 例如「左前方 12 格」。方位八向以玩家 yaw 為準；方位字與格式取自內容 texts `<dungeonId>.direction.<front|front-right|right|back-right|back|back-left|left|front-left>`
+     * 與 `<dungeonId>.direction.format`(`{dir}` `{distance}`)，缺字時只回距離數字。沒有成員快照或沒有 ready 的 power-up = 空字串。
+     */
+    private fun nearestPowerUpText(playerId: UUID): String {
+        val pos = lastSnap[playerId] ?: return ""
+        var best: PowerUpRt? = null
+        var bestSq = Double.MAX_VALUE
+        for (rt in powerUps.values) {
+            if (!stageActive(rt.spec.stage) || rt.machine.state != PowerUpMachine.State.READY) continue
+            val dx = rt.loc.x - pos[0]
+            val dz = rt.loc.z - pos[2]
+            val sq = dx * dx + dz * dz
+            if (sq < bestSq) { bestSq = sq; best = rt }
+        }
+        val target = best ?: return ""
+        val dx = target.loc.x - pos[0]
+        val dz = target.loc.z - pos[2]
+        val distance = Math.round(Math.sqrt(bestSq)).toInt()
+        val octant = directionOctant(pos[3], dx, dz)
+        val prefix = spec.dungeonId + ".direction."
+        val dir = core.texts.rawOrNull(prefix + octant) ?: return distance.toString()
+        val format = core.texts.rawOrNull(prefix + "format") ?: return "$dir $distance"
+        return format.replace("{dir}", dir).replace("{distance}", distance.toString())
+    }
+
     private fun showObjective(key: String) {
         val tool = spec.tools.values.firstOrNull()
         val burn = burnPips()
         for (playerId in members()) {
-            val params = if (tool == null) mapOf("burn" to burn) else {
+            val base = if (tool == null) mapOf("burn" to burn) else {
                 val c = chargesOf(playerId, tool)
                 mapOf("charges" to c.toString(), "max" to tool.maxCharges.toString(), "pips" to chargePips(c, tool.maxCharges), "burn" to burn)
             }
+            val params = base + mapOf("nearest:power-up" to nearestPowerUpText(playerId))
             ctx.actionBar(playerId, key, params)
             objectiveHud.shown(playerId)
         }
@@ -1937,6 +2017,7 @@ class SessionRun(
     }
 
     private fun processPresence(snap: Map<UUID, DoubleArray>) {
+        lastSnap = snap
         val dtSeconds = ((now - lastRegenAt) / 20.0).coerceAtMost(MAX_REGEN_DT_SECONDS)
         lastRegenAt = now
         regenCharges(snap, dtSeconds)

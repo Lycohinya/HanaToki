@@ -225,6 +225,22 @@ fun lanternHintLevel(distance: Double, current: Int, radius: Double, readyRadius
 }
 
 /** 燈火條:「●●○○○」。[charges] 超出 0..[max] 的部分夾住。 */
+/**
+ * rc.27:玩家面向([yawDegrees],Minecraft 的 yaw:0 = 南、順時針增加)看，往 ([dx], [dz]) 的方位八向:
+ * front／front-right／right／back-right／back／back-left／left／front-left。距離為 0 回 front。
+ */
+fun directionOctant(yawDegrees: Double, dx: Double, dz: Double): String {
+    if (dx * dx + dz * dz < 1.0E-9) return "front"
+    val targetYaw = Math.toDegrees(Math.atan2(-dx, dz))
+    var rel = (targetYaw - yawDegrees) % 360.0
+    if (rel > 180.0) rel -= 360.0
+    if (rel <= -180.0) rel += 360.0
+    val index = Math.floorMod(Math.round(rel / 45.0).toInt(), 8)
+    return DIRECTION_NAMES[index]
+}
+
+private val DIRECTION_NAMES = listOf("front", "front-right", "right", "back-right", "back", "back-left", "left", "front-left")
+
 fun chargePips(charges: Int, max: Int): String {
     val full = charges.coerceIn(0, max)
     return "●".repeat(full) + "○".repeat(max - full)

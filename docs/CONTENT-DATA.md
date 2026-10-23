@@ -1,4 +1,4 @@
-# 資料驅動副本內容（1.0.0-rc.26）
+# 資料驅動副本內容（1.0.0-rc.27）
 
 內容插件只給 **一個資料夾 + texts**，行為由框架內建的 `DataDrivenBehavior` 依資料執行，內容端不寫 Kotlin。另做一座副本只換設定檔與資產。判準：加第 N+1 盞燈籠、第 N+1 種幽靈、第 N+1 段提示，只改一筆 YAML。
 
@@ -138,6 +138,7 @@ stage 一開始（上一段完成、門開）玩家常常還在上一區，這�
       - { text: goal.lamps, until: { type: boss-defeated, boss: nun } }  # 其餘時間:點亮場邊燈
 ```
 - **rc.26 條件**（同樣只能寫在 objective）：`{ type: arrived }`（見上節）、`{ type: lantern-burning }`（這個 stage 有任何燈籠正在燃燒，含暫停；stage 要有 lantern 物件）。文字參數另有 `{burn}`：這個 stage 進度最高的燃燒中燈籠的五格圓點（`●●●○○`），沒有燈在燒是空字串；搭配 `while: lantern-burning` 的步驟，玩家一照燈就看到進度。
+- **方位佔位符 `{nearest:power-up}`（rc.27）**：這位成員面向看，最近一顆 ready 的 power-up（所屬 stage 進行中）在哪個方位、多遠，例如「左前方 12 格」，每次重畫目標列更新（成員位置取自每 10 tick 的成員快照，文字含 `{nearest:` 時自動啟用）。方位八向（前／右前／右／右後／後／左後／左／左前，依玩家 yaw），方位字與格式取自內容 texts：`<dungeonId>.direction.<front|front-right|right|back-right|back|back-left|left|front-left>` 與 `<dungeonId>.direction.format`（含 `{dir}` `{distance}`）；缺字時只顯示距離數字，沒有成員快照或沒有 ready 的 power-up 是空字串。
 - 文字是 texts key（同 `title`），參數 `{charges}` `{max}` `{pips}`（`●●○○○` 燈火條）取 tool.yml 第一個道具、每位玩家各自的值。燈火條要一直看得見，就用 `objective-every-seconds: 1`，不再另用 tool 的 `hud-text`（同一個 ActionBar 組，後送的蓋掉先送的）。
 - 沒寫 `objective` 的 stage（以及整個舊副本）完全不經過這段。
 
@@ -174,6 +175,16 @@ pieces:                       # 一塊 piece 一筆；key = piece ID
 **gate**（marker 必須是 `door`，要有水平 `facing` 與 `w`／`h`）：狀態 `closed → open`。`facing` = 門面朝的方向；站在門前（facing 那一側）看過去，marker 在**左下角**，寬往右延伸（右手邊 = facing 逆時針轉 90 度）。`column-ticks`（預設 4）每隔幾 tick 把一欄（h 格高）換成空氣做滑開；`slide-from`：`left`（從 marker 端）｜`right`。
 
 **power-up 的 `beacon-cue`（rc.25，選填）**：南瓜燈「在架上」（ready、所屬 stage 進行中）期間持續播的 **loop cue**（cue 引用 loop vfx），被拿走、換 stage、`pumpkins` 下架、局結束時取消，重生／上架時再播。讓玩家從遠處（越過樹籬）看到：用高過牆的細光柱＋頂端柔光球，亮度克制。同時最多 = 在架上的南瓜燈數 × 該 vfx 的 display 數，要算進 vfx 的 `max-total-displays`。
+
+**power-up 的 `prop`（rc.27，選填）**：南瓜燈在架上期間，marker 上方浮著一個發光的實體（item display，由 `PropHandle.spawnPart` 生成，亮度固定偏亮），被拿走就移除、重生再出現（和 beacon-cue 同一套「在架上」判定）。
+
+```yaml
+    prop: { item: JACK_O_LANTERN, scale: 0.9, height: 1.1, bob: 0.3, bob-seconds: 3, spin-degrees: 90 }
+    # item 必填，Material 名稱（執行期解析，解析失敗記警告、不生成）；scale 預設 1.0（1 = 一整格方塊）；height 預設 1.0（離 marker 腳下的高度）；
+    # bob 預設 0.3 格、bob-seconds 預設 3（上下一個週期）、spin-degrees 預設 90（每半個週期慢轉幾度）
+```
+
+伺服器只在每半個週期送一次姿勢，客戶端自己補間成緩慢浮動。要讓周圍真的變亮，在 `states.ready.blocks` 放 `minecraft:light[level=15]`、`states.taken.blocks` 放空氣即可（資料驅動，框架不另放光源）。
 
 **power-up**（rc.22，南瓜燈；marker 必須是 `trigger`）：成員走進 `radius` 內，**全隊** powered `seconds` 秒（見 flees-when-powered）。狀態 `ready ⇄ taken`：`states.<狀態>` 同其他物件（cues＋blocks，進入該狀態時播／換方塊；`ready` 的 blocks 在場景放好後套用）。
 

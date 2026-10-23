@@ -242,7 +242,16 @@ data class PowerUpSpec(
     val endCues: List<String>,
     /** rc.25:南瓜燈「在架上」(ready 且所屬 stage 進行中)期間持續播的 loop cue,被拿走、換 stage 時取消,重生時再播。讓玩家從遠處(越過樹籬)看到。 */
     val beaconCue: String? = null,
+    /** rc.27:在架上期間 marker 上方浮著的發光實體(item display),緩慢上下浮動、慢轉；被拿走就移除，重生再出現。null = 沒有實體。 */
+    val prop: PowerUpProp? = null,
 ) : ObjectSpec
+
+/**
+ * power-up 的浮空實體:[item] 是 Bukkit Material 名稱(例如 JACK_O_LANTERN，執行期解析，解析失敗記警告不生成)，
+ * 浮在 marker 上方 [height] 格，以 [scale] 倍原尺寸(1.0 = 一整格方塊)顯示；每 [bobSeconds] 秒一個上下週期(幅度 [bob] 格)，
+ * 每半個週期慢轉 [spinDegrees] 度。
+ */
+data class PowerUpProp(val item: String, val scale: Double, val height: Double, val bob: Double, val bobSeconds: Double, val spinDegrees: Double)
 
 object ObjectStates {
     const val POWER_UP_READY = "ready"

@@ -1023,6 +1023,11 @@ interface DialogPort {
 - 目標列的動作列在局結束、成員離場、換到沒有目標的 stage 時清空（`ObjectiveHudTracker`）。
 - 新 log：`boss-heal reason=start｜restart｜kneel players=<n>`。
 
+### rc.27：power-up 浮空實體、目標文字方位佔位符
+
+- 選填資料欄位（預設零影響；schema 見 [CONTENT-DATA.md](CONTENT-DATA.md)）：power-up `prop`（浮空發光實體，item display，緩慢浮動慢轉）、objective 文字參數 `{nearest:power-up}`（最近一顆 ready power-up 的方位與距離）。
+- 型別：`PowerUpProp`、`PowerUpSpec.prop`（尾端預設 null）；頂層函式 `directionOctant(yawDegrees, dx, dz)`（`Machines.kt`）。
+
 ### rc.26：stage 抵達區、到場對話序列、boss 等抵達出場
 
 - 選填資料欄位（預設零影響；schema 見 [CONTENT-DATA.md](CONTENT-DATA.md)）：stage `arrive`／`on-arrive`（含 `dialogs`、`dialog-timeout-seconds`）、encounter 觸發 `stage-arrive`、objective 條件 `arrived`／`lantern-burning` 與文字參數 `{burn}`、hint `requires-arrival`、boss `intro.await-arrive-dialogs`、chases-players `start-delay-seconds`、boss `shield.aura-cue`、chat.yml（cue id → 聊天室台詞）；場邊燈可寫 `milestones`。

@@ -587,7 +587,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
 
     private fun parsePowerUp(id: String, node: Node): PowerUpSpec? {
         node.only(
-            setOf("type", "marker", "stage", "states", "radius", "seconds", "consume", "respawn-seconds", "start-cues", "end-cues", "beacon-cue"),
+            setOf("type", "marker", "stage", "states", "radius", "seconds", "consume", "respawn-seconds", "start-cues", "end-cues", "beacon-cue", "prop"),
         )
         val marker = node.id("marker", required = true)
         val radius = node.num("radius", min = 0.5, max = 8.0) ?: 1.5
@@ -596,7 +596,23 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         val respawn = node.num("respawn-seconds", min = 0.0, max = 3600.0) ?: 0.0
         val states = parseStates(node, ObjectStates.POWER_UP)
         if (marker == null || seconds == null) return null
-        return PowerUpSpec(id, marker, node.id("stage"), states, radius, seconds, consume, respawn, node.idList("start-cues"), node.idList("end-cues"), node.id("beacon-cue"))
+        val prop = parsePowerUpProp(node)
+        return PowerUpSpec(id, marker, node.id("stage"), states, radius, seconds, consume, respawn, node.idList("start-cues"), node.idList("end-cues"), node.id("beacon-cue"), prop)
+    }
+
+    /** `prop: { item: JACK_O_LANTERN, scale: 0.9, height: 1.1, bob: 0.3, bob-seconds: 3, spin-degrees: 90 }`(rc.27,選填)。 */
+    private fun parsePowerUpProp(node: Node): PowerUpProp? {
+        if (node.map["prop"] == null) return null
+        val n = node.child("prop") ?: return null
+        n.only(setOf("item", "scale", "height", "bob", "bob-seconds", "spin-degrees"))
+        val item = n.str("item", required = true)
+        if (item != null && !Regex("[A-Za-z0-9_:]+").matches(item)) n.err("item", "必須是 Material 名稱(例如 JACK_O_LANTERN)")
+        val scale = n.num("scale", min = 0.1, max = 4.0) ?: 1.0
+        val height = n.num("height", min = 0.0, max = 8.0) ?: 1.0
+        val bob = n.num("bob", min = 0.0, max = 2.0) ?: 0.3
+        val bobSeconds = n.num("bob-seconds", min = 0.5, max = 30.0) ?: 3.0
+        val spin = n.num("spin-degrees", min = 0.0, max = 170.0) ?: 90.0
+        return if (item == null) null else PowerUpProp(item, scale, height, bob, bobSeconds, spin)
     }
 
     private fun parseGate(id: String, node: Node): GateSpec? {
