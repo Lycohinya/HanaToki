@@ -90,11 +90,13 @@ class ContentDataContractTest {
     }
 
     @Test
-    fun `未知的規則標籤被擋,保留標籤接受但有警告`() {
+    fun `未知的規則標籤被擋,rc22 起沒有保留標籤了`() {
         val base = ContentFixtures.FILES.getValue("enemies.yml")
         assertTrue(errorsOf(mapOf("enemies.yml" to base.replace("[needs-flash]", "[teleports]"))).any { "未知的規則標籤" in it })
-        val reserved = ContentFixtures.parse(mapOf("enemies.yml" to base.replace("[needs-flash]", "[needs-flash, frozen-when-watched]")))
-        assertTrue(ContentValidator.warnings(reserved).any { "frozen-when-watched" in it })
+        assertTrue(EnemyRules.RESERVED.isEmpty())
+        // 原本是保留標籤的 frozen-when-watched 現在有行為,寫標籤就必須有對應區塊
+        val noBlock = errorsOf(mapOf("enemies.yml" to base.replace("[needs-flash]", "[needs-flash, frozen-when-watched]")))
+        assertTrue(noBlock.any { "enemies.small_ghost.frozen-when-watched" in it && "需要這個區塊" in it }, noBlock.toString())
     }
 
     @Test

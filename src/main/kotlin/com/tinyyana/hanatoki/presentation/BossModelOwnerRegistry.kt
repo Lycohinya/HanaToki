@@ -35,4 +35,10 @@ class BossModelOwnerRegistry<H : AutoCloseable> {
     }
 
     fun size(): Int = byKey.size
+
+    /** 某個 owner 名下目前有幾個 handle。 */
+    fun countOwner(owner: String): Int = keysByOwner[owner]?.size ?: 0
+
+    /** 每個 owner 名下的 handle 數(空的 owner 不列)。 */
+    fun ownerCounts(): Map<String, Int> = keysByOwner.mapValues { it.value.size }.filterValues { it > 0 }
 }

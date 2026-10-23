@@ -61,9 +61,9 @@ class DataDrivenBehavior(
         val run = runtime.newRun(content, ctx)
         runtime.put(run)
         return try {
-            run.prepare().whenComplete { _, error -> if (error != null) runtime.remove(run.sessionId)?.close() }
+            run.prepare().whenComplete { _, error -> if (error != null) runtime.remove(run.sessionId)?.close("prepare-failed") }
         } catch (t: Throwable) {
-            runtime.remove(run.sessionId)?.close()
+            runtime.remove(run.sessionId)?.close("prepare-failed")
             CompletableFuture.failedFuture(t)
         }
     }
@@ -72,7 +72,7 @@ class DataDrivenBehavior(
         runtime.runOf(ctx.sessionId)?.startStage(ctx, stageId)
     }
 
-    /** 第一段切片不結算、不發獎:逾時不走預設的 resolve("timeout")。 */
+    /** 逾時不走預設的 resolve("timeout"):結算只由 stages.yml 的 resolve 開關(最後一段完成後)觸發。 */
     override fun onStageTimeout(ctx: StageContext, stageId: String) {
         ctx.log("stage $stageId 逾時,資料驅動內容不結算,略過")
     }
@@ -90,6 +90,6 @@ class DataDrivenBehavior(
     }
 
     override fun onSessionEnd(ctx: StageContext, reason: String) {
-        runtime.remove(ctx.sessionId)?.close()
+        runtime.remove(ctx.sessionId)?.close(reason)
     }
 }

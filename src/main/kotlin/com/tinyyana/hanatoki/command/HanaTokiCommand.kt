@@ -222,14 +222,53 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
             // 沒裝就整棵子指令直接回友善訊息,不散在每個分支重複判斷。
             "model" -> handleModelDebug(sender, args)
             // Map Asset layer 的 executable contract(見 testcontent/StructureProbe),只在隔離測試環境用。
+            "entities" -> handleEntities(sender, args.getOrNull(2))
             "mapprobe" -> {
                 val slotId = args.getOrNull(2)
                 val mode = args.getOrNull(3)?.lowercase()
                 if (slotId == null || mode == null) { sender.sendMessage("§c用法:/hanatoki admin mapprobe <slotId> <fixed|jigsaw|foreign|fail|cancel> [seed]"); return }
                 com.tinyyana.hanatoki.testcontent.StructureProbe.run(core, sender, slotId, mode, args.getOrNull(4)?.toLongOrNull() ?: 0L)
             }
-            else -> sender.sendMessage("§7/hanatoki admin <list|kick <player>|reset <slotId>|debug|poses|journal|restore <instanceId>|difftest <slotId> <count>|diffrollback <slotId>|mapprobe <slotId> <mode>|model <spawn|play|base|stop|locators|list|clear>>")
+            else -> sender.sendMessage("§7/hanatoki admin <list|kick <player>|reset <slotId>|debug|poses|journal|restore <instanceId>|difftest <slotId> <count>|diffrollback <slotId>|mapprobe <slotId> <mode>|entities [slotId|all]|model <spawn|play|base|stop|locators|list|clear>>")
         }
+    }
+
+    /**
+     * `/hanatoki admin entities [slotId|all]`:每一局還活著的 HanaToki 臨時實體(actor／prop)、BetterModel tracker,
+     * 以及資料驅動內容的敵人狀態與 powered 成員。`all` 另外列出「session 已結束卻還登記著」的殘留
+     * (剛結束、場地還在收斂的一局會短暫出現,持續出現才是外洩)。倒下狀態玩家數由 Boss 交接提供。
+     */
+    private fun handleEntities(sender: CommandSender, filter: String?) {
+        val all = filter == null || filter.equals("all", true)
+        val sessions = core.sessionManager.snapshot()
+        val wanted = if (all) sessions else sessions.filter { it.slotId == filter || it.sessionId.toString().startsWith(filter) }
+        if (!all && wanted.isEmpty()) { sender.sendMessage("§c找不到 slot 或 session「$filter」"); return }
+        val actors = core.actorController.countsBySession()
+        val props = core.propController.countsBySession()
+        val trackers = core.bossModels.trackerOwners()
+        sender.sendMessage("§7=== HanaToki 臨時實體(${wanted.size} 局)===")
+        for (s in wanted) {
+            sender.sendMessage(
+                "§7session=${s.sessionId} dungeon=${s.dungeonId} slot=${s.slotId} members=${s.activeMembers().size} " +
+                    "actor=${actors[s.sessionId] ?: 0} prop=${props[s.sessionId] ?: 0} tracker=${trackers[s.sessionId.toString()] ?: 0}",
+            )
+            core.dataContent.runOf(s.sessionId)?.describe { lines -> lines.forEach { sender.sendMessage("§7  $it") } }
+        }
+        if (!all) return
+        val live = sessions.map { it.sessionId }.toSet()
+        val leaked = ArrayList<String>()
+        actors.filterKeys { it !in live }.forEach { (id, n) -> leaked += "actor session=$id x$n" }
+        props.filterKeys { it !in live }.forEach { (id, n) -> leaked += "prop session=$id x$n" }
+        trackers.forEach { (owner, n) ->
+            val id = runCatching { java.util.UUID.fromString(owner) }.getOrNull()
+            if (id != null && id !in live) leaked += "tracker session=$id x$n"
+        }
+        if (leaked.isEmpty()) sender.sendMessage("§a沒有殘留:已結束的 session 沒有登記中的 actor／prop／tracker")
+        else {
+            sender.sendMessage("§e已結束的 session 還登記著(剛結束的一局收斂中會短暫出現):")
+            leaked.forEach { sender.sendMessage("§e  $it") }
+        }
+        sender.sendMessage("§7倒下狀態玩家數:目前沒有倒下機制(Boss 交接加入後在這裡列出)")
     }
 
     /**
@@ -355,7 +394,7 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
         1 -> listOf("enter", "leave", "admin").filter { it.startsWith(args[0].lowercase()) }
         2 -> when (args[0].lowercase()) {
             "enter" -> core.registry.definitions.keys.toList()
-            "admin" -> listOf("list", "kick", "reset", "debug", "poses", "journal", "restore", "content-disable", "content-reload", "mapprobe", "model")
+            "admin" -> listOf("list", "kick", "reset", "debug", "poses", "journal", "restore", "content-disable", "content-reload", "mapprobe", "entities", "model")
                 .filter { it.startsWith(args[1].lowercase()) }
             else -> emptyList()
         }
@@ -367,6 +406,8 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
                 core.instanceInventory.snapshotRecords().map { it.instanceId.toString() }
             args[0].equals("admin", true) && args[1].equals("model", true) ->
                 listOf("spawn", "play", "base", "stop", "showcase", "locators", "list", "clear")
+            args[0].equals("admin", true) && args[1].equals("entities", true) ->
+                listOf("all") + core.sessionManager.snapshot().map { it.slotId }
             else -> emptyList()
         }
         4 -> when {

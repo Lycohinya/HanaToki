@@ -36,6 +36,7 @@ object ContentValidator {
                 }
             }
             if (stage.complete.isEmpty() && stage.next != null) errors += "$where.complete: 有下一段(next)的 stage 必須寫完成條件"
+            if (stage.resolve != null && stage.next != null) errors += "$where.resolve: 有下一段(next)的 stage 不能結算"
             // objective 的 until:跟 complete 同一套條件,引用要存在;reach 只有 stage.complete 裡探測得到的 marker 才會達成
             stage.objective.forEachIndexed { i, step ->
                 when (val c = step.until) {
@@ -89,6 +90,14 @@ object ContentValidator {
                 if (effect is HarassEffect.ToolCharges && effect.tool !in spec.tools) {
                     errors += "$where.harasses-players.effects[$i].tool: 引用不存在的道具「${effect.tool}」(tool.yml)"
                 }
+            }
+            enemy.chasesPlayers?.contact?.effects?.forEachIndexed { i, effect ->
+                if (effect is HarassEffect.ToolCharges && effect.tool !in spec.tools) {
+                    errors += "$where.chases-players.contact.effects[$i].tool: 引用不存在的道具「${effect.tool}」(tool.yml)"
+                }
+            }
+            if (enemy.fleesWhenPowered != null && spec.objects.values.none { it is PowerUpSpec }) {
+                errors += "$where.flees-when-powered: 沒有任何 power-up 物件(objects.yml)可以讓成員 powered,這個規則永遠不會動"
             }
         }
 
@@ -167,6 +176,7 @@ object ContentValidator {
             if (m == null) { errors += "$where: 場景裡沒有 id=${obj.markerId} 的 marker"; continue }
             when (obj) {
                 is LanternSpec -> if (m.kind != MarkerKind.TRIGGER) errors += "$where: lantern 的 marker 必須是 trigger(「${obj.markerId}」是 ${m.kind.id})"
+                is PowerUpSpec -> if (m.kind != MarkerKind.TRIGGER) errors += "$where: power-up 的 marker 必須是 trigger(「${obj.markerId}」是 ${m.kind.id})"
                 is GateSpec -> {
                     if (m.kind != MarkerKind.DOOR) { errors += "$where: gate 的 marker 必須是 door(「${obj.markerId}」是 ${m.kind.id})"; continue }
                     if (m.facing == null || m.facing !in setOf(org.bukkit.block.BlockFace.NORTH, org.bukkit.block.BlockFace.SOUTH, org.bukkit.block.BlockFace.EAST, org.bukkit.block.BlockFace.WEST)) {
@@ -184,6 +194,10 @@ object ContentValidator {
                 if (m == null) errors += "${ContentFileNames.STAGES} stages.${stage.id}.complete[$i].marker: 場景裡沒有 id=${c.marker} 的 marker"
                 else if (m.kind != MarkerKind.TRIGGER) errors += "${ContentFileNames.STAGES} stages.${stage.id}.complete[$i].marker: reach 的 marker 必須是 trigger(「${c.marker}」是 ${m.kind.id})"
             }
+        }
+        for (stage in spec.stages) stage.resolve?.epilogue?.forEachIndexed { i, step ->
+            val id = step.marker ?: return@forEachIndexed
+            if (marker(id) == null) errors += "${ContentFileNames.STAGES} stages.${stage.id}.resolve.epilogue[$i].marker: 場景裡沒有 id=$id 的 marker"
         }
         for (enc in spec.encounters.values) {
             val spawns = markers.filter { it.kind == MarkerKind.MOB_SPAWN && it.properties["group"] == enc.markerGroup }

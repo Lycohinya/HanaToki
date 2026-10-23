@@ -47,6 +47,12 @@ interface BossModels {
 
     /** 某個模型 id 有哪些動畫名字。找不到這個模型就回空集合。 */
     fun animationNames(modelId: String): Collection<String>
+
+    /** 這個 owner 名下目前開著的 handle(BetterModel tracker)數;debug 指令用。預設實作回 0。 */
+    fun trackerCount(owner: String): Int = 0
+
+    /** 目前每個 owner 名下的 handle 數(admin entities 找外洩用)。預設實作回空。 */
+    fun trackerOwners(): Map<String, Int> = emptyMap()
 }
 
 /** BetterModel 沒裝/沒啟用時的退回實作——全部方法安全地什麼都不做。 */

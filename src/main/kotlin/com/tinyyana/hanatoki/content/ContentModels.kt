@@ -38,6 +38,34 @@ data class StageSpec(
     val objectiveDoneKey: String? = null,
     /** 目標定時重播的間隔秒數;0 = 只在進 stage、步驟換了、燈火變了時顯示。 */
     val objectiveEverySeconds: Double = 0.0,
+    /** rc.22:這個 stage 完成時,把場上剩下的敵人全部打散(預設 false = 留著,行為同舊版)。 */
+    val clearsEnemies: Boolean = false,
+    /** rc.22:非 null = 這個 stage 完成後(先跑尾聲)呼叫 `resolve(result)` 結算;只能用在 `next` 為 null 的最後一段。 */
+    val resolve: ResolveSpec? = null,
+)
+
+/**
+ * 最後一段結算開關(rc.22)。stage 完成並播完 on-complete 之後,依序播 [epilogue] 的每一步,播完才 `resolve(result)`。
+ * 沒有這個區塊的 stage 維持舊行為(最後一段只打 `slice end`,不結算)。
+ */
+data class ResolveSpec(
+    /** 結算 key(CompletionResult.resultKey),LycoHanaToki 的獎勵規則用它比對。 */
+    val result: String,
+    val epilogue: List<EpilogueStep>,
+    /** 對話步驟等全部成員選完的最長秒數;逾時就繼續(斷線或離場的人不會卡住結算)。 */
+    val dialogTimeoutSeconds: Double,
+)
+
+/**
+ * 尾聲的一步:[cue] 與 [dialog] 至少寫一個或只寫 [waitSeconds]。cue 沒有「播完」回呼,所以靠 [waitSeconds] 等;
+ * 對話步驟等全部成員選完(最久 [ResolveSpec.dialogTimeoutSeconds]),之後再等 [waitSeconds]。
+ */
+data class EpilogueStep(
+    val cue: String?,
+    val dialog: String?,
+    val waitSeconds: Double,
+    /** cue 的原點 marker;null = 進場 marker。 */
+    val marker: String?,
 )
 
 /** 一步目標:[textKey] 是 texts key(參數 {charges} {max} {pips});[until] 達成就換下一步,null = 一直停在這步。 */
@@ -139,7 +167,32 @@ data class GateSpec(
     val slideFrom: String,
 ) : ObjectSpec
 
+/**
+ * 南瓜燈等 power-up(rc.22,marker 必須是 trigger):成員靠近([radius] 內)就讓**全隊** powered [seconds] 秒。
+ * 狀態 ready → taken:[consume] = true 時拿走後變 taken(`states.taken` 的 blocks 把南瓜燈換成空的外觀),
+ * [respawnSeconds] > 0 才會重新變回 ready;[consume] = false 時一直是 ready,拿過之後要隔
+ * max([respawnSeconds], [seconds]) 秒才能再拿(不會站著連續觸發)。
+ */
+data class PowerUpSpec(
+    override val id: String,
+    override val markerId: String,
+    override val stage: String?,
+    override val states: Map<String, StateEffect>,
+    val radius: Double,
+    val seconds: Double,
+    val consume: Boolean,
+    val respawnSeconds: Double,
+    /** powered 開始時在 marker 上播;**持續型 cue 在 powered 結束時一併 cancel**(音樂疊層寫成 loop cue)。 */
+    val startCues: List<String>,
+    /** powered 全部結束時在 marker 上播。 */
+    val endCues: List<String>,
+) : ObjectSpec
+
 object ObjectStates {
+    const val POWER_UP_READY = "ready"
+    const val POWER_UP_TAKEN = "taken"
+    val POWER_UP = listOf(POWER_UP_READY, POWER_UP_TAKEN)
+
     const val LANTERN_UNLIT = "unlit"
     const val LANTERN_BURNING = "burning"
     const val LANTERN_LIT = "lit"
@@ -152,6 +205,7 @@ object ObjectStates {
     fun valid(spec: ObjectSpec): List<String> = when (spec) {
         is LanternSpec -> LANTERN
         is GateSpec -> GATE
+        is PowerUpSpec -> POWER_UP
     }
 }
 
@@ -184,7 +238,7 @@ data class EnemySpec(
     /** BetterModel 模型 id;null = 不綁模型(載體保持可見)。 */
     val model: String?,
     val animations: EnemyAnimations,
-    /** 規則標籤。已實作:needs-flash、seeks-object、harasses-players。保留(接受但不實作):frozen-when-watched、flees-when-powered。 */
+    /** 規則標籤。已實作:needs-flash、seeks-object、harasses-players、frozen-when-watched、chases-players、flees-when-powered。 */
     val rules: Set<String>,
     val health: Double,
     val speed: Double?,
@@ -197,6 +251,102 @@ data class EnemySpec(
     val seeksObject: SeeksObjectSpec? = null,
     /** 規則 harasses-players 的設定;沒有該標籤 = null。 */
     val harassesPlayers: HarassSpec? = null,
+    /** 規則 frozen-when-watched 的設定;沒有該標籤 = null。 */
+    val frozenWhenWatched: FrozenWhenWatchedSpec? = null,
+    /** 規則 chases-players 的設定;沒有該標籤 = null。 */
+    val chasesPlayers: ChasesPlayersSpec? = null,
+    /** 規則 flees-when-powered 的設定;沒有該標籤 = null。 */
+    val fleesWhenPowered: FleesWhenPoweredSpec? = null,
+) {
+    /** 碰到玩家的效果:harasses-players,或 chases-players 內嵌的 contact。 */
+    val contact: HarassSpec? get() = harassesPlayers ?: chasesPlayers?.contact
+
+    /** 一般傷害一律取消(牠只能被閃光打散,或在 powered 時被碰散):needs-flash、frozen-when-watched、chases-players、flees-when-powered。 */
+    val immuneToDamage: Boolean
+        get() = needsFlash != null || frozenWhenWatched != null || chasesPlayers != null || fleesWhenPowered != null
+
+    /** 要進每輪有界掃描的敵人(seeks-object、接觸效果、人偶、追擊)。 */
+    val scanned: Boolean
+        get() = seeksObject != null || contact != null || frozenWhenWatched != null || chasesPlayers != null
+
+    /** 掃描時需要成員快照(位置、朝向、血量)的敵人;只有 seeks-object 的不需要。 */
+    val needsSnapshots: Boolean
+        get() = contact != null || frozenWhenWatched != null || chasesPlayers != null
+
+    /** 這個敵人的移動完全由框架下路徑指令控制(拿掉原版的鎖定目標與移動目標 AI)。 */
+    val frameworkMoves: Boolean
+        get() = seeksObject?.ignoresPlayers == true || frozenWhenWatched != null || chasesPlayers != null
+}
+
+/** frozen-when-watched 的姿勢:[id] 寫進 log,[animation] 是模型動畫名。 */
+data class PoseSpec(val id: String, val animation: String)
+
+/**
+ * 規則 frozen-when-watched(人偶):任一成員的視錐([halfAngle] 半角、[maxDistance] 內)看得到、且(開啟 [occlusion] 時)
+ * 中間沒有方塊擋住,就凍結(停 AI 與路徑)並換成隨機 [poses] 之一;沒人看時朝最近的成員走。
+ * 視錐只算**成員快照的位置與朝向**;遮擋檢查(raytrace 方塊)只對已在視錐與距離內的候選做,且在敵人自己的 region 執行。
+ */
+data class FrozenWhenWatchedSpec(
+    val halfAngle: Double,
+    val maxDistance: Double,
+    val occlusion: Boolean,
+    /** 這個規則希望的掃描週期(tick);整局掃描週期取所有規則的最小值。 */
+    val scanTicks: Int,
+    /** 沒人看時 `Pathfinder.moveTo` 的速度倍率。 */
+    val speed: Double,
+    /** 敵人腳下往上多高算「身體中心」(視錐與遮擋瞄準點)。 */
+    val bodyHeight: Double,
+    val poses: List<PoseSpec>,
+    /** 移動時的模型動畫;null = 沿用 animations.idle。 */
+    val movingAnimation: String?,
+    /** 從凍結轉為移動時,在敵人位置播(喀喀聲)。 */
+    val moveCues: List<String>,
+    /** 從移動轉為凍結時,在敵人位置播。 */
+    val freezeCues: List<String>,
+    /** 兩次 [moveCues] 之間至少隔幾 tick(視線在邊緣來回掃時不連續洗聲)。 */
+    val cueCooldownTicks: Int,
+)
+
+enum class ChaseTarget(val id: String) {
+    NEAREST("nearest"), FARTHEST("farthest"), LOWEST_HEALTH("lowest-health");
+
+    companion object {
+        fun of(id: String): ChaseTarget? = entries.firstOrNull { it.id == id }
+    }
+}
+
+/**
+ * 規則 chases-players(大幽靈):追一位成員。[target] 決定追誰;只考慮 [sightRange] 內的成員,
+ * 已鎖定的目標跑出 [sightRange] 但仍在 [giveUpRange] 內會繼續追,超過就放棄(停下來)。
+ * [contact] 是接觸效果(跟 harasses-players 同一套型別:push、damage…),null = 只追不碰人。
+ */
+data class ChasesPlayersSpec(
+    val speed: Double,
+    val target: ChaseTarget,
+    val sightRange: Double,
+    val giveUpRange: Double,
+    val repathTicks: Int,
+    val contact: HarassSpec?,
+)
+
+/**
+ * 規則 flees-when-powered:有成員 powered 時(power-up 物件觸發),這隻敵人暫停追擊、改成逃離最近的 powered 成員,
+ * 換外觀([animation] 模型動畫與 [poweredCue] 持續 cue),被 powered 成員碰到([touchRadius])就被打散。
+ * powered 結束後恢復原本的追擊。必須同時有 chases-players。
+ */
+data class FleesWhenPoweredSpec(
+    val speed: Double,
+    /** 逃跑目標點離自己多遠(朝遠離成員的方向,被牆擋住會依序試偏轉角度)。 */
+    val fleeDistance: Double,
+    val touchRadius: Double,
+    val repathTicks: Int,
+    /** powered 期間的模型 loop 動畫;null = 不換。 */
+    val animation: String?,
+    /** powered 期間跟著敵人的持續 cue(loop 光效);null = 不放。 */
+    val poweredCue: String?,
+    /** 被碰散時播。 */
+    val dissolveCue: String?,
+    val dissolveTicks: Int,
 )
 
 /**
@@ -255,12 +405,13 @@ object EnemyRules {
     const val SEEKS_OBJECT = "seeks-object"
     const val HARASSES_PLAYERS = "harasses-players"
     const val FROZEN_WHEN_WATCHED = "frozen-when-watched"
+    const val CHASES_PLAYERS = "chases-players"
     const val FLEES_WHEN_POWERED = "flees-when-powered"
 
-    val IMPLEMENTED = setOf(NEEDS_FLASH, SEEKS_OBJECT, HARASSES_PLAYERS)
+    val IMPLEMENTED = setOf(NEEDS_FLASH, SEEKS_OBJECT, HARASSES_PLAYERS, FROZEN_WHEN_WATCHED, CHASES_PLAYERS, FLEES_WHEN_POWERED)
 
-    /** 標籤擴充點:載入器接受(內容可以先寫上),但本版沒有行為。註冊時打 WARN。 */
-    val RESERVED = setOf(FROZEN_WHEN_WATCHED, FLEES_WHEN_POWERED)
+    /** 標籤擴充點:載入器接受(內容可以先寫上),但本版沒有行為。註冊時打 WARN。rc.22 起全部已實作,目前為空。 */
+    val RESERVED: Set<String> = emptySet()
 }
 
 // ---- encounters.yml ----

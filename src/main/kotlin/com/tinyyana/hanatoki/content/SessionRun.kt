@@ -17,6 +17,7 @@ import com.tinyyana.hanatoki.presentation.BossModelHandle
 import com.tinyyana.hanatoki.stage.StageContext
 import com.destroystokyo.paper.entity.ai.GoalType
 import org.bukkit.Bukkit
+import org.bukkit.FluidCollisionMode
 import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.World
@@ -62,6 +63,7 @@ class SessionRun(
     var closed = false
         private set
 
+    @Volatile
     private var now = 0L
     private val timers = TimerQueue()
     private var markers: Map<String, MapMarker> = emptyMap()
@@ -71,6 +73,7 @@ class SessionRun(
     private val gates = LinkedHashMap<String, GateRt>()
     private val encounters = LinkedHashMap<String, EncounterRt>()
     private val enemies = ConcurrentHashMap<String, EnemyRt>()
+    private val powerUps = LinkedHashMap<String, PowerUpRt>()
 
     private var currentStage: StageSpec? = null
     private val completedStages = HashSet<String>()
@@ -109,8 +112,27 @@ class SessionRun(
 
     // 敵人規則 seeks-object／harasses-players:兩者共用同一輪有界掃描。內容沒有任何敵人用到時 scanPeriod = 0,整套不動。
     private val touch = TouchCooldowns()
+    /** chases-players 內嵌的接觸效果自己一份冷卻,不和 harasses-players 共用。 */
+    private val chaseTouch = TouchCooldowns()
     private val scanPeriod: Long = spec.enemies.values
-        .flatMap { listOfNotNull(it.seeksObject?.repathTicks, it.harassesPlayers?.scanTicks) }.minOrNull()?.toLong() ?: 0L
+        .flatMap {
+            listOfNotNull(
+                it.seeksObject?.repathTicks, it.contact?.scanTicks, it.frozenWhenWatched?.scanTicks,
+                it.chasesPlayers?.repathTicks, it.fleesWhenPowered?.repathTicks,
+            )
+        }.minOrNull()?.toLong() ?: 0L
+    private val random = java.util.Random()
+    private var raycastFailureLogged = false
+
+    // powered(power-up 物件觸發的全隊狀態)與最後一段尾聲
+    private val powered = PoweredTracker()
+    private var poweredSource: PowerUpSpec? = null
+    private val poweredCueRuns = ArrayList<CueRun>()
+    /** 給指令執行緒讀的 powered 快照:成員 -> 結束的 tick。 */
+    @Volatile
+    private var poweredView: Map<UUID, Long> = emptyMap()
+    private var poweredOrigin: Location? = null
+    private var epilogueRun: EpilogueRun? = null
     private var scanPending = false
     private var scanAt = 0L
     private var lastScanAt = -1000L
@@ -144,6 +166,19 @@ class SessionRun(
 
     private class GateRt(val spec: GateSpec, val machine: GateMachine, val marker: MapMarker, val loc: Location)
 
+    private class PowerUpRt(val spec: PowerUpSpec, val machine: PowerUpMachine, val marker: MapMarker, val loc: Location) {
+        var probing = false
+        var probeAt = 0L
+    }
+
+    /** 最後一段結算前的尾聲:[token] 每換一步加一,舊步驟的計時與對話回呼靠它失效。 */
+    private class EpilogueRun(val stage: StageSpec, val resolve: ResolveSpec) {
+        val sequence = EpilogueSequence(resolve.epilogue)
+        var token = 0
+        var scheduledToken = -1
+        var wait: DialogWait? = null
+    }
+
     private class EncounterRt(val spec: EncounterSpec) {
         enum class Phase { PENDING, WAITING, SPAWNING, DONE, CANCELLED }
         var phase = Phase.PENDING
@@ -162,6 +197,17 @@ class SessionRun(
         /** seeks-object:上次下尋路指令的 tick;[seekLogged] 讓 enemy-seek log 每隻只打一次。 */
         var lastRepath = -1000L
         @Volatile var seekLogged = false
+        /** frozen-when-watched:凍結旗標、姿勢記憶、聲音冷卻。 */
+        val freeze = FreezeState()
+        /** chases-players:目前鎖定的成員與上次下追擊路徑的 tick。 */
+        var chaseTarget: UUID? = null
+        var lastChase = -1000L
+        /** flees-when-powered:正在逃(換了外觀)與上次下逃跑路徑的 tick。 */
+        var fleeing = false
+        var lastFlee = -1000L
+        /** frozen-when-watched:判定的流水號(較舊的回呼不覆蓋較新的)。 */
+        var scanSeq = 0
+        var verdictSeq = 0
     }
 
     private fun log(event: String, detail: String) {
@@ -245,12 +291,18 @@ class SessionRun(
             when (obj) {
                 is LanternSpec -> lanterns[obj.id] = LanternRt(obj, LanternMachine(obj.burnSeconds * 20.0), m.location(world))
                 is GateSpec -> gates[obj.id] = GateRt(obj, GateMachine(), m, m.location(world))
+                is PowerUpSpec -> powerUps[obj.id] = PowerUpRt(
+                    obj,
+                    PowerUpMachine(obj.consume, (obj.respawnSeconds * 20).toLong(), (obj.seconds * 20).toLong()),
+                    m, m.location(world),
+                )
             }
         }
         for (enc in spec.encounters.values) encounters[enc.id] = EncounterRt(enc)
         // 初始狀態(unlit/closed)的方塊外觀
         for (rt in lanterns.values) rt.spec.states[ObjectStates.LANTERN_UNLIT]?.let { applyBlocks(marker(rt.spec.markerId), it.blocks) }
         for (rt in gates.values) rt.spec.states[ObjectStates.GATE_CLOSED]?.let { applyBlocks(rt.marker, it.blocks) }
+        for (rt in powerUps.values) rt.spec.states[ObjectStates.POWER_UP_READY]?.let { applyBlocks(rt.marker, it.blocks) }
         log("scene-placed", "pieces=${placed.layout.pieces.size} markers=${placed.markers.size} written=${placed.written}")
     }
 
@@ -268,6 +320,7 @@ class SessionRun(
         if (closed) return
         val stage = spec.stage(stageId) ?: run { warn("stage $stageId 不在 stages.yml"); return }
         currentStage = stage
+        clearTransient("stage")
         markProgress()
         objectiveKey = null
         objectiveDirty = false
@@ -322,6 +375,13 @@ class SessionRun(
                 else -> false
             }
         }
+        powerUps[objectId]?.let { rt ->
+            return when (state) {
+                ObjectStates.POWER_UP_READY -> true
+                ObjectStates.POWER_UP_TAKEN -> rt.machine.state == PowerUpMachine.State.TAKEN
+                else -> false
+            }
+        }
         return false
     }
 
@@ -339,11 +399,14 @@ class SessionRun(
         markProgress()
         log("stage-complete", stage.id)
         playEffects(stage.onComplete, stage, "on-complete")
+        if (stage.clearsEnemies) dissolveAllEnemies()
         val next = stage.next
         if (next != null) {
             ctx.transition(next)
+        } else if (stage.resolve != null) {
+            startEpilogue(stage, stage.resolve)
         } else {
-            // 第一段切片到此為止:不結算、不發獎。
+            // 沒有 resolve 開關:切片到此為止,不結算、不發獎(舊行為)。
             log("slice end", stage.id)
         }
     }
@@ -355,6 +418,8 @@ class SessionRun(
         now += TICK_PERIOD
         timers.runDue(now) { warn("計時任務丟出例外:${it.javaClass.simpleName}: ${it.message}") }
         tickLanterns()
+        tickPowerUps()
+        tickPowered()
         tickEnemyRules()
         if (now % 10L == 0L) probeMarkers()
         if (presenceNeeded && now % 10L == 0L) probePresence()
@@ -458,6 +523,7 @@ class SessionRun(
     private fun lanternLit(rt: LanternRt) {
         val spec = rt.spec
         log("object", "${spec.id} burning->lit")
+        log("lantern-lit", spec.id)
         markProgress()
         rt.drainRate = 0.0; rt.drainers = 0
         rt.hold?.cancel(); rt.hold = null
@@ -645,10 +711,12 @@ class SessionRun(
         log("enemy-spawn", "${rt.actorId} enemy=${rt.spec.id} encounter=${rt.encounterId}")
         cues(rt.spec.spawnCues, at, core.actorController.entityOf(sessionId, rt.actorId))
         setMark(rt, rt.spec.needsFlash?.aliveCue)
-        if (rt.spec.seeksObject?.ignoresPlayers == true) {
-            // 啃燈的不理玩家:拿掉原版的鎖定目標與移動目標(近戰、閒晃),之後只聽掃描給的路徑。導航本身仍然會走
+        if (rt.spec.frameworkMoves) {
+            // 啃燈的、人偶、追擊者的移動完全由框架下的路徑指令決定:拿掉原版的鎖定目標與移動目標(近戰、閒晃),
+            // 之後只聽掃描給的路徑。導航本身仍然會走
             ctx.actors().runOnEntity(rt.actorId) { e -> (e as? Mob)?.let { stripPlayerAi(rt, it) } }
         }
+        if (powered.active && rt.spec.fleesWhenPowered != null) setFleeing(rt, true)
         val modelId = rt.spec.model ?: return
         ctx.actors().bindModel(rt.actorId, modelId).whenComplete { handle, _ ->
             ctx.submit {
@@ -661,6 +729,8 @@ class SessionRun(
                         (e as? LivingEntity)?.isInvisible = false
                     }
                 }
+                // 模型綁好前已經凍結或在逃跑(powered 期間生成)就補上對應動畫
+                if (handle != null && (rt.freeze.frozen || rt.fleeing)) syncBody(rt)
                 if (handle == null) warn("敵人 ${rt.actorId} 的模型 $modelId 綁定失敗(BetterModel 缺席或模型不存在),載體保持可見")
             }
         }
@@ -732,6 +802,7 @@ class SessionRun(
             setMark(rt, nf.stunnedCue)
             ctx.actors().runOnEntity(rt.actorId) { e ->
                 (e as? LivingEntity)?.setAI(false)
+                (e as? Mob)?.pathfinder?.stopPathfinding()
                 e.isGlowing = nf.glowOnStun
                 rt.model?.play(rt.spec.animations.stunned, true, null)
             }
@@ -742,33 +813,59 @@ class SessionRun(
     private fun recoverEnemy(rt: EnemyRt, epoch: Int) {
         if (closed || !rt.machine.recover(epoch)) return
         log("enemy-recover", rt.actorId)
-        setMark(rt, rt.spec.needsFlash?.aliveCue)
+        setMark(rt, if (rt.fleeing) rt.spec.fleesWhenPowered?.poweredCue else rt.spec.needsFlash?.aliveCue)
+        // 還被看著(凍結)就留在凍結,不能因為僵直結束就動起來
+        syncBody(rt)
+        ctx.actors().runOnEntity(rt.actorId) { e -> e.isGlowing = false }
+    }
+
+    /**
+     * 敵人的 AI 與模型動畫一律由狀態決定:AI 只在 ALIVE 且沒凍結時開;動畫依序是僵直、凍結姿勢、逃跑、移動、預設。
+     * 僵直結束、逃跑結束、stage 轉換後都走這裡,避免各處各自 setAI(true) 把凍結中的敵人放出來。
+     */
+    private fun syncBody(rt: EnemyRt) {
+        val frozenSpec = rt.spec.frozenWhenWatched
+        val plan = bodyPlan(rt.machine.state, rt.freeze.frozen, rt.fleeing, frozenSpec != null) ?: return
+        val animations = rt.spec.animations
+        val animation = when (plan.anim) {
+            BodyAnim.STUNNED -> animations.stunned
+            BodyAnim.POSE -> frozenSpec?.poses?.getOrNull(rt.freeze.poseIndex)?.animation ?: animations.idle
+            BodyAnim.FLEEING -> rt.spec.fleesWhenPowered?.animation ?: animations.idle
+            BodyAnim.MOVING -> frozenSpec?.movingAnimation ?: animations.idle
+            BodyAnim.IDLE -> animations.idle
+        }
+        val aiOn = plan.aiOn
         ctx.actors().runOnEntity(rt.actorId) { e ->
-            (e as? LivingEntity)?.setAI(true)
-            e.isGlowing = false
-            rt.model?.play(rt.spec.animations.idle, true, null)
+            (e as? LivingEntity)?.setAI(aiOn)
+            if (!aiOn) (e as? Mob)?.pathfinder?.stopPathfinding()
+            rt.model?.play(animation, true, null)
         }
     }
 
     /** 打散。[killer] 非 null 才補燈火(光圈清場不補)。回傳是否真的打散(只會發生一次)。 */
-    private fun dissolve(rt: EnemyRt, killer: UUID?, loc: Location?): Boolean {
+    private fun dissolve(rt: EnemyRt, killer: UUID?, loc: Location?, reversal: Boolean = false): Boolean {
         val nf = rt.spec.needsFlash
+        val flee = rt.spec.fleesWhenPowered
         if (!rt.machine.dissolve()) return false
         val at = loc ?: rt.lastLoc
         log("enemy-dissolve", "${rt.actorId} enemy=${rt.spec.id} by=${killer?.let(::nameOf) ?: "lantern"}")
+        if (rt.spec.frozenWhenWatched != null && killer != null) log("doll-dispersed", "${rt.actorId} by=${nameOf(killer)}")
         markProgress()
         setMark(rt, null)
+        rt.fleeing = false
         if (at != null) {
             rt.lastLoc = at
-            cue(nf?.dissolveCue, at, core.actorController.entityOf(sessionId, rt.actorId))
+            cue(if (reversal) flee?.dissolveCue ?: nf?.dissolveCue else nf?.dissolveCue ?: flee?.dissolveCue, at, core.actorController.entityOf(sessionId, rt.actorId))
         }
         ctx.actors().runOnEntity(rt.actorId) { e ->
             (e as? LivingEntity)?.setAI(false)
             e.isGlowing = false
             rt.model?.play(rt.spec.animations.dissolve, false, null)
         }
-        if (killer != null) refill(killer, nf?.refillCue, at)
-        timers.schedule(now, (nf?.dissolveTicks ?: 12).toLong()) { removeEnemy(rt) }
+        // 閃光打散補燈火;powered 時被碰散不補
+        if (killer != null && !reversal) refill(killer, nf?.refillCue, at)
+        val ticks = if (reversal) flee?.dissolveTicks ?: nf?.dissolveTicks else nf?.dissolveTicks ?: flee?.dissolveTicks
+        timers.schedule(now, (ticks ?: 12).toLong()) { removeEnemy(rt) }
         return true
     }
 
@@ -805,7 +902,7 @@ class SessionRun(
         if (scanPending && now - scanAt <= PROBE_STALE_TICKS) return
         lastScanAt = now
         val candidates = enemies.values
-            .filter { (it.spec.seeksObject != null || it.spec.harassesPlayers != null) && it.machine.state == EnemyMachine.State.ALIVE }
+            .filter { it.spec.scanned && it.machine.state == EnemyMachine.State.ALIVE }
             .take(MAX_SCAN_ENEMIES)
         if (candidates.isEmpty()) { publishDrain(emptyMap()); return }
         scanPending = true
@@ -813,7 +910,7 @@ class SessionRun(
         val startedAt = now
         val locations = candidates.map { rt -> ctx.actors().locationOf(rt.actorId).handle { loc, _ -> rt to loc } }
         val snapshots: CompletableFuture<Map<UUID, DoubleArray>> =
-            if (candidates.any { it.spec.harassesPlayers != null }) ctx.memberSnapshots().handle { m, e -> if (e != null) emptyMap() else m ?: emptyMap() }
+            if (candidates.any { it.spec.needsSnapshots }) ctx.memberSnapshots().handle { m, e -> if (e != null) emptyMap() else m ?: emptyMap() }
             else CompletableFuture.completedFuture(emptyMap())
         CompletableFuture.allOf(snapshots, *locations.toTypedArray()).whenComplete { _, _ ->
             ctx.submit {
@@ -828,11 +925,18 @@ class SessionRun(
     private fun applyEnemyScan(found: List<Pair<EnemyRt, Location?>>, snap: Map<UUID, DoubleArray>) {
         // (燈籠 id, 敵人定義 id) -> 這輪在啃的隻數
         val contest = LinkedHashMap<Pair<String, String>, Int>()
+        val poweredNow = powered.poweredIds(now)
         for ((rt, loc) in found) {
             if (loc == null || loc.world != world || rt.machine.state != EnemyMachine.State.ALIVE) continue
             rt.lastLoc = loc
             rt.spec.seeksObject?.let { seekStep(rt, loc, it, contest) }
-            rt.spec.harassesPlayers?.let { harassStep(rt, loc, it, snap) }
+            // powered 期間:會逃的敵人改逃離 powered 成員(碰到就被打散),不追、不碰人
+            val flee = rt.spec.fleesWhenPowered
+            if (flee != null && poweredNow.isNotEmpty()) { fleeStep(rt, loc, flee, snap, poweredNow); continue }
+            if (rt.fleeing) setFleeing(rt, false)
+            rt.spec.chasesPlayers?.let { chaseStep(rt, loc, it, snap) }
+            rt.spec.frozenWhenWatched?.let { frozenStep(rt, loc, it, snap) }
+            rt.spec.contact?.let { harassStep(rt, loc, it, snap, if (rt.spec.harassesPlayers != null) touch else chaseTouch) }
         }
         publishDrain(contest)
     }
@@ -900,13 +1004,13 @@ class SessionRun(
 
     private fun fmt2(v: Double): String = String.format(java.util.Locale.ROOT, "%.2f", v)
 
-    private fun harassStep(rt: EnemyRt, loc: Location, h: HarassSpec, snap: Map<UUID, DoubleArray>) {
+    private fun harassStep(rt: EnemyRt, loc: Location, h: HarassSpec, snap: Map<UUID, DoubleArray>, cooldowns: TouchCooldowns) {
         if (snap.isEmpty()) return
         val current = members().toSet()
         for ((playerId, pos) in snap) {
             if (playerId !in current) continue
             if (!withinContact(pos[0] - loc.x, pos[1] - loc.y, pos[2] - loc.z, h.contactRadius)) continue
-            if (!touch.tryTouch(playerId, now, h.cooldownTicks)) continue
+            if (!cooldowns.tryTouch(playerId, now, h.cooldownTicks)) continue
             applyHarass(rt, loc, h, playerId, pos)
         }
     }
@@ -942,6 +1046,407 @@ class SessionRun(
         }
         log("enemy-touch", "${rt.actorId} player=${nameOf(playerId)} effect=${if (applied.isEmpty()) "none" else applied.joinToString("+")}")
         cues(h.cues, loc, core.actorController.entityOf(sessionId, rt.actorId))
+    }
+
+    // ---- 敵人規則:frozen-when-watched / chases-players / flees-when-powered ----
+
+    /** 視錐內的成員:眼睛位置與到敵人的距離。 */
+    private class Watcher(val id: UUID, val x: Double, val eyeY: Double, val z: Double, val distance: Double)
+
+    /**
+     * 人偶:有人看著就凍結,沒人看就朝最近的成員走。視錐在 anchor 執行緒用成員快照算(純幾何);
+     * 遮擋(raytrace 方塊)只對已在視錐與距離內的候選、在敵人自己的 region 上算,結果與 AI 開關在同一個回呼裡套用。
+     */
+    private fun frozenStep(rt: EnemyRt, loc: Location, f: FrozenWhenWatchedSpec, snap: Map<UUID, DoubleArray>) {
+        // 成員快照沒回來(失敗或全員不在副本世界)= 不知道有沒有人在看,維持現狀,不能趁這時放開人偶
+        if (snap.isEmpty()) return
+        val current = members().toSet()
+        val cx = loc.x
+        val cy = loc.y + f.bodyHeight
+        val cz = loc.z
+        val watchers = ArrayList<Watcher>()
+        var nearest: DoubleArray? = null
+        var nearestDistance = Double.MAX_VALUE
+        for ((id, pos) in snap) {
+            if (id !in current) continue
+            val d = distance(pos, loc)
+            if (d < nearestDistance) { nearestDistance = d; nearest = pos }
+            val eyeY = pos[1] + eyeHeight(pos[SNEAKING] > 0.5)
+            if (inViewCone(pos[0], eyeY, pos[2], pos[3], pos[4], cx, cy, cz, f.halfAngle, f.maxDistance)) {
+                watchers += Watcher(id, pos[0], eyeY, pos[2], d)
+            }
+        }
+        watchers.sortBy { it.distance }
+        val destination = nearest?.let { Location(world, it[0], it[1], it[2]) }
+        val scanId = ++rt.scanSeq
+        ctx.actors().runOnEntity(rt.actorId) { e ->
+            var watcher: UUID? = null
+            var failed = false
+            if (watchers.isNotEmpty()) {
+                if (!f.occlusion) {
+                    watcher = watchers.first().id
+                } else {
+                    try {
+                        watcher = firstClearWatcher(e, watchers, f.bodyHeight)
+                    } catch (t: Throwable) {
+                        // 射線跨出這個 region 或讀取失敗:寧可當作被看到(凍結),偏向玩家,並留一行 WARN
+                        failed = true
+                        watcher = watchers.first().id
+                    }
+                }
+            }
+            if (rt.machine.state == EnemyMachine.State.ALIVE) {
+                val mob = e as? Mob
+                if (watcher != null) {
+                    (e as? LivingEntity)?.setAI(false)
+                    mob?.pathfinder?.stopPathfinding()
+                } else {
+                    (e as? LivingEntity)?.setAI(true)
+                    if (destination != null) mob?.pathfinder?.moveTo(destination, f.speed) else mob?.pathfinder?.stopPathfinding()
+                }
+            }
+            val verdict = watcher
+            val raycastFailed = failed
+            ctx.submit { onWatchVerdict(rt, scanId, verdict, raycastFailed, f) }
+        }
+    }
+
+    /** 在敵人自己的執行緒上:第一個「視線沒有被方塊擋住」的候選(依距離由近到遠)。跨出本 region 的射線丟例外,由呼叫端當作被看到。 */
+    private fun firstClearWatcher(e: Entity, watchers: List<Watcher>, bodyHeight: Double): UUID? {
+        val here = e.location
+        val w = e.world
+        val tx = here.x
+        val ty = here.y + bodyHeight
+        val tz = here.z
+        for (cand in watchers) {
+            val dx = tx - cand.x
+            val dy = ty - cand.eyeY
+            val dz = tz - cand.z
+            val length = Math.sqrt(dx * dx + dy * dy + dz * dz)
+            if (length < 0.8) return cand.id
+            val minX = Math.floor(minOf(cand.x, tx)).toInt() shr 4
+            val maxX = Math.floor(maxOf(cand.x, tx)).toInt() shr 4
+            val minZ = Math.floor(minOf(cand.z, tz)).toInt() shr 4
+            val maxZ = Math.floor(maxOf(cand.z, tz)).toInt() shr 4
+            check(Bukkit.isOwnedByCurrentRegion(w, minX, minZ, maxX, maxZ)) { "射線跨出這個 region" }
+            val hit = w.rayTraceBlocks(
+                Location(w, cand.x, cand.eyeY, cand.z), Vector(dx / length, dy / length, dz / length), length - 0.3,
+                FluidCollisionMode.NEVER, true,
+            )
+            if (hit == null) return cand.id
+        }
+        return null
+    }
+
+    /** anchor 執行緒:套用人偶這一輪的判定結果,狀態轉換才打 log／播 cue／換姿勢。 */
+    private fun onWatchVerdict(rt: EnemyRt, scanId: Int, watcher: UUID?, raycastFailed: Boolean, f: FrozenWhenWatchedSpec) {
+        if (closed || scanId <= rt.verdictSeq || rt.machine.state != EnemyMachine.State.ALIVE) return
+        rt.verdictSeq = scanId
+        if (raycastFailed && !raycastFailureLogged) {
+            raycastFailureLogged = true
+            warn("人偶 ${rt.actorId} 的遮擋檢查失敗(射線跨出敵人所在的 region 或讀取失敗),這種情況一律當作被看到")
+        }
+        val entity = core.actorController.entityOf(sessionId, rt.actorId)
+        val at = rt.lastLoc
+        when (rt.freeze.update(watcher != null)) {
+            FreezeState.Change.FROZE -> {
+                val index = rt.freeze.pickPose(f.poses.size, random)
+                log("doll-frozen", "${rt.actorId} watcher=${nameOf(watcher!!)}")
+                log("doll-pose", "${rt.actorId} pose=${f.poses.getOrNull(index)?.id ?: "none"}")
+                if (at != null) cues(f.freezeCues, at, entity)
+                syncBody(rt)
+            }
+            FreezeState.Change.MOVED -> {
+                // 喀喀聲播在人偶身上(follow 實體),才聽得出從哪個方向過來
+                if (at != null && rt.freeze.moveCueDue(now, f.cueCooldownTicks)) cues(f.moveCues, at, entity)
+                syncBody(rt)
+            }
+            FreezeState.Change.NONE -> {}
+        }
+    }
+
+    /** 大幽靈:挑目標、朝目標走;沒有目標(超出索敵與放棄距離)就停下。 */
+    private fun chaseStep(rt: EnemyRt, loc: Location, c: ChasesPlayersSpec, snap: Map<UUID, DoubleArray>) {
+        if (now - rt.lastChase < c.repathTicks) return
+        rt.lastChase = now
+        val current = members().toSet()
+        val candidates = snap.filter { it.key in current }.map { (id, pos) -> ChaseCandidate(id, distance(pos, loc), pos[HEALTH]) }
+        val target = pickChaseTarget(candidates, c.target, c.sightRange, c.giveUpRange, rt.chaseTarget)
+        if (target != rt.chaseTarget) {
+            rt.chaseTarget = target
+            log("enemy-chase", "${rt.actorId} target=${target?.let(::nameOf) ?: "none"}")
+        }
+        val pos = target?.let { snap[it] }
+        val destination = pos?.let { Location(world, it[0], it[1], it[2]) }
+        ctx.actors().runOnEntity(rt.actorId) { e ->
+            val mob = e as? Mob ?: return@runOnEntity
+            mob.target = null
+            if (destination != null) mob.pathfinder.moveTo(destination, c.speed) else mob.pathfinder.stopPathfinding()
+        }
+    }
+
+    /** powered 期間的逃跑:碰到 powered 成員就被打散(先判定,優先於任何傷害效果),否則朝遠離最近 powered 成員的方向跑。 */
+    private fun fleeStep(rt: EnemyRt, loc: Location, flee: FleesWhenPoweredSpec, snap: Map<UUID, DoubleArray>, poweredIds: Set<UUID>) {
+        val current = members().toSet()
+        var threat: DoubleArray? = null
+        var best = Double.MAX_VALUE
+        for ((id, pos) in snap) {
+            if (id !in current || id !in poweredIds) continue
+            if (withinContact(pos[0] - loc.x, pos[1] - loc.y, pos[2] - loc.z, flee.touchRadius)) {
+                log("powered-reversal", "${rt.actorId} by=${nameOf(id)}")
+                dissolve(rt, id, loc, reversal = true)
+                return
+            }
+            val d = distance(pos, loc)
+            if (d < best) { best = d; threat = pos }
+        }
+        if (!rt.fleeing) setFleeing(rt, true)
+        val away = threat ?: return
+        if (now - rt.lastFlee < flee.repathTicks) return
+        rt.lastFlee = now
+        ctx.actors().runOnEntity(rt.actorId) { e ->
+            val mob = e as? Mob ?: return@runOnEntity
+            mob.target = null
+            for (angle in FLEE_ANGLES) {
+                val point = fleePoint(loc.x, loc.z, away[0], away[2], flee.fleeDistance, angle)
+                if (mob.pathfinder.moveTo(Location(world, point[0], loc.y, point[1]), flee.speed)) break
+            }
+        }
+    }
+
+    /** 進出逃跑外觀(模型動畫與持續 cue)。僵直中只記旗標,恢復時由 [recoverEnemy] 套回去。 */
+    private fun setFleeing(rt: EnemyRt, on: Boolean) {
+        val flee = rt.spec.fleesWhenPowered ?: return
+        if (rt.fleeing == on) return
+        rt.fleeing = on
+        rt.lastFlee = -1000L
+        val state = rt.machine.state
+        if (state == EnemyMachine.State.ALIVE) setMark(rt, if (on) flee.poweredCue else rt.spec.needsFlash?.aliveCue)
+        if (state == EnemyMachine.State.ALIVE || state == EnemyMachine.State.STUNNED) syncBody(rt)
+    }
+
+    // ---- power-up 物件與 powered ----
+
+    private fun tickPowerUps() {
+        if (powerUps.isEmpty()) return
+        for (rt in powerUps.values) {
+            if (rt.machine.tryRespawn(now)) {
+                log("power-up", "${rt.spec.id} taken->ready")
+                rt.spec.states[ObjectStates.POWER_UP_READY]?.let {
+                    cues(it.cues, rt.loc)
+                    applyBlocks(rt.marker, it.blocks)
+                }
+            }
+            if (now % 4L != 0L || !stageActive(rt.spec.stage) || !rt.machine.canTake(now)) continue
+            if (rt.probing && now - rt.probeAt <= PROBE_STALE_TICKS) continue
+            rt.probing = true
+            rt.probeAt = now
+            val startedAt = now
+            ctx.membersWithin(rt.loc, rt.spec.radius).whenComplete { list, _ ->
+                ctx.submit {
+                    if (rt.probeAt != startedAt) return@submit
+                    rt.probing = false
+                    if (closed || list.isNullOrEmpty() || !stageActive(rt.spec.stage)) return@submit
+                    if (rt.machine.take(now)) pickUp(rt, list.first())
+                }
+            }
+        }
+    }
+
+    private fun pickUp(rt: PowerUpRt, picker: UUID) {
+        val spec = rt.spec
+        log("power-up-taken", "${spec.id} player=${nameOf(picker)}")
+        markProgress()
+        if (spec.consume) {
+            spec.states[ObjectStates.POWER_UP_TAKEN]?.let {
+                cues(it.cues, rt.loc)
+                applyBlocks(rt.marker, it.blocks)
+            }
+        }
+        grantPower(spec, rt.loc)
+    }
+
+    /** 全隊 powered。再吃一次把結束時間刷新成較晚的那個(不疊加)、持續 cue 收掉重播。 */
+    private fun grantPower(spec: PowerUpSpec, origin: Location) {
+        val count = powered.grant(members(), now, (spec.seconds * 20).toLong())
+        if (count == 0) return
+        poweredSource = spec
+        poweredOrigin = origin
+        cancelPoweredCues()
+        for (id in spec.startCues) cue(id, origin)?.let { poweredCueRuns += it }
+        publishPowered()
+        log("powered-start", "players=$count seconds=${fmtSeconds(spec.seconds)}")
+        for (rt in enemies.values) if (rt.spec.fleesWhenPowered != null) setFleeing(rt, true)
+    }
+
+    private fun fmtSeconds(seconds: Double): String =
+        if (seconds == Math.rint(seconds)) seconds.toInt().toString() else String.format(java.util.Locale.ROOT, "%.1f", seconds)
+
+    private fun cancelPoweredCues() {
+        poweredCueRuns.forEach { run -> try { run.cancel() } catch (t: Throwable) { warn("powered cue 取消失敗:${t.message}") } }
+        poweredCueRuns.clear()
+    }
+
+    private fun publishPowered() {
+        poweredView = powered.poweredIds(now).associateWith { id -> now + powered.remainingTicks(id, now) }
+    }
+
+    private fun tickPowered() {
+        if (!powered.active) return
+        if (powered.expire(now).isEmpty()) return
+        publishPowered()
+        if (!powered.active) endPowered("expired")
+    }
+
+    /** powered 全部結束(或被清掉):收持續 cue、敵人恢復追擊外觀;只有自然到期才播結束 cue。 */
+    private fun endPowered(reason: String) {
+        cancelPoweredCues()
+        val source = poweredSource
+        val origin = poweredOrigin
+        poweredSource = null
+        poweredOrigin = null
+        powered.clear()
+        poweredView = emptyMap()
+        for (rt in enemies.values) if (rt.fleeing) setFleeing(rt, false)
+        log("powered-end", "reason=$reason")
+        if (reason == "expired" && source != null && origin != null) cues(source.endCues, origin)
+    }
+
+    /** stage 轉換:powered、凍結旗標、追擊目標、逃跑外觀全部清掉(敵人本身不動,下一輪掃描重新判定)。 */
+    private fun clearTransient(reason: String) {
+        if (powered.active) endPowered(reason)
+        for (rt in enemies.values) {
+            val wasFrozen = rt.freeze.frozen
+            rt.freeze.reset()
+            rt.chaseTarget = null
+            rt.lastChase = -1000L
+            rt.lastFlee = -1000L
+            if (rt.fleeing) setFleeing(rt, false) else if (wasFrozen) syncBody(rt)
+        }
+    }
+
+    /** stage 設了 clears-enemies:完成時場上剩下的敵人全部打散(不補燈火)。 */
+    private fun dissolveAllEnemies() {
+        val victims = enemies.values.filter { it.machine.state == EnemyMachine.State.ALIVE || it.machine.stunned }
+        if (victims.isEmpty()) return
+        val futures = victims.map { rt -> ctx.actors().locationOf(rt.actorId).handle { loc, _ -> rt to loc } }
+        CompletableFuture.allOf(*futures.toTypedArray()).whenComplete { _, _ ->
+            ctx.submit {
+                var cleared = 0
+                for (f in futures) {
+                    val (rt, loc) = f.getNow(null) ?: continue
+                    if (dissolve(rt, null, loc)) cleared++
+                }
+                log("enemies-cleared", "stage-complete count=$cleared")
+            }
+        }
+    }
+
+    // ---- 最後一段:尾聲 → resolve ----
+
+    private fun startEpilogue(stage: StageSpec, resolve: ResolveSpec) {
+        if (epilogueRun != null) return
+        val ep = EpilogueRun(stage, resolve)
+        epilogueRun = ep
+        log("epilogue-start", "stage=${stage.id} steps=${resolve.epilogue.size}")
+        runEpilogueStep(ep)
+    }
+
+    private fun runEpilogueStep(ep: EpilogueRun) {
+        if (closed || epilogueRun !== ep) return
+        val step = ep.sequence.current()
+        if (step == null) { finishEpilogue(ep); return }
+        val token = ++ep.token
+        ep.wait = null
+        step.cue?.let { id -> cue(id, step.marker?.let { marker(it).location(world) } ?: entryLocation()) }
+        val waitTicks = (step.waitSeconds * 20).toLong()
+        val dialogId = step.dialog
+        if (dialogId == null) { scheduleEpilogueAdvance(ep, token, waitTicks); return }
+        val port: DialogPort = runtime.dialogPort() ?: run { noteNoPort("DialogPort"); scheduleEpilogueAdvance(ep, token, waitTicks); return }
+        val ids = members()
+        if (ids.isEmpty()) { scheduleEpilogueAdvance(ep, token, waitTicks); return }
+        ep.wait = DialogWait(ids)
+        for (playerId in ids) {
+            ctx.runOnMember(playerId) { player ->
+                try {
+                    port.open(player, spec.namespace, dialogId, IntConsumer { choice ->
+                        log("dialog", "$dialogId (epilogue/${ep.stage.id}) player=${nameOf(playerId)} choice=$choice")
+                        ctx.submit { onEpilogueDialogDone(ep, token, playerId) }
+                    })
+                } catch (t: Throwable) {
+                    warn("尾聲 dialog $dialogId 開啟失敗:${t.javaClass.simpleName}: ${t.message}")
+                    ctx.submit { onEpilogueDialogDone(ep, token, playerId) }
+                }
+            }
+        }
+        // 有人一直不按(斷線、關掉對話)也不能卡住結算
+        timers.schedule(now, (ep.resolve.dialogTimeoutSeconds * 20).toLong()) {
+            if (!closed && epilogueRun === ep && ep.token == token && ep.wait != null) {
+                log("epilogue-dialog-timeout", "stage=${ep.stage.id} dialog=$dialogId waiting=${ep.wait?.size ?: 0}")
+                ep.wait = null
+                scheduleEpilogueAdvance(ep, token, waitTicks)
+            }
+        }
+    }
+
+    private fun onEpilogueDialogDone(ep: EpilogueRun, token: Int, playerId: UUID) {
+        if (closed || epilogueRun !== ep || ep.token != token) return
+        ep.wait?.done(playerId)
+        checkDialogDone(ep)
+    }
+
+    /** 對話步驟:名單清空(全選完或離場)就等 wait-seconds 後進下一步。 */
+    private fun checkDialogDone(ep: EpilogueRun) {
+        val wait = ep.wait ?: return
+        if (!wait.complete) return
+        ep.wait = null
+        scheduleEpilogueAdvance(ep, ep.token, ((ep.sequence.current()?.waitSeconds ?: 0.0) * 20).toLong())
+    }
+
+    private fun scheduleEpilogueAdvance(ep: EpilogueRun, token: Int, delayTicks: Long) {
+        if (ep.scheduledToken == token) return
+        ep.scheduledToken = token
+        timers.schedule(now, delayTicks) {
+            if (!closed && epilogueRun === ep && ep.token == token) {
+                ep.sequence.advance()
+                runEpilogueStep(ep)
+            }
+        }
+    }
+
+    private fun finishEpilogue(ep: EpilogueRun) {
+        epilogueRun = null
+        markProgress()
+        log("epilogue-done", "stage=${ep.stage.id}")
+        val key = ep.resolve.result
+        log("resolve", "stage=${ep.stage.id} result=$key")
+        ctx.resolve(key)
+    }
+
+    // ---- 給指令用的現況(debug)----
+
+    /** 在 anchor 執行緒組好這一局的內容執行期現況再交給 [consumer];指令執行緒不直接讀可變狀態。 */
+    fun describe(consumer: java.util.function.Consumer<List<String>>) {
+        ctx.submit { consumer.accept(describeNow()) }
+    }
+
+    private fun describeNow(): List<String> {
+        val lines = ArrayList<String>()
+        val all = enemies.values.toList()
+        fun count(state: EnemyMachine.State) = all.count { it.machine.state == state }
+        lines += "stage=${currentStage?.id ?: "none"} tick=$now closed=$closed"
+        lines += "敵人 ${all.size}(alive=${count(EnemyMachine.State.ALIVE)} stunned=${count(EnemyMachine.State.STUNNED)} " +
+            "dissolving=${count(EnemyMachine.State.DISSOLVING)}) 凍結=${all.count { it.freeze.frozen }} " +
+            "追擊中=${all.count { it.chaseTarget != null }} 逃跑中=${all.count { it.fleeing }} 模型=${all.count { it.model?.isActive == true }}"
+        val byKind = all.groupingBy { it.spec.id }.eachCount()
+        if (byKind.isNotEmpty()) lines += "  " + byKind.entries.joinToString(", ") { "${it.key}=${it.value}" }
+        val poweredNow = powered.poweredIds(now)
+        lines += if (poweredNow.isEmpty()) "powered: 無" else
+            "powered: " + poweredNow.joinToString(", ") { "${nameOf(it)}(${String.format(java.util.Locale.ROOT, "%.1f", powered.remainingTicks(it, now) / 20.0)}s)" }
+        if (powerUps.isNotEmpty()) lines += "power-up: " + powerUps.values.joinToString(", ") { "${it.spec.id}=${it.machine.state.name.lowercase()}" }
+        epilogueRun?.let { lines += "尾聲: 第 ${it.sequence.position + 1}/${it.resolve.epilogue.size} 步" }
+        lines += "cueRuns=${cueRuns.size} timers=${timers.size}"
+        return lines
     }
 
     // ---- 局內道具 ----
@@ -990,6 +1495,13 @@ class SessionRun(
 
     fun onMemberLeft(playerId: UUID) {
         touch.forget(playerId)
+        chaseTouch.forget(playerId)
+        for (rt in enemies.values) if (rt.chaseTarget == playerId) rt.chaseTarget = null
+        if (powered.remove(playerId)) {
+            publishPowered()
+            if (!powered.active) endPowered("members-left")
+        }
+        epilogueRun?.let { run -> run.wait?.remove(playerId); checkDialogDone(run) }
         charges.remove(playerId)
         meters.remove(playerId)
         lastFlash.remove(playerId)
@@ -1292,11 +1804,17 @@ class SessionRun(
     // ---- 收尾 ----
 
     /** 局結束:取消所有 CueRun 與排程、停掉 mutator。場地回滾由引擎在這之後做。 */
-    fun close() {
+    fun close(reason: String = "closed") {
         if (closed) return
         closed = true
         timers.clear()
         touch.clear()
+        chaseTouch.clear()
+        powered.clear()
+        poweredView = emptyMap()
+        poweredSource = null
+        poweredCueRuns.clear()
+        epilogueRun = null
         lanterns.values.forEach { it.hold?.cancel(); it.hold = null }
         lanternHintRuns.clear()
         while (true) {
@@ -1304,7 +1822,7 @@ class SessionRun(
             try { run.cancel() } catch (t: Throwable) { warn("CueRun.cancel 失敗:${t.message}") }
         }
         enemies.clear()
-        log("session-end", "cancelledCues=done")
+        log("session-end", "$reason cancelledCues=done")
     }
 
     private companion object {
@@ -1314,6 +1832,8 @@ class SessionRun(
         const val HELD_SLOT = 9
         /** [StageContext.MEMBER_SNAPSHOT_FIELDS] 的 health 欄位。 */
         const val HEALTH = 5
+        /** [StageContext.MEMBER_SNAPSHOT_FIELDS] 的 sneaking 欄位。 */
+        const val SNEAKING = 8
         /** 敵人規則掃描單輪上限,以及啃燈判定允許的高度差、啃燈速率過期時間。 */
         const val MAX_SCAN_ENEMIES = 24
         const val CONTEST_HEIGHT = 3.0

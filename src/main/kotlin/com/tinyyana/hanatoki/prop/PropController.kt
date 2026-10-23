@@ -40,6 +40,18 @@ class PropController(private val plugin: Plugin, private val sessionActive: java
         CompletableFuture.allOf(*futures.toTypedArray())
     }
 
+    /** 每個 session 目前登記的擺設數(admin entities 用)。 */
+    fun countsBySession(): Map<UUID, Int> {
+        val out = HashMap<UUID, Int>()
+        for (k in props.keys) {
+            val sep = k.indexOf('#')
+            if (sep <= 0) continue
+            val id = runCatching { UUID.fromString(k.substring(0, sep)) }.getOrNull() ?: continue
+            out.merge(id, 1, Int::plus)
+        }
+        return out
+    }
+
     /** 擺設是不是副本生出來的(死亡掉落清除/debug 反查用,同 actor/encounter)。 */
     fun isTracked(entityId: UUID): Boolean = props.values.any { it.uniqueId == entityId }
 

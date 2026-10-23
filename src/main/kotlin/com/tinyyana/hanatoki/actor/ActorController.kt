@@ -52,6 +52,18 @@ class ActorController(private val plugin: Plugin, private val sessionActive: jav
         CompletableFuture.allOf(*futures.toTypedArray())
     }
 
+    /** 每個 session 目前登記的 actor 數(admin entities 用;session 已結束但還有 actor = 外洩)。 */
+    fun countsBySession(): Map<UUID, Int> {
+        val out = HashMap<UUID, Int>()
+        for (k in actors.keys) {
+            val sep = k.indexOf('#')
+            if (sep <= 0) continue
+            val id = runCatching { UUID.fromString(k.substring(0, sep)) }.getOrNull() ?: continue
+            out.merge(id, 1, Int::plus)
+        }
+        return out
+    }
+
     /** 某個 actor 目前綁定的實體(給 cue 的 follow 參數用,呼叫端不得在非所屬 region 上碰它)。 */
     fun entityOf(sessionId: UUID, actorId: String): Entity? = actors[key(sessionId, actorId)]
 

@@ -276,7 +276,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         val block = root.child("stages", required = true) ?: return emptyList()
         val out = ArrayList<StageSpec>()
         for ((id, node) in block.entries()) {
-            node.only(setOf("on-start", "complete", "on-complete", "next", "objective", "objective-done", "objective-every-seconds"))
+            node.only(setOf("on-start", "complete", "on-complete", "next", "objective", "objective-done", "objective-every-seconds", "clears-enemies", "resolve"))
             val onStart = parseStageEffects(node.child("on-start"))
             val onComplete = parseStageEffects(node.child("on-complete"))
             val complete = node.mapList("complete").mapNotNull { parseCondition(it) }
@@ -287,7 +287,13 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
             if (objective.isEmpty() && (done != null || node.map["objective-every-seconds"] != null)) {
                 node.err("objective", "有 objective-done 或 objective-every-seconds 就必須寫 objective")
             }
-            out += StageSpec(id, onStart, complete, onComplete, next, objective, done, every)
+            val clears = node.bool("clears-enemies") ?: false
+            val resolve = parseResolve(node)
+            if (resolve != null) {
+                if (next != null) node.err("resolve", "只有最後一段(沒有 next)才能結算;這個 stage 有 next=$next")
+                if (complete.isEmpty()) node.err("resolve", "有 resolve 的 stage 必須寫 complete(沒有完成條件就永遠不會結算)")
+            }
+            out += StageSpec(id, onStart, complete, onComplete, next, objective, done, every, clears, resolve)
         }
         if (out.isEmpty() && block.map.isEmpty()) block.err(null, "至少要有一個 stage")
         return out
@@ -307,6 +313,32 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         }
         val text = node.str("objective") ?: return emptyList()
         return listOf(ObjectiveStep(text, null))
+    }
+
+    /**
+     * `resolve: true`(結算 key 預設 cleared、沒有尾聲)或
+     * `resolve: { result: cleared, dialog-timeout-seconds: 120, epilogue: [{ cue, dialog, wait-seconds, marker }, …] }`。
+     */
+    private fun parseResolve(stage: Node): ResolveSpec? {
+        val raw = stage.map["resolve"] ?: return null
+        if (raw == false) return null
+        if (raw == true) return ResolveSpec(DEFAULT_RESOLVE_KEY, emptyList(), DEFAULT_DIALOG_TIMEOUT)
+        val n = stage.child("resolve") ?: return null
+        n.only(setOf("result", "epilogue", "dialog-timeout-seconds"))
+        val result = n.id("result") ?: DEFAULT_RESOLVE_KEY
+        val timeout = n.num("dialog-timeout-seconds", min = 1.0, max = 600.0) ?: DEFAULT_DIALOG_TIMEOUT
+        val steps = n.mapList("epilogue").map { step ->
+            step.only(setOf("cue", "dialog", "wait-seconds", "marker"))
+            val cue = step.id("cue")
+            val dialog = step.id("dialog")
+            val wait = step.num("wait-seconds", min = 0.0, max = 300.0)
+            if (cue != null && dialog != null) step.err(null, "一步只能有 cue 或 dialog 其中一個(要同時播就拆成兩步)")
+            if (cue == null && dialog == null && wait == null) step.err(null, "一步至少要有 cue、dialog 或 wait-seconds")
+            if (dialog != null && step.map["marker"] != null) step.err("marker", "dialog 步驟沒有原點,不需要 marker")
+            EpilogueStep(cue, dialog, wait ?: 0.0, step.id("marker"))
+        }
+        if (n.map["epilogue"] != null && steps.isEmpty()) n.err("epilogue", "清單不可為空(不要尾聲就整個拿掉)")
+        return ResolveSpec(result, steps, timeout)
     }
 
     private fun parseStageEffects(node: Node?): StageEffects {
@@ -379,7 +411,8 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                 null -> null
                 "lantern" -> parseLantern(id, node)
                 "gate" -> parseGate(id, node)
-                else -> { node.err("type", "未知的物件類型「$type」(可用:lantern、gate)"); null }
+                "power-up" -> parsePowerUp(id, node)
+                else -> { node.err("type", "未知的物件類型「$type」(可用:lantern、gate、power-up)"); null }
             }
             if (spec != null) out[id] = spec
         }
@@ -483,6 +516,20 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         )
     }
 
+    private fun parsePowerUp(id: String, node: Node): PowerUpSpec? {
+        node.only(
+            setOf("type", "marker", "stage", "states", "radius", "seconds", "consume", "respawn-seconds", "start-cues", "end-cues"),
+        )
+        val marker = node.id("marker", required = true)
+        val radius = node.num("radius", min = 0.5, max = 8.0) ?: 1.5
+        val seconds = node.num("seconds", min = 1.0, max = 120.0, required = true)
+        val consume = node.bool("consume") ?: true
+        val respawn = node.num("respawn-seconds", min = 0.0, max = 3600.0) ?: 0.0
+        val states = parseStates(node, ObjectStates.POWER_UP)
+        if (marker == null || seconds == null) return null
+        return PowerUpSpec(id, marker, node.id("stage"), states, radius, seconds, consume, respawn, node.idList("start-cues"), node.idList("end-cues"))
+    }
+
     private fun parseGate(id: String, node: Node): GateSpec? {
         node.only(setOf("type", "marker", "stage", "states", "column-ticks", "slide-from"))
         val marker = node.id("marker", required = true)
@@ -502,7 +549,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
             node.only(
                 setOf(
                     "base-entity", "model", "animations", "rules", "health", "speed", "damage", "scale", "by-players", "spawn-cues",
-                    "needs-flash", "seeks-object", "harasses-players",
+                    "needs-flash", "seeks-object", "harasses-players", "frozen-when-watched", "chases-players", "flees-when-powered",
                 ),
             )
             val base = node.str("base-entity", required = true)?.uppercase()
@@ -566,10 +613,30 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                 if (node.map["harasses-players"] != null) node.err("harasses-players", "這個敵人沒有 harasses-players 規則標籤,不應有這個區塊")
                 null
             }
+            val frozen = if (EnemyRules.FROZEN_WHEN_WATCHED in rules) parseFrozen(node) else {
+                if (node.map["frozen-when-watched"] != null) node.err("frozen-when-watched", "這個敵人沒有 frozen-when-watched 規則標籤,不應有這個區塊")
+                null
+            }
+            val chase = if (EnemyRules.CHASES_PLAYERS in rules) parseChase(node) else {
+                if (node.map["chases-players"] != null) node.err("chases-players", "這個敵人沒有 chases-players 規則標籤,不應有這個區塊")
+                null
+            }
+            val flee = if (EnemyRules.FLEES_WHEN_POWERED in rules) parseFlee(node) else {
+                if (node.map["flees-when-powered"] != null) node.err("flees-when-powered", "這個敵人沒有 flees-when-powered 規則標籤,不應有這個區塊")
+                null
+            }
+            val movers = listOf(EnemyRules.SEEKS_OBJECT, EnemyRules.FROZEN_WHEN_WATCHED, EnemyRules.CHASES_PLAYERS).filter { it in rules }
+            if (movers.size > 1) node.err("rules", "移動規則 ${movers.joinToString()} 每個敵人只能掛一個(它們都控制路徑)")
+            if (EnemyRules.FLEES_WHEN_POWERED in rules && EnemyRules.CHASES_PLAYERS !in rules) {
+                node.err("rules", "flees-when-powered 必須和 chases-players 一起用(powered 結束要恢復追擊)")
+            }
+            if (chase?.contact != null && harass != null) {
+                node.err("chases-players", "已經有 harasses-players,chases-players 不能再寫 contact(接觸效果只能一組)")
+            }
             if (base != null && health != null) {
                 out[id] = EnemySpec(
                     id, base, node.str("model"), animations, rules, health, speed, damage, scale, byPlayers,
-                    node.idList("spawn-cues"), flash, seeks, harass,
+                    node.idList("spawn-cues"), flash, seeks, harass, frozen, chase, flee,
                 )
             }
         }
@@ -603,6 +670,11 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
     private fun parseHarass(enemy: Node): HarassSpec? {
         val n = enemy.child("harasses-players")
         if (n == null) { enemy.err("harasses-players", "規則 harasses-players 需要這個區塊(contact-radius、effects…)"); return null }
+        return parseHarassFields(n)
+    }
+
+    /** harasses-players 區塊與 chases-players.contact 共用的欄位解析。 */
+    private fun parseHarassFields(n: Node): HarassSpec? {
         n.only(setOf("contact-radius", "cooldown-ticks", "scan-ticks", "effects", "cues", "suppress-melee"))
         val radius = n.num("contact-radius", min = 0.5, max = 8.0, required = true)
         val cooldown = n.int("cooldown-ticks", min = 0, max = 1200) ?: 40
@@ -639,6 +711,89 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         if (n.map["effects"] == null || effects.isEmpty()) n.err("effects", "至少要有一個效果")
         if (radius == null || effects.isEmpty()) return null
         return HarassSpec(radius, cooldown, scan, effects, n.idList("cues"), n.bool("suppress-melee") ?: false)
+    }
+
+    private fun parseFrozen(enemy: Node): FrozenWhenWatchedSpec? {
+        val n = enemy.child("frozen-when-watched")
+        if (n == null) { enemy.err("frozen-when-watched", "規則 frozen-when-watched 需要這個區塊(可以寫空的 {} 用預設值)"); return null }
+        n.only(
+            setOf(
+                "half-angle", "max-distance", "occlusion", "scan-ticks", "speed", "body-height", "poses", "moving-animation",
+                "move-cues", "freeze-cues", "cue-cooldown-ticks",
+            ),
+        )
+        return FrozenWhenWatchedSpec(
+            halfAngle = n.num("half-angle", min = 5.0, max = 90.0) ?: 55.0,
+            maxDistance = n.num("max-distance", min = 2.0, max = 64.0) ?: 24.0,
+            occlusion = n.bool("occlusion") ?: true,
+            scanTicks = n.int("scan-ticks", min = MIN_FROZEN_SCAN_TICKS, max = MAX_SCAN_TICKS) ?: 4,
+            speed = n.num("speed", min = 0.1, max = 3.0) ?: 1.0,
+            bodyHeight = n.num("body-height", min = 0.0, max = 4.0) ?: 1.0,
+            poses = parsePoses(n),
+            movingAnimation = n.str("moving-animation"),
+            moveCues = n.idList("move-cues"),
+            freezeCues = n.idList("freeze-cues"),
+            cueCooldownTicks = n.int("cue-cooldown-ticks", min = 0, max = 400) ?: 6,
+        )
+    }
+
+    /** `poses: [tilt_head, reach]`(姿勢 id = 模型動畫名)或 `poses: { tilt_head: pose_tilt, reach: pose_reach }`(id → 動畫名)。沒寫 = 預設四種。 */
+    private fun parsePoses(n: Node): List<PoseSpec> {
+        val raw = n.map["poses"] ?: return DEFAULT_POSES
+        val out = ArrayList<PoseSpec>()
+        if (raw is Map<*, *>) {
+            for ((k, v) in raw) {
+                val id = k.toString()
+                val animation = v?.toString()
+                if (!ContentIds.valid(id)) n.err("poses", "姿勢 ID「$id」不合法:${ContentIds.RULE}")
+                else if (v is Map<*, *> || v is List<*> || animation.isNullOrBlank()) n.err("poses", "姿勢「$id」的動畫名必須是文字")
+                else out += PoseSpec(id, animation)
+            }
+        } else {
+            n.idList("poses").forEach { out += PoseSpec(it, it) }
+        }
+        if (out.isEmpty()) n.err("poses", "至少要有一種姿勢(不寫這個欄位就用預設四種)")
+        val dup = out.groupBy { it.id }.filterValues { it.size > 1 }.keys
+        if (dup.isNotEmpty()) n.err("poses", "姿勢 ID 重複:${dup.joinToString()}")
+        return out
+    }
+
+    private fun parseChase(enemy: Node): ChasesPlayersSpec? {
+        val n = enemy.child("chases-players")
+        if (n == null) { enemy.err("chases-players", "規則 chases-players 需要這個區塊(可以寫空的 {} 用預設值)"); return null }
+        n.only(setOf("speed", "target", "sight-range", "give-up-range", "repath-ticks", "contact"))
+        val targetId = n.str("target") ?: ChaseTarget.NEAREST.id
+        val target = ChaseTarget.of(targetId)
+        if (target == null) n.err("target", "未知的目標策略「$targetId」(可用:${ChaseTarget.entries.joinToString { it.id }})")
+        val sight = n.num("sight-range", min = 2.0, max = 128.0) ?: 32.0
+        val giveUp = n.num("give-up-range", min = 2.0, max = 256.0) ?: (sight * 1.5)
+        if (giveUp < sight) n.err("give-up-range", "不可小於 sight-range($sight)")
+        val contact = n.child("contact")?.let { parseHarassFields(it) }
+        if (target == null) return null
+        return ChasesPlayersSpec(
+            speed = n.num("speed", min = 0.1, max = 3.0) ?: 1.0,
+            target = target,
+            sightRange = sight,
+            giveUpRange = giveUp,
+            repathTicks = n.int("repath-ticks", min = MIN_SCAN_TICKS, max = MAX_SCAN_TICKS) ?: 10,
+            contact = contact,
+        )
+    }
+
+    private fun parseFlee(enemy: Node): FleesWhenPoweredSpec? {
+        val n = enemy.child("flees-when-powered")
+        if (n == null) { enemy.err("flees-when-powered", "規則 flees-when-powered 需要這個區塊(可以寫空的 {} 用預設值)"); return null }
+        n.only(setOf("speed", "flee-distance", "touch-radius", "repath-ticks", "animation", "powered-cue", "dissolve-cue", "dissolve-ticks"))
+        return FleesWhenPoweredSpec(
+            speed = n.num("speed", min = 0.1, max = 3.0) ?: 1.3,
+            fleeDistance = n.num("flee-distance", min = 3.0, max = 48.0) ?: 12.0,
+            touchRadius = n.num("touch-radius", min = 0.5, max = 8.0) ?: 1.8,
+            repathTicks = n.int("repath-ticks", min = MIN_SCAN_TICKS, max = MAX_SCAN_TICKS) ?: 8,
+            animation = n.str("animation"),
+            poweredCue = n.id("powered-cue"),
+            dissolveCue = n.id("dissolve-cue"),
+            dissolveTicks = n.int("dissolve-ticks", min = 1, max = 400) ?: 12,
+        )
     }
 
     // ---- encounters.yml ----
@@ -785,7 +940,11 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         val MATERIAL = Regex("[A-Za-z0-9_:]+")
         const val MAX_LIGHT_CELLS = 2500
         const val MIN_SCAN_TICKS = 4
+        const val MIN_FROZEN_SCAN_TICKS = 2
         const val MAX_SCAN_TICKS = 100
+        const val DEFAULT_RESOLVE_KEY = "cleared"
+        const val DEFAULT_DIALOG_TIMEOUT = 120.0
+        val DEFAULT_POSES = listOf("tilt_head", "reach", "hug_knees", "look_back").map { PoseSpec(it, it) }
         val BAR_COLORS = setOf("BLUE", "GREEN", "PINK", "PURPLE", "RED", "WHITE", "YELLOW")
     }
 }

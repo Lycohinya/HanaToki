@@ -100,6 +100,10 @@ class BetterModelBossModels(private val plugin: Plugin) : BossModels {
         registry.closeAll()
     }
 
+    override fun trackerCount(owner: String): Int = registry.countOwner(owner)
+
+    override fun trackerOwners(): Map<String, Int> = registry.ownerCounts()
+
     override fun modelIds(): Collection<String> = BetterModel.modelKeys()
 
     override fun animationNames(modelId: String): Collection<String> =

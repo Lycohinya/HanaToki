@@ -1,4 +1,4 @@
-# 資料驅動副本內容（1.0.0-rc.21）
+# 資料驅動副本內容（1.0.0-rc.22）
 
 內容插件只給 **一個資料夾 + texts**，行為由框架內建的 `DataDrivenBehavior` 依資料執行，內容端不寫 Kotlin。另做一座副本只換設定檔與資產。判準：加第 N+1 盞燈籠、第 N+1 種幽靈、第 N+1 段提示，只改一筆 YAML。
 
@@ -54,10 +54,30 @@ stages:                       # 宣告順序；第一個 = 起始 stage
       - { type: object-state, object: lantern_a, state: lit }
       - { type: reach, marker: candle_path, radius: 3 }   # 任一成員在 trigger marker 半徑內
     on-complete: { cues: [], title: ..., subtitle: ... }
-    next: lantern_court       # 省略 = 最後一段：完成後播 on-complete、打 `slice end` log，不結算、不發獎
+    next: lantern_court       # 省略 = 最後一段：完成後播 on-complete、打 `slice end` log，不結算、不發獎（除非寫了 resolve，見下）
+    clears-enemies: false     # 選填（rc.22，預設 false）：完成時場上剩下的敵人全部打散（不補燈火）
 ```
 
 stage 鏈不可繞圈，每個 stage 都要沿 `next` 走得到；有 `next` 的 stage 必須寫 `complete`。
+
+### 最後一段結算 resolve（rc.22，選填，預設關）
+
+最後一段（沒有 `next`）完成後，先依序播尾聲，播完才 `resolve(result)` 走 `HanaTokiCore.resolveSession`，讓 LycoHanaToki 的獎勵規則（以 `result` 為 key）觸發。沒有這個區塊的 stage 行為和舊版完全一樣（只打 `slice end`）。
+
+```yaml
+  front_court:
+    complete: [ { type: reach, marker: front_door_exit, radius: 3 } ]   # 有 resolve 就必須寫 complete
+    on-complete: { cues: [boss_down] }
+    resolve:                       # 或 `resolve: true`（result 預設 cleared、沒有尾聲）
+      result: cleared              # 預設 cleared；CompletionResult.resultKey
+      dialog-timeout-seconds: 120  # 預設 120（1..600）：對話步驟等全部成員選完的上限，逾時就繼續
+      epilogue:                    # 選填，依序；一步 = cue 或 dialog 擇一，或只有 wait-seconds
+        - { cue: epilogue_lights, wait-seconds: 2 }      # cue 沒有「播完」回呼，靠 wait-seconds 等（0..300，預設 0）
+        - { dialog: epilogue_talk }                      # 對每位成員開，等全部選完（離場的人不算），再等 wait-seconds
+        - { cue: epilogue_end, marker: entry, wait-seconds: 3 }   # marker：cue 原點（預設進場 marker）
+```
+
+只能用在 `next` 為空的 stage；順序是 `on-complete`、`clears-enemies`、尾聲、resolve（同一段只結算一次，session 隨後結束）。stage 逾時仍不結算。尾聲播放中成員離場不會卡住：對話名單移除離場者，逾時照放行。
 
 ### 目前目標 objective（rc.20，選填）
 
@@ -89,7 +109,7 @@ pieces:                       # 一塊 piece 一筆；key = piece ID
 
 ## objects.yml
 
-共通：`type`（`lantern`｜`gate`）、`marker`（marker ID）、`stage`（可省略；填了只在該 stage 進行中可互動）、`states`。`states.<狀態>` = `{ cues: [...], blocks: [{ offset: [dx,dy,dz], block: "minecraft:..." }] }`，blocks 座標相對 marker，進入該狀態時經 `ctx.mutate` 替換（局結束回滾）。`unlit`／`closed` 的 blocks 在場景放好後套用。
+共通：`type`（`lantern`｜`gate`｜`power-up`）、`marker`（marker ID）、`stage`（可省略；填了只在該 stage 進行中可互動）、`states`。`states.<狀態>` = `{ cues: [...], blocks: [{ offset: [dx,dy,dz], block: "minecraft:..." }] }`，blocks 座標相對 marker，進入該狀態時經 `ctx.mutate` 替換（局結束回滾）。`unlit`／`closed` 的 blocks 在場景放好後套用。
 
 **lantern**（marker 必須是 `trigger`）：狀態 `unlit → burning → lit`，單向、不倒退、只完成一次。
 
@@ -107,6 +127,27 @@ pieces:                       # 一塊 piece 一筆；key = piece ID
 | `hint` | 選填（rc.20）。未點亮燈籠的世界標示：`{ cue, ready-cue, radius, ready-radius, requires-tool }`。玩家距離 ≤ `radius` 播 `cue`、≤ `ready-radius` 換成 `ready-cue`（「現在閃一下一定點得著」）；`requires-tool` 填 tool ID = 只有主手拿著那個道具才顯示。**只放給該玩家自己**（audience = 他一人），cue 要寫成 loop 光效（LycoLib `vfx` 的 `loop: true`）；點燃、換 stage、離開範圍、離場都會取消。位置與主手格取自成員快照（每 10 tick 一次，不跨 region 讀玩家座標），邊界留 1.5 格遲滯 |
 
 **gate**（marker 必須是 `door`，要有水平 `facing` 與 `w`／`h`）：狀態 `closed → open`。`facing` = 門面朝的方向；站在門前（facing 那一側）看過去，marker 在**左下角**，寬往右延伸（右手邊 = facing 逆時針轉 90 度）。`column-ticks`（預設 4）每隔幾 tick 把一欄（h 格高）換成空氣做滑開；`slide-from`：`left`（從 marker 端）｜`right`。
+
+**power-up**（rc.22，南瓜燈；marker 必須是 `trigger`）：成員走進 `radius` 內，**全隊** powered `seconds` 秒（見 flees-when-powered）。狀態 `ready ⇄ taken`：`states.<狀態>` 同其他物件（cues＋blocks，進入該狀態時播／換方塊；`ready` 的 blocks 在場景放好後套用）。
+
+```yaml
+objects:
+  pumpkin_1:
+    type: power-up
+    marker: pumpkin_1
+    stage: pumpkin_maze          # 選填；只在該 stage 進行中可拿
+    radius: 1.5                  # 預設 1.5（0.5..8）：離 marker 多近算碰到
+    seconds: 8                   # 必填（1..120）：全隊 powered 秒數（迷宮 8、Boss P3 6）
+    consume: true                # 預設 true：拿走變 taken；false = 一直是 ready
+    respawn-seconds: 30          # 預設 0（0..3600）：consume 時 > 0 才會重生；不消耗時是再次觸發前的冷卻（至少等 powered 結束）
+    start-cues: [powered_music]  # powered 開始時在 marker 播；持續型 cue（音樂疊層）在 powered 結束時一併 cancel
+    end-cues: [powered_end]      # powered 自然到期時在 marker 播
+    states:
+      taken: { cues: [pumpkin_pop], blocks: [ { offset: [0, 0, 0], block: "minecraft:air" } ] }
+      ready: { blocks: [ { offset: [0, 0, 0], block: "minecraft:jack_o_lantern" } ] }
+```
+
+powered 是每位成員各自的到期時間（再吃一次把結束時間刷新成較晚的那個，不疊加）；成員離場即移除；**換 stage 一律結束 powered**（收持續 cue、敵人恢復追擊外觀）。偵測每 4 tick 一次（`membersWithin`，不跨 region 讀玩家座標）。stage 完成條件與目標的 `object-state` 可以引用 power-up 的 `ready`／`taken`。
 
 ## enemies.yml
 
@@ -135,7 +176,7 @@ enemies:
       stunned-cue: ghost_marked   # 選填：僵直中（現在可以打）換成這個，取代 alive-cue；打散或消失時拿掉
 ```
 
-規則標籤：**已實作** `needs-flash`、`seeks-object`、`harasses-players`；**保留**（接受、不實作、註冊時 WARN）`frozen-when-watched`、`flees-when-powered`；其他標籤報錯。needs-flash 行為：所有傷害一律取消（牠不會被打死，只會被打散；虛空與 `/kill` 放行）。未僵直時玩家攻擊 → 取消、播 whiff cue、觸發 `first-whiff` 提示。被閃光命中 → 僵直 `stun-seconds`（tool.yml）：停 AI、發光、模型播 `stunned`；僵直中受擊 → 打散（`dissolve` 動畫、cue、延遲移除），擊殺者補燈火（tool.yml `refill-on-dissolve`）。載體是原版怪物（有 `model` 時隱形），自動免疫日曬與火。
+規則標籤（rc.22 起全部已實作，沒有保留標籤）：`needs-flash`、`seeks-object`、`harasses-players`、`frozen-when-watched`、`chases-players`、`flees-when-powered`；其他標籤報錯。needs-flash 行為：所有傷害一律取消（牠不會被打死，只會被打散；虛空與 `/kill` 放行）。未僵直時玩家攻擊 → 取消、播 whiff cue、觸發 `first-whiff` 提示。被閃光命中 → 僵直 `stun-seconds`（tool.yml）：停 AI、發光、模型播 `stunned`；僵直中受擊 → 打散（`dissolve` 動畫、cue、延遲移除），擊殺者補燈火（tool.yml `refill-on-dissolve`）。載體是原版怪物（有 `model` 時隱形），自動免疫日曬與火。
 
 ### 敵人規則 seeks-object／harasses-players（rc.21，選填）
 
@@ -171,6 +212,67 @@ enemies:
 啃燈語意（`LanternMachine.drain`）：只在 `burning` 生效（暫停中也扣，離開燈籠不能躲掉）；進度可退、**夾在 0**、不退回 `unlit`、不觸發完成，所以只有「站著撐住」而沒有打散她們就完成不了，但沒有失敗或倒數；燈亮後不再扣；milestone 只觸發一次（退回再升不重播）。**僵直中的敵人不啃、不碰人**——閃光把她們照住就是解法。啃燈速率每輪掃描發布，超過 60 tick 沒更新視為 0。
 
 掃描：每 `scan-ticks` 一輪（單輪最多 24 隻、在 session 的 anchor region 執行緒用 `locationOf` 與 `memberSnapshots` 的結果一次處理完），全程走既有的 EntityScheduler／PlayerOp，沒有新增跨插件介面方法；來不及回來的一輪不會疊加，也不會覆蓋較新的結果。
+
+### 敵人規則 frozen-when-watched／chases-players／flees-when-powered（rc.22，選填）
+
+同樣「標籤與區塊成對」，三個區塊都可以寫空的 `{}` 用預設值。**移動規則**（`seeks-object`、`frozen-when-watched`、`chases-players`）每個敵人只能掛一個，這三種敵人的原版鎖定目標與移動目標 AI 在生成時就拿掉，只聽框架下的路徑指令（`harasses-players` 的接觸效果不受影響）。`flees-when-powered` 必須和 `chases-players` 一起用，且場上至少要有一個 `power-up` 物件。有 `needs-flash`、`frozen-when-watched`、`chases-players`、`flees-when-powered` 任一個的敵人**不吃一般傷害**（取消；只有 needs-flash 才會觸發打空／僵直／打散）。
+
+**frozen-when-watched（人偶）**：任一成員的視錐內、距離內、（開啟遮擋時）視線沒被方塊擋住 = 被看著 → 停 AI 與路徑、換成隨機一個姿勢；沒人看 → 開 AI、朝最近的成員走。可以和 needs-flash 同掛：被閃光照到進僵直（`stunned` 動畫與 cue），僵直中不判視錐，打散後 `doll-dispersed`；僵直結束若仍被看著會留在凍結，不會動起來。
+
+```yaml
+    rules: [needs-flash, frozen-when-watched]
+    frozen-when-watched:
+      half-angle: 55           # 預設 55（5..90）：視錐半角（度），夾角用成員快照的 yaw／pitch
+      max-distance: 24         # 預設 24（2..64）：超過這個距離不算被看到
+      occlusion: true          # 預設 true：視錐內的候選再用 raytrace 方塊確認沒被擋住
+      scan-ticks: 4            # 預設 4（2..100）：掃描週期；整局取所有規則的最小值
+      speed: 1.0               # 預設 1.0（0.1..3）：沒人看時 Pathfinder.moveTo 的速度倍率
+      body-height: 1.0         # 預設 1.0（0..4）：腳下往上多高算身體中心（視錐與遮擋的瞄準點）
+      moving-animation: walk   # 選填；移動時的模型動畫，沒寫 = animations.idle
+      poses: [tilt_head, reach, hug_knees, look_back]   # 預設就是這四種；清單（id = 模型動畫名）或 { id: 動畫名 } 區塊
+      move-cues: [doll_click]  # 選填：從凍結轉為移動時播在人偶身上（follow 實體，聽得出方位）
+      freeze-cues: [doll_stop] # 選填：從移動轉為凍結時播
+      cue-cooldown-ticks: 6    # 預設 6（0..400）：move-cues 兩次之間的最短間隔，視線在邊緣來回掃時不洗聲
+```
+
+掃描：視錐與距離在 anchor 執行緒用成員快照（`x,y,z,yaw,pitch,…,sneaking`；眼睛高度站 1.62、蹲 1.27）算；只有已在視錐內的候選才派 `rayTraceBlocks` 到**該敵人自己的 region**（`Bukkit.isOwnedByCurrentRegion` 確認射線經過的區塊都歸本 region，否則當作被看到並 WARN 一次），AI 開關與路徑指令在同一個回呼裡套用。單輪最多 24 隻。姿勢只在「移動 → 凍結」那一刻換一次，不連續兩次同一個。
+
+**chases-players（大幽靈）**：追一位成員；碰到的效果寫在內嵌的 `contact`（欄位與型別同 `harasses-players`，不能和 `harasses-players` 同時寫；冷卻獨立一份）。
+
+```yaml
+    rules: [chases-players, flees-when-powered]
+    chases-players:
+      speed: 1.1               # 預設 1.0（0.1..3）：Pathfinder.moveTo 速度倍率
+      target: nearest          # 預設 nearest；nearest｜farthest｜lowest-health（只考慮 sight-range 內的成員）
+      sight-range: 32          # 預設 32（2..128）：索敵距離
+      give-up-range: 48        # 預設 sight-range 的 1.5 倍（>= sight-range）：已鎖定的目標跑出索敵距離但仍在這個距離內會繼續追，超過就停下
+      repath-ticks: 10         # 預設 10（4..100）：多久重挑目標、補一次路
+      contact:                 # 選填：接觸效果，同 harasses-players（contact-radius、cooldown-ticks、scan-ticks、effects、cues、suppress-melee）
+        contact-radius: 1.6
+        cooldown-ticks: 40
+        suppress-melee: true
+        effects:
+          - { type: push, strength: 0.6, lift: 0.3 }
+          - { type: damage, amount: 2.0, min-health: 6 }
+```
+
+**flees-when-powered**：有成員 powered 時（power-up 物件觸發），暫停追擊與接觸效果，改逃離最近的 powered 成員（先直接遠離，路徑失敗依序偏轉 ±45／±90／±135 度），換外觀；被 powered 成員碰到（`touch-radius`，判定先於任何接觸效果）就被打散。powered 結束或換 stage 恢復追擊。
+
+```yaml
+    flees-when-powered:
+      speed: 1.3               # 預設 1.3（0.1..3）：逃跑速度倍率
+      flee-distance: 12        # 預設 12（3..48）：逃跑目標點離自己多遠
+      touch-radius: 1.8        # 預設 1.8（0.5..8）：powered 成員碰到多近就被打散
+      repath-ticks: 8          # 預設 8（4..100）
+      animation: scared        # 選填：powered 期間的模型 loop 動畫（結束恢復 idle）
+      powered-cue: ghost_scared   # 選填：powered 期間跟著敵人的持續 cue（loop 光效）
+      dissolve-cue: ghost_pop  # 選填：被碰散時播
+      dissolve-ticks: 12       # 預設 12（1..400）：打散到實體移除的延遲
+```
+
+被碰散不補燈火、記 `powered-reversal`；同時有 needs-flash 的敵人仍可被閃光打散（走原本的路）。
+
+清理：凍結旗標、追擊目標、逃跑外觀與 powered 在 stage 轉換、局結束時清掉；成員離場移除他的 powered 與追擊目標；僵直結束統一走 `syncBody`（AI 只在 ALIVE 且沒凍結時開）。
 
 ## encounters.yml
 
@@ -270,7 +372,29 @@ HanaToki 追蹤每局播出的所有 `CueRun`（不設上限），局結束全�
 
 ## 證據 log
 
-每次狀態轉移一行 INFO：`[HanaToki/<dungeon>] <事件> <id…> slot=<slotId>`。事件：`scene-placed`、`stage-start <stage>`、`stage-complete <stage>`、`slice end <stage>`、`object <id> <from>-><to>`（含 `burning paused/resumed`、`milestone`）、`gate-open <id>`、`light`、`wave-start <id> count=N players=N offset=N`、`wave-clear <id>`、`wave-cancel <id>`、`enemy-spawn`、`enemy-seek <actor> enemy= target= path=ok|none`（每隻第一次下往燈的路徑指令）、`enemy-contest <燈籠> ghosts=N progress=0.00`（有隻數變化時與每秒一次；降到 0 再打一行）、`enemy-touch <actor> player= effect=push+charges-1…`、`enemy-stun`、`enemy-recover`、`enemy-dissolve <actor> by=<玩家|lantern>`、`enemy-gone`、`enemies-cleared`、`whiff`、`flash`、`flash-hit`、`flash-empty`、`refill`、`tool-give`、`regen player= tool= charges= zone=`、`tool-drained`、`flash-miss player= range= cone= <燈籠>:dist=,angle=`（閃光沒點到未點亮燈籠時的距離與視線偏角）、`hint <id> [player=]`、`reach <marker>`、`dialog <id> player= choice=`、`port-missing`、`session-end`。
+每次狀態轉移一行 INFO：`[HanaToki/<dungeon>] <事件> <id…> slot=<slotId>`。事件：`scene-placed`、`stage-start <stage>`、`stage-complete <stage>`、`slice end <stage>`（沒有 resolve 的最後一段）、`object <id> <from>-><to>`（含 `burning paused/resumed`、`milestone`）、`gate-open <id>`、`light`、`wave-start <id> count=N players=N offset=N`、`wave-clear <id>`、`wave-cancel <id>`、`enemy-spawn`、`enemy-seek <actor> enemy= target= path=ok|none`（每隻第一次下往燈的路徑指令）、`enemy-contest <燈籠> ghosts=N progress=0.00`（有隻數變化時與每秒一次；降到 0 再打一行）、`enemy-touch <actor> player= effect=push+charges-1…`、`enemy-stun`、`enemy-recover`、`enemy-dissolve <actor> by=<玩家|lantern>`、`enemy-gone`、`enemies-cleared`、`whiff`、`flash`、`flash-hit`、`flash-empty`、`refill`、`tool-give`、`regen player= tool= charges= zone=`、`tool-drained`、`flash-miss player= range= cone= <燈籠>:dist=,angle=`（閃光沒點到未點亮燈籠時的距離與視線偏角）、`hint <id> [player=]`、`reach <marker>`、`dialog <id> player= choice=`、`port-missing`、`session-end <reason> cancelledCues=done`。
+
+rc.22 新增（紙燈別院全程契約的 tag，bot 認這些字串；`<enemyId>` 是 actor id，例如 `doll_wave-3`）：
+
+| 事件 | 時機 |
+|---|---|
+| `lantern-lit <objectId>` | 燈籠燒滿點亮（與舊的 `object <id> burning->lit` 並存） |
+| `doll-frozen <enemyId> watcher=<player>` | 人偶從移動轉為凍結（每次轉換一行）；另有 `doll-pose <enemyId> pose=<id>` 記這次挑的姿勢 |
+| `doll-dispersed <enemyId> by=<player>` | frozen-when-watched 的敵人被玩家打散（光圈清場不記；仍有 `enemy-dissolve … by=lantern`） |
+| `power-up-taken <objectId> player=<player>` | 有人碰到 power-up；`power-up <id> taken->ready` 是重生 |
+| `powered-start players=<n> seconds=<s>` | 全隊 powered（每次吃都記；再吃是刷新） |
+| `powered-end reason=<expired｜stage｜members-left>` | powered 全部結束 |
+| `powered-reversal <enemyId> by=<player>` | powered 成員碰散一隻會逃的敵人（隨後還有 `enemy-dissolve`） |
+| `enemy-chase <actor> target=<player｜none>` | chases-players 換目標（只在變更時記） |
+| `epilogue-start stage=<id> steps=<n>`／`epilogue-done stage=<id>`／`epilogue-dialog-timeout …` | 尾聲開始／播完／對話等逾時 |
+| `resolve stage=<id> result=<key>` | 尾聲後呼叫 resolve（隨後引擎結束 session，`session-end` 的 reason 是引擎的結束原因） |
+| `session-end <reason> cancelledCues=done` | 局結束；`prepare-failed` 是場景放置失敗 |
+
+另有 `enemies-cleared stage-complete count=N`（stage 的 `clears-enemies`）。
+
+## Debug 指令
+
+`/hanatoki admin entities [slotId|all]`（權限 `hanatoki.admin`）：每一局列出 actor／prop／BetterModel tracker 數，以及資料驅動內容的現況（stage、敵人各狀態隻數、凍結／追擊／逃跑隻數、powered 成員與剩餘秒數、power-up 狀態、尾聲進度、CueRun 與計時數）。`all`（預設）最後比對「session 已結束卻還登記著的 actor／prop／tracker」，供斷線、離場、局結束後清理驗證（剛結束、場地還在收斂的一局會短暫出現，持續出現才是外洩）。內容現況在 session 的 anchor region 執行緒上組好才輸出。倒下狀態玩家數待 Boss 交接加入倒下機制後在這裡列出。
 
 ## 執行緒
 
@@ -278,7 +402,9 @@ HanaToki 追蹤每局播出的所有 `CueRun`（不設上限），局結束全�
 
 ## 範圍與已知限制
 
-- 第一段切片只做敵人規則 `needs-flash`、物件 `lantern`／`gate`、局內道具 `flash`。人偶、Boss、南瓜燈、結算、常駐場景都不在內。最後一段完成只播 cue 與打 `slice end`，不 `resolve`、不發獎；stage 逾時不結算。
+- 敵人規則 `needs-flash`、`seeks-object`、`harasses-players`、`frozen-when-watched`、`chases-players`、`flees-when-powered`，物件 `lantern`／`gate`／`power-up`，局內道具 `flash`。Boss 時間軸、倒下狀態、常駐場景還不在內。最後一段完成預設只播 cue 與打 `slice end`，不 `resolve`、不發獎；要結算須在該 stage 寫 `resolve`（見上）；stage 逾時仍不結算。
+- 人偶的遮擋檢查在人偶自己的 region 上做；射線若跨出該 region 就當作被看到（偏向玩家，WARN 一次）。遮擋以方塊碰撞外形判定，玻璃之類會擋視線。
+- rc.22 的 raycast、AI 開關與 region 行為只有單元測試覆蓋純邏輯（視錐、狀態機、解析、驗證）；實機行為待測試服驗證。
 - 閃光不做視線遮擋判定（隔著牆的幽靈會被照到）。
 - 場景每局重放（`maps().place`）；常駐模式未做。
 - 光源方塊每格一次 `ctx.mutate`（上限約 2500 格由載入器檢查），只放在空氣格。

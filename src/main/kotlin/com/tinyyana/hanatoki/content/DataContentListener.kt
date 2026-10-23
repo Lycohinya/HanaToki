@@ -66,14 +66,16 @@ class DataContentListener(private val core: HanaTokiCore, private val runtime: D
             if (hit is Player) return
             val (hitSession, hitActor) = core.actorController.actorIdOf(hit.uniqueId) ?: return
             val spec = runtime.runOf(hitSession)?.enemy(hitActor)?.spec ?: return
-            if (spec.harassesPlayers?.suppressMelee == true) event.isCancelled = true
+            if (spec.contact?.suppressMelee == true) event.isCancelled = true
             return
         }
         val (sessionId, actorId) = core.actorController.actorIdOf(event.entity.uniqueId) ?: return
         val run = runtime.runOf(sessionId) ?: return
         val enemy = run.enemy(actorId) ?: return
-        if (enemy.spec.needsFlash == null) return
+        // needs-flash、人偶、追擊者、會逃的敵人都不吃一般傷害:只能被閃光打散(needs-flash)或被 powered 成員碰散
+        if (!enemy.spec.immuneToDamage) return
         event.isCancelled = true
+        if (enemy.spec.needsFlash == null) return
         val attacker = (event as? EntityDamageByEntityEvent)?.damager ?: return
         val player = when (attacker) {
             is Player -> attacker
