@@ -1719,7 +1719,7 @@ class SessionRun(
                 rt.propReady = false
                 rt.propPhase = 0
                 val at = rt.loc.clone().add(0.0, prop.height, 0.0)
-                core.propController.spawnViewerPart(sessionId, propId, at, org.bukkit.inventory.ItemStack(material), prop.glow, COLLECT_VIEW_RANGE).whenComplete { _, error ->
+                core.propController.spawnViewerPart(sessionId, propId, at, com.tinyyana.hanatoki.prop.PropItems.build(material, prop.model), prop.glow, COLLECT_VIEW_RANGE).whenComplete { _, error ->
                     ctx.submit {
                         if (error != null) warn("collectible ${rt.spec.id} 浮空實體生成失敗:${error.message}")
                         else { rt.propReady = true; rt.propNextPose = now }
@@ -1876,7 +1876,7 @@ class SessionRun(
                 rt.propReady = false
                 rt.propPhase = 0
                 val at = rt.loc.clone().add(0.0, prop.height, 0.0)
-                ctx.props().spawnPart(propId, at, org.bukkit.inventory.ItemStack(material), 0).whenComplete { _, error ->
+                ctx.props().spawnPart(propId, at, com.tinyyana.hanatoki.prop.PropItems.build(material, prop.model), 0).whenComplete { _, error ->
                     ctx.submit {
                         if (error != null) warn("power-up ${rt.spec.id} 浮空實體生成失敗:${error.message}")
                         else { rt.propReady = true; rt.propNextPose = now }

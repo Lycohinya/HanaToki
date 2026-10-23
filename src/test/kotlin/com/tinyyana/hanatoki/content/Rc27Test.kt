@@ -29,6 +29,19 @@ class Rc27Test {
     }
 
     @Test
+    fun `prop model 解析，沒寫是 null，格式錯被擋`() {
+        val withModel = objectsWith("            prop: { item: PAPER, model: \"lycohinya:mist_paper_fortune\" }")
+        val p = (BossFixtures.parse(mapOf("objects.yml" to withModel)).objects.getValue("pumpkin_boss_1") as PowerUpSpec).prop
+        assertEquals("lycohinya:mist_paper_fortune", p?.model)
+        val none = objectsWith("            prop: { item: PAPER }")
+        assertNull((BossFixtures.parse(mapOf("objects.yml" to none)).objects.getValue("pumpkin_boss_1") as PowerUpSpec).prop?.model)
+        val bad = assertFailsWith<ContentDataException> {
+            BossFixtures.parse(mapOf("objects.yml" to objectsWith("            prop: { item: PAPER, model: \"Mist Fortune\" }")))
+        }.errors
+        assertTrue(bad.any { "prop.model" in it })
+    }
+
+    @Test
     fun `prop 壞資料被擋`() {
         fun errors(prop: String) = assertFailsWith<ContentDataException> { BossFixtures.parse(mapOf("objects.yml" to objectsWith("            prop: $prop"))) }.errors
         assertTrue(errors("{ scale: 1 }").any { "prop.item" in it && "缺少必要欄位" in it })

@@ -644,11 +644,11 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         return CollectibleSpec(id, marker, node.id("stage"), radius, label, node.str("found-first"), node.str("found-repeat"), node.id("cue"), parsePowerUpProp(node))
     }
 
-    /** `prop: { item: JACK_O_LANTERN, scale: 0.9, height: 1.1, bob: 0.3, bob-seconds: 3, spin-degrees: 90, glow: true }`(rc.27，glow rc.32，選填)。 */
+    /** `prop: { item: JACK_O_LANTERN, scale: 0.9, height: 1.1, bob: 0.3, bob-seconds: 3, spin-degrees: 90, glow: true, model: "lycohinya:mist_paper_fortune" }`(rc.27，glow rc.32，model rc.33，選填)。 */
     private fun parsePowerUpProp(node: Node): PowerUpProp? {
         if (node.map["prop"] == null) return null
         val n = node.child("prop") ?: return null
-        n.only(setOf("item", "scale", "height", "bob", "bob-seconds", "spin-degrees", "glow"))
+        n.only(setOf("item", "scale", "height", "bob", "bob-seconds", "spin-degrees", "glow", "model"))
         val item = n.str("item", required = true)
         if (item != null && !Regex("[A-Za-z0-9_:]+").matches(item)) n.err("item", "必須是 Material 名稱(例如 JACK_O_LANTERN)")
         val scale = n.num("scale", min = 0.1, max = 4.0) ?: 1.0
@@ -657,7 +657,9 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         val bobSeconds = n.num("bob-seconds", min = 0.5, max = 30.0) ?: 3.0
         val spin = n.num("spin-degrees", min = 0.0, max = 170.0) ?: 90.0
         val glow = n.bool("glow") ?: false
-        return if (item == null) null else PowerUpProp(item, scale, height, bob, bobSeconds, spin, glow)
+        val model = n.str("model")
+        if (model != null && !Regex("[a-z0-9_.-]+:[a-z0-9_./-]+").matches(model)) n.err("model", "必須是 namespace:id(例如 lycohinya:mist_paper_fortune)")
+        return if (item == null) null else PowerUpProp(item, scale, height, bob, bobSeconds, spin, glow, model)
     }
 
     private fun parseGate(id: String, node: Node): GateSpec? {

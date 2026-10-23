@@ -1,4 +1,4 @@
-# 資料驅動副本內容（1.0.0-rc.32）
+# 資料驅動副本內容（1.0.0-rc.33）
 
 內容插件只給 **一個資料夾 + texts**，行為由框架內建的 `DataDrivenBehavior` 依資料執行，內容端不寫 Kotlin。另做一座副本只換設定檔與資產。判準：加第 N+1 盞燈籠、第 N+1 種幽靈、第 N+1 段提示，只改一筆 YAML。
 
@@ -230,6 +230,10 @@ pieces:                       # 一塊 piece 一筆；key = piece ID
     prop: { item: JACK_O_LANTERN, scale: 0.9, height: 1.1, bob: 0.3, bob-seconds: 3, spin-degrees: 90 }
     # item 必填，Material 名稱（執行期解析，解析失敗記警告、不生成）；scale 預設 1.0（1 = 一整格方塊）；height 預設 1.0（離 marker 腳下的高度）；
     # bob 預設 0.3 格、bob-seconds 預設 3（上下一個週期）、spin-degrees 預設 90（每半個週期慢轉幾度）
+    # model（rc.33，選填）：自訂物品圖示 "namespace:id"，例如 "lycohinya:mist_paper_fortune"。寫進展示物的 custom_model_data.strings，
+    #   和 LycoLib LycoIcons.apply／玩家背包裡的 LycoItems 物品同一條管道，所以浮空展示和背包裡長得一樣。item 必須是該圖示寄生的原版物品
+    #   （LycoIconCatalog 的 host，紙燈籤是 PAPER），不然資源包的 select 不命中；沒資源包的玩家看到原版 item。不寫 = 原版外觀。
+    #   刻意不用 item_model component：客戶端找不到模型會渲染成紫黑破圖。
 ```
 
 伺服器只在每半個週期送一次姿勢，客戶端自己補間成緩慢浮動。要讓周圍真的變亮，在 `states.ready.blocks` 放 `minecraft:light[level=15]`、`states.taken.blocks` 放空氣即可（資料驅動，框架不另放光源）。
@@ -268,7 +272,7 @@ objects:
     found-first: mist-patrol.collect.found-first    # 選填 texts key；終身第一次（或沒有收集紀錄 port）時送
     found-repeat: mist-patrol.collect.found-repeat  # 選填；終身重訪時送，沒寫退回 found-first
     cue: collect_found           # 選填；收下時只給該玩家播
-    prop: { item: PAPER, scale: 0.5, height: 1.0, bob: 0.2, bob-seconds: 3, spin-degrees: 90, glow: true }  # 選填；glow 預設 false
+    prop: { item: PAPER, scale: 0.5, height: 1.0, bob: 0.2, bob-seconds: 3, spin-degrees: 90, glow: true, model: "lycohinya:mist_paper_fortune" }  # 選填；glow 預設 false；model 見 power-up 的 prop 說明（rc.33）
 ```
 
 ActionBar 佔位符：`{n}`＝`n`、`{found}`＝這位玩家的終身進度（有 `CollectionPort` 時 = 終身已收的 ∪ 本局收的；沒有時只算本局）、`{total}`＝這個內容的 collectible 物件數。**逐人可見**：實體生成時 `isVisibleByDefault = false`，每 10 tick 與每次有人收下時對帳，只對「在線成員且本局沒收過」的人 `showEntity`；重連（新 Player 物件）、離線、離場、局結束時記帳清掉，重連後已收過的不會再開。偵測每 4 tick 一次 `memberPositions()`，在 anchor 執行緒對所有藏點量距離（倒下的成員不能收）。收下當下的寫入順序：本局收集帳 → stats `collect.<物件 id>`（整局合計）與 `collect.<物件 id>.<玩家 UUID>`（逐人，結算讀這個，**不要用 `CompletionResult.statFor`**——它在逐人鍵不存在時會退回整局合計，沒收到的人會被當成收過）→ log → cue → ActionBar → 關掉那位的實體。終身「是否收過」由 `CollectionPort`（選填，見 API.md rc.32）提供，沒有實作者或查詢失敗一律當第一次。

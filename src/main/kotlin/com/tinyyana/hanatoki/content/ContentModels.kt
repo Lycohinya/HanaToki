@@ -295,6 +295,11 @@ data class PowerUpProp(
     val spinDegrees: Double,
     /** rc.32:實體發光(輪廓光+最亮亮度)。收集物的發光紙籤用；舊資料沒寫 = false。 */
     val glow: Boolean = false,
+    /**
+     * rc.33:自訂物品圖示,例如 `lycohinya:mist_paper_fortune`。寫進展示物 ItemStack 的 `custom_model_data.strings`(和 LycoLib `LycoIcons.apply`
+     * 同一條管道),所以 [item] 必須是該圖示寄生的原版物品(LycoIconCatalog 的 host,例如紙燈籤是 PAPER)。沒資源包的玩家看到原版 [item]；null = 原版外觀。
+     */
+    val model: String? = null,
 )
 
 /**
