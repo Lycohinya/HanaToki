@@ -135,6 +135,11 @@ object ContentValidator {
                     errors += "$where.chases-players.contact.effects[$i].tool: 引用不存在的道具「${effect.tool}」(tool.yml)"
                 }
             }
+            enemy.chasesPlayers?.snuffLamps?.objects?.forEach { lampId ->
+                val obj = spec.objects[lampId]
+                if (obj == null) errors += "$where.chases-players.snuff-lamps.objects: 引用不存在的物件「$lampId」(objects.yml)"
+                else if (obj !is LanternSpec) errors += "$where.chases-players.snuff-lamps.objects: 「$lampId」不是 lantern 物件"
+            }
             if (enemy.fleesWhenPowered != null && spec.objects.values.none { it is PowerUpSpec }) {
                 errors += "$where.flees-when-powered: 沒有任何 power-up 物件(objects.yml)可以讓成員 powered,這個規則永遠不會動"
             }

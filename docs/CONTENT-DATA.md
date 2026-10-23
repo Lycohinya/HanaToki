@@ -1,4 +1,4 @@
-# 資料驅動副本內容（1.0.0-rc.30）
+# 資料驅動副本內容（1.0.0-rc.31）
 
 內容插件只給 **一個資料夾 + texts**，行為由框架內建的 `DataDrivenBehavior` 依資料執行，內容端不寫 Kotlin。另做一座副本只換設定檔與資產。判準：加第 N+1 盞燈籠、第 N+1 種幽靈、第 N+1 段提示，只改一筆 YAML。
 
@@ -313,7 +313,10 @@ enemies:
         - { type: tool-charges, tool: night_lantern, delta: -1 }   # 扣（負）或補（正）燈火，夾在 0..max
         - { type: potion, effect: "minecraft:slowness", duration-ticks: 40, amplifier: 0 }
         - { type: damage, amount: 1.0, min-health: 6.0 }     # 玩家血量 <= min-health 時不扣（不致死）
+        - { type: damage-percent, percent: 0.05, min-health: 4.0 }   # rc.31：固定比例
 ```
+
+**damage-percent（rc.31）**：扣玩家**最大血量**的 `percent`（0 < percent <= 1，例如 0.05 = 20 滴血的玩家扣 1 滴），**不吃護甲、附魔與抗性**（直接改血量、播受傷動畫，不經傷害事件；做法同 Boss 招式的 `damage-percent`）。`min-health`（0..20，預設 4.0）= 玩家血量 <= 它時不扣，最多只扣到剩它，所以不致死、不會觸發倒下。`harasses-players` 與 `chases-players.contact` 都能用；與 `damage` 可並存（一般不會同時寫）。log `enemy-touch` 的 effect 欄位記 `damage%0.05`。
 
 啃燈語意（`LanternMachine.drain`）：只在 `burning` 生效（暫停中也扣，離開燈籠不能躲掉）；進度可退、**夾在 0**、不退回 `unlit`、不觸發完成，所以只有「站著撐住」而沒有打散她們就完成不了，但沒有失敗或倒數；燈亮後不再扣；milestone 只觸發一次（退回再升不重播）。**僵直中的敵人不啃、不碰人**——閃光把她們照住就是解法。啃燈速率每輪掃描發布，超過 60 tick 沒更新視為 0。
 
@@ -350,7 +353,10 @@ enemies:
       freeze-cues: [doll_stop] # 選填：從移動轉為凍結時播
       cue-cooldown-ticks: 6    # 預設 6（0..400）：move-cues 兩次之間的最短間隔，視線在邊緣來回掃時不洗聲
       harmless-while-frozen: false   # rc.28，預設 false：true = 被看著凍結期間接觸玩家不推、不扣燈火（只有移動中的才有接觸效果）
+      rush: { distance: 8, speed-multiplier: 1.35, cues: [doll_click], cue-interval-ticks: 8 }   # rc.31，選填：靠近時加速
 ```
+
+**rush（rc.31，選填，預設不加速）**：沒人看著、而且**最近的成員**在 `distance`（1..64）格內時，`Pathfinder.moveTo` 的速度倍率乘上 `speed-multiplier`（1..3，乘積上限 4.0；`speed` 的 0.1..3 範圍不變）；超過距離或被看著（凍結）就回到原速／停住。加速期間每 `cue-interval-ticks`（2..400，預設 8）重播一次 `cues`（有方位的喀喀聲，讓背後的威脅聽得見；從凍結轉移動的那一刻只播 `move-cues`，不重疊）。加速只依賴成員快照的距離，不另做射線。log `doll-rush <actor> distance=<格>`（每次進入加速記一行）。
 
 **rc.28 出生即凍結**：這種敵人一生出來就先是凍結的姿勢（原地不動、`setAI(false)`），第一輪掃描才決定放不放開——不再先走兩步才凍住。第一次判定若被看著，照常補記 `doll-frozen`／`doll-pose`。
 
@@ -375,6 +381,37 @@ enemies:
           - { type: push, strength: 0.6, lift: 0.3 }
           - { type: damage, amount: 2.0, min-health: 6 }
 ```
+
+**retreat／pressure（rc.31，chases-players 內嵌，選填，預設都沒有）**：讓追擊有節奏——碰到人就退開、逼近時發出聲音。
+
+```yaml
+    chases-players:
+      retreat: { seconds: 2.5, distance: 6, speed: 1.0 }   # seconds 必填（0.2..30）；distance 預設 6（1..48）；speed 沒寫 = chases-players.speed
+      pressure: { distance: 8, cues: [bigghost_chase], far-interval-ticks: 44, near-interval-ticks: 20 }
+```
+
+- `retreat`：`contact` 的效果對成員生效後，這隻朝遠離那位成員的方向走 `distance` 格（被牆擋住依序偏轉 ±45／±90／±135 度，同逃跑），持續 `seconds` 秒才恢復追擊；退開期間不追、不吹燈、不播逼近 cue。接觸效果本身的每位玩家冷卻仍是 `contact.cooldown-ticks`。必須有 `contact`（否則整份拒絕）。log `enemy-retreat <actor> seconds=<秒>`。
+- `pressure`：最近的成員在 `distance`（1..64）格內時，在這隻身上（follow 實體，聽得出方位）播 `cues`。間隔隨距離線性縮短：剛進範圍是 `far-interval-ticks`（預設 40），貼身是 `near-interval-ticks`（預設 16，不可大於 far）；實際最小解析度是掃描週期（`contact.scan-ticks`／`repath-ticks`）。僵直、powered 逃跑、出生緩衝期、退開期間不播。進入範圍時記一行 `enemy-pressure <actor> distance=<格>`（離開再進入才再記）。
+
+**snuff-lamps（rc.31，chases-players 內嵌，選填，預設只追人）**：這隻有機會改去把場邊的燈吹熄（例如 Boss 的霧鬼飄向已亮的場邊燈），玩家得先照住打散她。
+
+```yaml
+    chases-players:
+      snuff-lamps:
+        objects: [boss_lamp_1, boss_lamp_2, boss_lamp_3, boss_lamp_4]   # 必填，lantern 物件 id
+        states: [burning, lit]     # 預設 [burning, lit]；只能是 burning／lit，不能吹 unlit
+        preference: 0.65           # 預設 1.0（0..1）：每次決定去燈的機率；1 = 有燈就去，0 = 永遠追人
+        decide-seconds: 5          # 預設 6（0.5..120）：沒鎖定燈時，兩次擲 preference 之間的最短間隔
+        reach-radius: 2.0          # 預設 2.0（0.5..16）：離燈（marker，高度差 <= 3）多近算到了
+        dwell-seconds: 0.8         # 預設 0.8（0..30）：到了之後停多久才吹
+        cooldown-seconds: 10       # 預設 10（0..600）：吹完後這麼久不再挑燈（回去追人）
+        speed: 1.2                 # 選填（0.1..3）：去燈的速度倍率，沒寫 = chases-players.speed
+        cues: [snuff_out]          # 選填：吹熄時在燈上播
+```
+
+行為（每輪掃描、同 chase）：合格的燈 = 在 `objects` 內、所屬 stage 進行中、狀態在 `states`、（是 boss 場邊燈時）boss 戰鬥中且光環還亮著（跪下、起身、全滅、結束不行）。沒鎖定燈時，每 `decide-seconds` 秒擲一次 `preference`，中了就鎖定**離她最近**的合格燈直到吹完或燈變得不合格（被別人吹熄／重置）；鎖定期間不追人，其他規則（`contact` 接觸效果、flees-when-powered 逃跑）照常，所以她飄過去的路上碰到玩家照樣推擊扣血。到了 `reach-radius` 內守滿 `dwell-seconds` 才吹：燈重置成 unlit（進度歸零、方塊與持續 cue 還原，同 Boss 熄燈招式），boss 場邊燈同時恢復寶石；然後進 `cooldown-seconds`。僵直的敵人不在掃描裡，所以**被閃光照到（路上或停留中）就中斷**，停留時間重算；打散後什麼都不會發生。powered 逃跑期間不去吹。
+
+注意：燈籠的「單向、不倒退、只完成一次」不變式只對**沒有被列在 snuff-lamps 的燈**成立；列進去的燈會被重置，所以只列 Boss 場邊燈這類本來就能被重置的燈。log：`enemy-snuff-seek <actor> lamp=<id>`（鎖定）、`enemy-snuff-abort <actor> lamp=<id>`（鎖定的燈變得不合格）、`enemy-snuff <actor> lamp=<id> was=<burning｜lit>`（吹熄，隨後還有 `object <id> reset->unlit`）。
 
 **flees-when-powered**：有成員 powered 時（power-up 物件觸發），暫停追擊與接觸效果，改逃離最近的 powered 成員（先直接遠離，路徑失敗依序偏轉 ±45／±90／±135 度），換外觀；被 powered 成員碰到（`touch-radius`，判定先於任何接觸效果）就被打散。powered 結束或換 stage 恢復追擊。
 
@@ -670,6 +707,9 @@ rc.22 新增（紙燈別院全程契約的 tag，bot 認這些字串；`<enemyId
 | `powered-end reason=<expired｜stage｜members-left>` | powered 全部結束 |
 | `powered-reversal <enemyId> by=<player>` | powered 成員碰散一隻會逃的敵人（隨後還有 `enemy-dissolve`） |
 | `enemy-chase <actor> target=<player｜none>` | chases-players 換目標（只在變更時記） |
+| `enemy-snuff-seek`／`enemy-snuff-abort <actor> lamp=<id>`／`enemy-snuff <actor> lamp=<id> was=<state>` | rc.31 snuff-lamps：鎖定一盞燈／鎖定的燈變得不合格／吹熄（見上） |
+| `enemy-retreat <actor> seconds=<秒>`／`enemy-pressure <actor> distance=<格>` | rc.31 retreat：碰到人後開始退開／pressure：進入逼近範圍（見 chases-players） |
+| `doll-rush <actor> distance=<格>` | rc.31 rush：人偶進入靠近加速（每次進入一行） |
 | `epilogue-start stage=<id> steps=<n>`／`epilogue-done stage=<id>`／`epilogue-dialog-timeout …` | 尾聲開始／播完／對話等逾時 |
 | `resolve stage=<id> result=<key>` | 尾聲後呼叫 resolve（隨後引擎結束 session，`session-end` 的 reason 是引擎的結束原因） |
 | `session-end <reason> cancelledCues=done` | 局結束；`prepare-failed` 是場景放置失敗 |

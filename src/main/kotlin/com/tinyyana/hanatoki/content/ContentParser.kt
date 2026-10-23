@@ -833,7 +833,12 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                     val amount = e.num("amount", min = 0.0, max = 20.0, exclusiveMin = true, required = true)
                     if (amount != null) effects += HarassEffect.Damage(amount, e.num("min-health", min = 0.0, max = 20.0) ?: 4.0)
                 }
-                else -> e.err("type", "未知的效果「$type」(可用:push、tool-charges、potion、damage)")
+                "damage-percent" -> {
+                    e.only(setOf("type", "percent", "min-health"))
+                    val percent = e.num("percent", min = 0.0, max = 1.0, exclusiveMin = true, required = true)
+                    if (percent != null) effects += HarassEffect.DamagePercent(percent, e.num("min-health", min = 0.0, max = 20.0) ?: 4.0)
+                }
+                else -> e.err("type", "未知的效果「$type」(可用:push、tool-charges、potion、damage、damage-percent)")
             }
         }
         if (n.map["effects"] == null || effects.isEmpty()) n.err("effects", "至少要有一個效果")
@@ -847,9 +852,15 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         n.only(
             setOf(
                 "half-angle", "max-distance", "occlusion", "scan-ticks", "speed", "body-height", "poses", "moving-animation",
-                "move-cues", "freeze-cues", "cue-cooldown-ticks", "harmless-while-frozen",
+                "move-cues", "freeze-cues", "cue-cooldown-ticks", "harmless-while-frozen", "rush",
             ),
         )
+        val rush = n.child("rush")?.let { r ->
+            r.only(setOf("distance", "speed-multiplier", "cues", "cue-interval-ticks"))
+            val distance = r.num("distance", min = 1.0, max = 64.0, required = true)
+            val mult = r.num("speed-multiplier", min = 1.0, max = 3.0, required = true)
+            if (distance != null && mult != null) RushSpec(distance, mult, r.idList("cues"), r.int("cue-interval-ticks", min = 2, max = 400) ?: 8) else null
+        }
         return FrozenWhenWatchedSpec(
             halfAngle = n.num("half-angle", min = 5.0, max = 90.0) ?: 55.0,
             maxDistance = n.num("max-distance", min = 2.0, max = 64.0) ?: 24.0,
@@ -863,6 +874,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
             freezeCues = n.idList("freeze-cues"),
             cueCooldownTicks = n.int("cue-cooldown-ticks", min = 0, max = 400) ?: 6,
             harmlessWhileFrozen = n.bool("harmless-while-frozen") ?: false,
+            rush = rush,
         )
     }
 
@@ -890,7 +902,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
     private fun parseChase(enemy: Node): ChasesPlayersSpec? {
         val n = enemy.child("chases-players")
         if (n == null) { enemy.err("chases-players", "規則 chases-players 需要這個區塊(可以寫空的 {} 用預設值)"); return null }
-        n.only(setOf("speed", "target", "sight-range", "give-up-range", "repath-ticks", "contact", "start-delay-seconds"))
+        n.only(setOf("speed", "target", "sight-range", "give-up-range", "repath-ticks", "contact", "start-delay-seconds", "snuff-lamps", "retreat", "pressure"))
         val targetId = n.str("target") ?: ChaseTarget.NEAREST.id
         val target = ChaseTarget.of(targetId)
         if (target == null) n.err("target", "未知的目標策略「$targetId」(可用:${ChaseTarget.entries.joinToString { it.id }})")
@@ -907,7 +919,48 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
             repathTicks = n.int("repath-ticks", min = MIN_SCAN_TICKS, max = MAX_SCAN_TICKS) ?: 10,
             contact = contact,
             startDelaySeconds = n.num("start-delay-seconds", min = 0.0, max = 60.0) ?: 0.0,
+            snuffLamps = n.child("snuff-lamps")?.let { parseSnuffLamps(it) },
+            retreat = n.child("retreat")?.let { r ->
+                r.only(setOf("seconds", "distance", "speed"))
+                val seconds = r.num("seconds", min = 0.2, max = 30.0, required = true)
+                val distance = r.num("distance", min = 1.0, max = 48.0) ?: 6.0
+                if (contact == null) r.err("seconds", "retreat 要有 contact(沒有接觸效果就不會觸發退開)")
+                if (seconds != null) RetreatSpec(seconds, distance, r.num("speed", min = 0.1, max = 3.0)) else null
+            },
+            pressure = n.child("pressure")?.let { p ->
+                p.only(setOf("distance", "cues", "far-interval-ticks", "near-interval-ticks"))
+                val distance = p.num("distance", min = 1.0, max = 64.0, required = true)
+                val far = p.int("far-interval-ticks", min = 2, max = 400) ?: 40
+                val near = p.int("near-interval-ticks", min = 2, max = 400) ?: 16
+                if (near > far) p.err("near-interval-ticks", "不可大於 far-interval-ticks($far)")
+                val cues = p.idList("cues")
+                if (cues.isEmpty()) p.err("cues", "至少要有一個 cue")
+                if (distance != null && cues.isNotEmpty() && near <= far) PressureSpec(distance, cues, far, near) else null
+            },
         )
+    }
+
+    private fun parseSnuffLamps(n: Node): SnuffLampsSpec? {
+        n.only(
+            setOf(
+                "objects", "states", "preference", "decide-seconds", "reach-radius", "dwell-seconds", "cooldown-seconds", "speed", "cues",
+            ),
+        )
+        val objects = n.idList("objects")
+        if (objects.isEmpty()) n.err("objects", "至少要有一盞燈")
+        if (objects.toSet().size != objects.size) n.err("objects", "燈籠 ID 重複")
+        val states = LinkedHashSet<String>()
+        if (n.map["states"] == null) { states += ObjectStates.LANTERN_BURNING; states += ObjectStates.LANTERN_LIT } else n.idList("states").forEach { states += it }
+        if (states.isEmpty()) n.err("states", "不可為空")
+        for (st in states) if (st !in ObjectStates.LANTERN || st == ObjectStates.LANTERN_UNLIT) n.err("states", "「$st」不能被吹熄(可用:burning、lit)")
+        val preference = n.num("preference", min = 0.0, max = 1.0) ?: 1.0
+        val decide = n.num("decide-seconds", min = 0.5, max = 120.0) ?: 6.0
+        val reach = n.num("reach-radius", min = 0.5, max = 16.0) ?: 2.0
+        val dwell = n.num("dwell-seconds", min = 0.0, max = 30.0) ?: 0.8
+        val cooldown = n.num("cooldown-seconds", min = 0.0, max = 600.0) ?: 10.0
+        val speed = n.num("speed", min = 0.1, max = 3.0)
+        if (objects.isEmpty() || states.isEmpty()) return null
+        return SnuffLampsSpec(objects, states, preference, decide, reach, dwell, cooldown, speed, n.idList("cues"))
     }
 
     private fun parseFlee(enemy: Node): FleesWhenPoweredSpec? {

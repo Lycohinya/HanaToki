@@ -561,6 +561,21 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
         checkShieldBreak()
     }
 
+    /**
+     * rc.31:敵人(chases-players.snuff-lamps 的霧鬼)現在能不能吹熄 [lamp]。場邊燈只在戰鬥中、光環還亮著時能被吹
+     * (跪下、起身、全滅、結束時不行)；不是場邊燈的燈一律 true。
+     */
+    fun lampSnuffable(lamp: String): Boolean {
+        if (lamp !in spec.lampIds) return true
+        return shieldUp && (state == BossState.IDLE || state == BossState.CASTING || state == BossState.PHASE_SHIFT)
+    }
+
+    /** rc.31:場邊燈被敵人吹熄(燈本身已由 SessionRun 重置):寶石恢復，光環照舊。 */
+    fun onLampSnuffedByEnemy(lamp: String) {
+        if (lamp !in spec.lampIds || state == BossState.STOPPED || state == BossState.DEFEATED) return
+        restoreGem(lamp)
+    }
+
     private fun restoreGem(lamp: String) {
         if (!gems.setLit(lamp, false)) return
         val gem = spec.gems.first { it.lamp == lamp }

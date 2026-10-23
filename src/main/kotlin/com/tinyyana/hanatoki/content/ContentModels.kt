@@ -419,6 +419,19 @@ data class FrozenWhenWatchedSpec(
     val cueCooldownTicks: Int,
     /** rc.28:true = 凍結(被看著)期間接觸玩家不推、不扣燈火(只有移動中的才有接觸效果)。預設 false = 同舊版。 */
     val harmlessWhileFrozen: Boolean = false,
+    /** rc.31:靠近成員時加速;null = 不加速(同舊版)。 */
+    val rush: RushSpec? = null,
+)
+
+/**
+ * rc.31 frozen-when-watched.rush:沒人看著、而且最近的成員在 [distance] 格內時,移動速度倍率乘上 [speedMultiplier];
+ * 加速期間每 [cueIntervalTicks] tick 重播一次 [cues](喀喀聲有方位,讓背後的威脅聽得出來)。被看著仍然凍結。
+ */
+data class RushSpec(
+    val distance: Double,
+    val speedMultiplier: Double,
+    val cues: List<String>,
+    val cueIntervalTicks: Int,
 )
 
 enum class ChaseTarget(val id: String) {
@@ -443,6 +456,49 @@ data class ChasesPlayersSpec(
     val contact: HarassSpec?,
     /** rc.26:出生後原地不動(不追也不碰人)幾秒才開始追;0 = 一出生就追(同舊版)。用來讓她先現身、說完開場再追。 */
     val startDelaySeconds: Double = 0.0,
+    /** rc.31:飄向場邊燈把它吹熄;null = 只追人(同舊版)。 */
+    val snuffLamps: SnuffLampsSpec? = null,
+    /** rc.31:接觸成員後退開;null = 不退開(同舊版,貼著繼續追)。 */
+    val retreat: RetreatSpec? = null,
+    /** rc.31:逼近感,近距離週期播 cue;null = 不播(同舊版)。 */
+    val pressure: PressureSpec? = null,
+)
+
+/**
+ * rc.31 chases-players.retreat:接觸效果對成員生效後,這隻朝遠離那位成員的方向退 [distance] 格,持續 [seconds] 秒才恢復追擊
+ * (退開期間不追、不吹燈;接觸效果照常,但每位玩家另有 contact.cooldown-ticks 冷卻)。[speed] 為 null = 沿用 chases-players.speed。
+ */
+data class RetreatSpec(val seconds: Double, val distance: Double, val speed: Double?)
+
+/**
+ * rc.31 chases-players.pressure:最近的成員在 [distance] 格內時,每隔一段時間在這隻身上播 [cues](follow 實體,聽得出方位)。
+ * 間隔隨距離線性縮短:剛進 [distance] 是 [farIntervalTicks],貼身是 [nearIntervalTicks]。退開、僵直、powered 逃跑期間不播。
+ */
+data class PressureSpec(val distance: Double, val cues: List<String>, val farIntervalTicks: Int, val nearIntervalTicks: Int) {
+    /** 最近成員在 [d] 格時的播放間隔(tick)。 */
+    fun intervalAt(d: Double): Int {
+        val t = (d / distance).coerceIn(0.0, 1.0)
+        return Math.round(nearIntervalTicks + (farIntervalTicks - nearIntervalTicks) * t).toInt()
+    }
+}
+
+/**
+ * rc.31 chases-players.snuff-lamps:這隻敵人有機會([preference] 機率,每 [decideSeconds] 秒擲一次)改去最近一盞 [states] 內的
+ * [objects] 燈,飄到 [reachRadius] 內停 [dwellSeconds] 秒就把燈重置成未點亮(進度歸零、燈熄);
+ * 之後 [cooldownSeconds] 秒內不再挑燈。去燈的路上與停留中被閃光照到(僵直)就中斷,打散後燈不受影響。
+ * [speed] 為 null = 沿用 chases-players.speed。燈必須是 lantern 物件;一般燈籠「單向不倒退」的不變式只對沒列在這裡的燈成立。
+ */
+data class SnuffLampsSpec(
+    val objects: List<String>,
+    val states: Set<String>,
+    val preference: Double,
+    val decideSeconds: Double,
+    val reachRadius: Double,
+    val dwellSeconds: Double,
+    val cooldownSeconds: Double,
+    val speed: Double?,
+    /** 吹熄時在燈上播。 */
+    val cues: List<String>,
 )
 
 /**
@@ -514,6 +570,11 @@ sealed interface HarassEffect {
     data class Potion(val effect: String, val durationTicks: Int, val amplifier: Int) : HarassEffect
     /** 傷害 [amount];玩家血量 <= [minHealth] 時不扣(不致死)。 */
     data class Damage(val amount: Double, val minHealth: Double) : HarassEffect
+    /**
+     * rc.31:固定比例傷害——扣玩家**最大血量**的 [percent](0..1),不吃護甲、附魔與抗性(沿用 Boss 招式 damage-percent 的做法);
+     * 玩家血量 <= [minHealth] 時不扣,最多扣到剩 [minHealth](不致死)。
+     */
+    data class DamagePercent(val percent: Double, val minHealth: Double) : HarassEffect
 }
 
 object EnemyRules {

@@ -1023,6 +1023,14 @@ interface DialogPort {
 - 目標列的動作列在局結束、成員離場、換到沒有目標的 stage 時清空（`ObjectiveHudTracker`）。
 - 新 log：`boss-heal reason=start｜restart｜kneel players=<n>`。
 
+### rc.31：小怪固定比例傷害、霧鬼吹燈、人偶靠近加速
+
+- 選填資料欄位（預設零影響，其他副本不受影響；schema 見 [CONTENT-DATA.md](CONTENT-DATA.md)）：`harasses-players`／`chases-players.contact` 的效果型別 `damage-percent`（`percent`、`min-health`）、`chases-players.snuff-lamps`／`retreat`／`pressure`、`frozen-when-watched.rush`。
+- 型別（`com.tinyyana.hanatoki.content`，新欄位都在 data class 尾端有預設值）：`HarassEffect.DamagePercent`（sealed 新子型別，外部若對 `HarassEffect` 做窮舉 `when` 需補分支）、`ChasesPlayersSpec.snuffLamps`（`SnuffLampsSpec`）／`retreat`（`RetreatSpec`）／`pressure`（`PressureSpec`）、`FrozenWhenWatchedSpec.rush`（`RushSpec`）；頂層函式 `pickSnuffLamp`、`rushSpeed`（`SnuffCandidate`、`RUSH_SPEED_CAP`，RuleLogic.kt）。
+- `BossRun` 新增 `lampSnuffable(lamp)`、`onLampSnuffedByEnemy(lamp)`（敵人吹熄場邊燈時恢復寶石）；`BossHost` 介面不變。
+- 驗證：`snuff-lamps.objects` 必須存在且是 lantern 物件。
+- 新 log：`enemy-snuff-seek`、`enemy-snuff-abort`、`enemy-snuff`、`enemy-retreat`、`enemy-pressure`、`doll-rush`；`enemy-touch` 的 effect 可含 `damage%<比例>`。
+
 ### rc.30：每人打散統計、敵人 `dispersed-tip`
 
 - 選填資料欄位（預設零影響；schema 見 [CONTENT-DATA.md](CONTENT-DATA.md)）：enemies.yml 任何敵人可寫 `dispersed-tip: { text, every, count, hold-seconds }`。

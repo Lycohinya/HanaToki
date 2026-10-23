@@ -253,6 +253,23 @@ class SessionRun(
         /** chases-players:目前鎖定的成員與上次下追擊路徑的 tick。 */
         var chaseTarget: UUID? = null
         var lastChase = -1000L
+        /** rc.31 snuff-lamps:正在去吹的燈、到燈邊的 tick 與最後一次在燈邊被掃到的 tick、下次可擲骰決定的 tick、吹完後的冷卻到期 tick。 */
+        var snuffLamp: String? = null
+        var snuffArrivedAt = -1L
+        var snuffSeenAt = -1L
+        var snuffNextDecideAt = 0L
+        var snuffCooldownUntil = 0L
+        /** rc.31 retreat:退開到哪個 tick 為止、要遠離的點(x,z)與上次下退開路徑的 tick。 */
+        var retreatUntil = -1L
+        var retreatX = 0.0
+        var retreatZ = 0.0
+        var lastRetreat = -1000L
+        /** rc.31 pressure:上次播逼近 cue 的 tick,與是否已記過 enemy-pressure log(退到範圍外才重置)。 */
+        var pressureAt = -1000L
+        var pressured = false
+        /** rc.31 rush:人偶正在加速(靠近成員、沒被看著)與上次播加速喀喀聲的 tick。 */
+        var rushing = false
+        var rushCueAt = -1000L
         /** flees-when-powered:正在逃(換了外觀)與上次下逃跑路徑的 tick。 */
         var fleeing = false
         var lastFlee = -1000L
@@ -1175,7 +1192,18 @@ class SessionRun(
             rt.spec.frozenWhenWatched?.let { frozenStep(rt, loc, it, snap) }
             // rc.28 harmless-while-frozen:被看著凍結的人偶不推人、不扣燈火
             val harmless = rt.freeze.frozen && rt.spec.frozenWhenWatched?.harmlessWhileFrozen == true
-            if (!harmless) rt.spec.contact?.let { harassStep(rt, loc, it, snap, if (rt.spec.harassesPlayers != null) touch else chaseTouch) }
+            if (!harmless) rt.spec.contact?.let {
+                val hit = harassStep(rt, loc, it, snap, if (rt.spec.harassesPlayers != null) touch else chaseTouch)
+                // rc.31 retreat:碰到人之後退開一段(chases-players 才有)
+                val retreat = rt.spec.chasesPlayers?.retreat
+                if (hit != null && retreat != null) {
+                    rt.retreatUntil = now + (retreat.seconds * 20).toLong()
+                    rt.retreatX = hit[0]
+                    rt.retreatZ = hit[2]
+                    rt.lastRetreat = -1000L
+                    log("enemy-retreat", "${rt.actorId} seconds=${fmtSeconds(retreat.seconds)}")
+                }
+            }
         }
         publishDrain(contest)
     }
@@ -1243,15 +1271,19 @@ class SessionRun(
 
     private fun fmt2(v: Double): String = String.format(java.util.Locale.ROOT, "%.2f", v)
 
-    private fun harassStep(rt: EnemyRt, loc: Location, h: HarassSpec, snap: Map<UUID, DoubleArray>, cooldowns: TouchCooldowns) {
-        if (snap.isEmpty()) return
+    /** 回最後一位被碰到的成員快照位置(沒人被碰到 = null);rc.31 retreat 用它決定往哪退。 */
+    private fun harassStep(rt: EnemyRt, loc: Location, h: HarassSpec, snap: Map<UUID, DoubleArray>, cooldowns: TouchCooldowns): DoubleArray? {
+        if (snap.isEmpty()) return null
         val current = members().toSet()
+        var hit: DoubleArray? = null
         for ((playerId, pos) in snap) {
             if (playerId !in current) continue
             if (!withinContact(pos[0] - loc.x, pos[1] - loc.y, pos[2] - loc.z, h.contactRadius)) continue
             if (!cooldowns.tryTouch(playerId, now, h.cooldownTicks)) continue
             applyHarass(rt, loc, h, playerId, pos)
+            hit = pos
         }
+        return hit
     }
 
     private fun applyHarass(rt: EnemyRt, loc: Location, h: HarassSpec, playerId: UUID, pos: DoubleArray) {
@@ -1282,9 +1314,39 @@ class SessionRun(
                     applied += "damage"
                 }
             }
+            is HarassEffect.DamagePercent -> {
+                // 固定比例、不看護甲與抗性:直接改血量，最多扣到剩 minHealth(不致死)；血量在成員快照裡讀，沒血可扣就不記
+                if (pos[HEALTH] - effect.minHealth > 0.0) {
+                    ctx.runOnMember(playerId) { p ->
+                        if (p.isDead) return@runOnMember
+                        val max = p.getAttribute(Attribute.MAX_HEALTH)?.value ?: 20.0
+                        val amount = minOf(max * effect.percent, p.health - effect.minHealth)
+                        if (amount > 0.0) {
+                            p.health = p.health - amount
+                            runCatching { p.playHurtAnimation(0f) }
+                        }
+                    }
+                    applied += "damage%${fmt2(effect.percent)}"
+                }
+            }
         }
         log("enemy-touch", "${rt.actorId} player=${nameOf(playerId)} effect=${if (applied.isEmpty()) "none" else applied.joinToString("+")}")
         cues(h.cues, loc, core.actorController.entityOf(sessionId, rt.actorId))
+    }
+
+    /** 把燈重置成未點亮(狀態機、方塊外觀、持續 cue、世界標示)。boss 的場邊燈與 rc.31 的 snuff-lamps 都走這裡。 */
+    private fun resetLantern(lamp: String) {
+        val rt = lanterns[lamp] ?: return
+        rt.machine.reset()
+        rt.hold?.cancel(); rt.hold = null
+        rt.people = -1
+        rt.probing = false
+        rt.milestonesFired = 0
+        rt.beamers.clear()
+        rt.drainRate = 0.0; rt.drainers = 0; rt.contestedSince = -1
+        clearLanternHints(lamp)
+        rt.spec.states[ObjectStates.LANTERN_UNLIT]?.let { applyBlocks(marker(rt.spec.markerId), it.blocks) }
+        log("object", "$lamp reset->unlit")
     }
 
     // ---- 敵人規則:frozen-when-watched / chases-players / flees-when-powered ----
@@ -1318,6 +1380,10 @@ class SessionRun(
         watchers.sortBy { it.distance }
         val destination = nearest?.let { Location(world, it[0], it[1], it[2]) }
         val scanId = ++rt.scanSeq
+        // rc.31 rush:最近的成員在距離內 = 沒人看著時加速(被看著仍凍結)
+        val nearDistance: Double? = if (nearest != null) nearestDistance else null
+        val moveSpeed = rushSpeed(f.speed, f.rush, nearDistance)
+        val rushing = f.rush != null && nearDistance != null && nearDistance <= f.rush.distance
         ctx.actors().runOnEntity(rt.actorId) { e ->
             var watcher: UUID? = null
             var failed = false
@@ -1341,12 +1407,12 @@ class SessionRun(
                     mob?.pathfinder?.stopPathfinding()
                 } else {
                     (e as? LivingEntity)?.setAI(true)
-                    if (destination != null) mob?.pathfinder?.moveTo(destination, f.speed) else mob?.pathfinder?.stopPathfinding()
+                    if (destination != null) mob?.pathfinder?.moveTo(destination, moveSpeed) else mob?.pathfinder?.stopPathfinding()
                 }
             }
             val verdict = watcher
             val raycastFailed = failed
-            ctx.submit { onWatchVerdict(rt, scanId, verdict, raycastFailed, f) }
+            ctx.submit { onWatchVerdict(rt, scanId, verdict, raycastFailed, f, if (rushing) nearDistance else null) }
         }
     }
 
@@ -1381,7 +1447,7 @@ class SessionRun(
     }
 
     /** anchor 執行緒:套用人偶這一輪的判定結果,狀態轉換才打 log／播 cue／換姿勢。 */
-    private fun onWatchVerdict(rt: EnemyRt, scanId: Int, watcher: UUID?, raycastFailed: Boolean, f: FrozenWhenWatchedSpec) {
+    private fun onWatchVerdict(rt: EnemyRt, scanId: Int, watcher: UUID?, raycastFailed: Boolean, f: FrozenWhenWatchedSpec, rushDistance: Double? = null) {
         if (closed || scanId <= rt.verdictSeq || rt.machine.state != EnemyMachine.State.ALIVE) return
         rt.verdictSeq = scanId
         if (raycastFailed && !raycastFailureLogged) {
@@ -1392,7 +1458,8 @@ class SessionRun(
         val at = rt.lastLoc
         val initial = rt.initialFreeze
         rt.initialFreeze = false
-        when (rt.freeze.update(watcher != null)) {
+        val change = rt.freeze.update(watcher != null)
+        when (change) {
             FreezeState.Change.FROZE -> {
                 val index = rt.freeze.pickPose(f.poses.size, random)
                 log("doll-frozen", "${rt.actorId} watcher=${nameOf(watcher!!)}")
@@ -1415,10 +1482,29 @@ class SessionRun(
                 }
             }
         }
+        // rc.31 rush:移動中、最近成員在距離內 = 加速；進入時記 log，期間每隔 cueIntervalTicks 重播喀喀聲(有方位)
+        val rush = f.rush
+        if (rush != null && rushDistance != null && watcher == null && !rt.freeze.frozen) {
+            if (!rt.rushing) {
+                rt.rushing = true
+                log("doll-rush", "${rt.actorId} distance=${fmt2(rushDistance)}")
+            }
+            if (change != FreezeState.Change.MOVED && at != null && now - rt.rushCueAt >= rush.cueIntervalTicks) {
+                rt.rushCueAt = now
+                cues(rush.cues, at, entity)
+            }
+        } else {
+            rt.rushing = false
+        }
     }
 
     /** 大幽靈:挑目標、朝目標走;沒有目標(超出索敵與放棄距離)就停下。 */
     private fun chaseStep(rt: EnemyRt, loc: Location, c: ChasesPlayersSpec, snap: Map<UUID, DoubleArray>) {
+        // rc.31 retreat:碰到人之後退開一段時間,期間不追、不吹燈、不播逼近 cue
+        c.retreat?.let { if (retreatStep(rt, loc, c, it)) return }
+        c.pressure?.let { pressureStep(rt, loc, it, snap) }
+        // rc.31 snuff-lamps:這輪改去吹燈(或守在燈邊)就不追人;接觸效果照常(applyEnemyScan 之後還會跑 harassStep)
+        c.snuffLamps?.let { if (snuffStep(rt, loc, c, it)) return }
         if (now - rt.lastChase < c.repathTicks) return
         rt.lastChase = now
         val current = members().toSet()
@@ -1435,6 +1521,109 @@ class SessionRun(
             mob.target = null
             if (destination != null) mob.pathfinder.moveTo(destination, c.speed) else mob.pathfinder.stopPathfinding()
         }
+    }
+
+    /** rc.31:退開中(回 true,這輪不追):朝遠離碰到的那位成員的方向走 [RetreatSpec.distance] 格,被牆擋住依序偏轉角度。 */
+    private fun retreatStep(rt: EnemyRt, loc: Location, c: ChasesPlayersSpec, r: RetreatSpec): Boolean {
+        if (now >= rt.retreatUntil) return false
+        if (now - rt.lastRetreat >= c.repathTicks) {
+            rt.lastRetreat = now
+            val speed = r.speed ?: c.speed
+            val fromX = rt.retreatX
+            val fromZ = rt.retreatZ
+            ctx.actors().runOnEntity(rt.actorId) { e ->
+                val mob = e as? Mob ?: return@runOnEntity
+                mob.target = null
+                for (angle in FLEE_ANGLES) {
+                    val point = fleePoint(loc.x, loc.z, fromX, fromZ, r.distance, angle)
+                    if (mob.pathfinder.moveTo(Location(world, point[0], loc.y, point[1]), speed)) break
+                }
+            }
+        }
+        return true
+    }
+
+    /** rc.31:逼近感。最近成員在 [PressureSpec.distance] 內,按距離決定的間隔在她身上(follow 實體)播 cue。 */
+    private fun pressureStep(rt: EnemyRt, loc: Location, p: PressureSpec, snap: Map<UUID, DoubleArray>) {
+        val current = members().toSet()
+        var nearest = Double.MAX_VALUE
+        for ((id, pos) in snap) if (id in current) nearest = minOf(nearest, distance(pos, loc))
+        if (nearest > p.distance) { rt.pressured = false; return }
+        if (!rt.pressured) {
+            rt.pressured = true
+            log("enemy-pressure", "${rt.actorId} distance=${fmt2(nearest)}")
+        }
+        if (now - rt.pressureAt < p.intervalAt(nearest)) return
+        rt.pressureAt = now
+        cues(p.cues, loc, core.actorController.entityOf(sessionId, rt.actorId))
+    }
+
+    /**
+     * rc.31:霧鬼吹燈。回 true = 這輪這隻在去燈的路上或守在燈邊(不追人)；false = 照常追人。
+     * 每 [SnuffLampsSpec.decideSeconds] 秒擲一次 [SnuffLampsSpec.preference]，中了就鎖定最近的合格燈直到吹完或燈不合格；
+     * 飄到 [SnuffLampsSpec.reachRadius] 內停 [SnuffLampsSpec.dwellSeconds] 秒才吹(僵直的敵人不在掃描裡，所以被閃光照住就中斷)。
+     */
+    private fun snuffStep(rt: EnemyRt, loc: Location, c: ChasesPlayersSpec, s: SnuffLampsSpec): Boolean {
+        if (now < rt.snuffCooldownUntil) return false
+        val candidates = s.objects.mapNotNull { id ->
+            val lantern = lanterns[id] ?: return@mapNotNull null
+            if (!stageActive(lantern.spec.stage) || lantern.machine.state.name.lowercase() !in s.states) return@mapNotNull null
+            if (boss?.lampSnuffable(id) == false) return@mapNotNull null
+            val dx = lantern.loc.x - loc.x
+            val dy = lantern.loc.y - loc.y
+            val dz = lantern.loc.z - loc.z
+            SnuffCandidate(id, Math.sqrt(dx * dx + dy * dy + dz * dz))
+        }
+        val committed = rt.snuffLamp
+        val valid = committed != null && candidates.any { it.id == committed }
+        if (committed != null && !valid) {
+            rt.snuffLamp = null
+            rt.snuffArrivedAt = -1L
+            log("enemy-snuff-abort", "${rt.actorId} lamp=$committed")
+        }
+        if (!valid) {
+            if (candidates.isEmpty() || now < rt.snuffNextDecideAt) return false
+            rt.snuffNextDecideAt = now + (s.decideSeconds * 20).toLong()
+        }
+        val picked = pickSnuffLamp(candidates, if (valid) committed else null, s.preference, random.nextDouble()) ?: return false
+        val lantern = lanterns[picked] ?: return false
+        if (!valid) {
+            rt.snuffLamp = picked
+            rt.snuffArrivedAt = -1L
+            log("enemy-snuff-seek", "${rt.actorId} lamp=$picked")
+        }
+        val near = withinContact(loc.x - lantern.loc.x, loc.y - lantern.loc.y, loc.z - lantern.loc.z, s.reachRadius, CONTEST_HEIGHT)
+        if (near) {
+            // 僵直期間不在掃描裡:隔太久才又掃到 = 被打斷過，重新計停留
+            if (rt.snuffArrivedAt < 0L || now - rt.snuffSeenAt > maxOf(scanPeriod * 3L, 20L)) rt.snuffArrivedAt = now
+            rt.snuffSeenAt = now
+            if (now - rt.snuffArrivedAt >= (s.dwellSeconds * 20).toLong()) snuffLantern(rt, lantern, s)
+            return true
+        }
+        rt.snuffArrivedAt = -1L
+        if (now - rt.lastChase >= c.repathTicks) {
+            rt.lastChase = now
+            val target = lantern.loc.clone()
+            val speed = s.speed ?: c.speed
+            ctx.actors().runOnEntity(rt.actorId) { e ->
+                val mob = e as? Mob ?: return@runOnEntity
+                mob.target = null
+                mob.pathfinder.moveTo(target, speed)
+            }
+        }
+        return true
+    }
+
+    private fun snuffLantern(rt: EnemyRt, lantern: LanternRt, s: SnuffLampsSpec) {
+        val id = lantern.spec.id
+        val was = lantern.machine.state.name.lowercase()
+        rt.snuffLamp = null
+        rt.snuffArrivedAt = -1L
+        rt.snuffCooldownUntil = now + (s.cooldownSeconds * 20).toLong()
+        resetLantern(id)
+        boss?.onLampSnuffedByEnemy(id)
+        log("enemy-snuff", "${rt.actorId} lamp=$id was=$was")
+        cues(s.cues, lantern.loc)
     }
 
     /** powered 期間的逃跑:碰到 powered 成員就被打散(先判定,優先於任何傷害效果),否則朝遠離最近 powered 成員的方向跑。 */
@@ -1626,6 +1815,11 @@ class SessionRun(
             rt.freeze.reset()
             rt.chaseTarget = null
             rt.lastChase = -1000L
+            rt.snuffLamp = null
+            rt.snuffArrivedAt = -1L
+            rt.retreatUntil = -1L
+            rt.pressured = false
+            rt.rushing = false
             rt.lastFlee = -1000L
             if (rt.fleeing) setFleeing(rt, false) else if (wasFrozen) syncBody(rt)
         }
@@ -2619,19 +2813,7 @@ class SessionRun(
 
         override fun actionBarText(player: UUID, key: String, params: Map<String, String>) { ctx.actionBar(player, key, params) }
 
-        override fun resetLamp(lamp: String) {
-            val rt = lanterns[lamp] ?: return
-            rt.machine.reset()
-            rt.hold?.cancel(); rt.hold = null
-            rt.people = -1
-            rt.probing = false
-            rt.milestonesFired = 0
-            rt.beamers.clear()
-            rt.drainRate = 0.0; rt.drainers = 0; rt.contestedSince = -1
-            clearLanternHints(lamp)
-            rt.spec.states[ObjectStates.LANTERN_UNLIT]?.let { applyBlocks(marker(rt.spec.markerId), it.blocks) }
-            this@SessionRun.log("object", "$lamp reset->unlit")
-        }
+        override fun resetLamp(lamp: String) = resetLantern(lamp)
 
         override fun setPumpkinsAvailable(objects: List<String>, available: Boolean) {
             for (id in objects) {

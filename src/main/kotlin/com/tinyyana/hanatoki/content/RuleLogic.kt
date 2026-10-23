@@ -260,3 +260,26 @@ fun bodyPlan(state: EnemyMachine.State, frozen: Boolean, fleeing: Boolean, isDol
         else -> BodyPlan(true, BodyAnim.IDLE)
     }
 }
+
+// ---- rc.31:霧鬼吹燈、人偶靠近加速 ----
+
+/** 可被吹熄的燈與它到敵人的距離。 */
+data class SnuffCandidate(val id: String, val distance: Double)
+
+/**
+ * 霧鬼這一刻要不要去吹燈。[candidates] 是目前合格的燈(狀態對、stage 進行中…)。
+ * 已鎖定的 [committed] 燈還合格就繼續去(不來回改主意);否則 [roll](0 <= roll < 1,呼叫端擲骰)< [preference] 才挑最近的一盞,
+ * 擲不中回 null = 這輪繼續追人。[preference] = 1 一定去燈,0 永遠追人。
+ */
+fun pickSnuffLamp(candidates: List<SnuffCandidate>, committed: String?, preference: Double, roll: Double): String? {
+    if (candidates.isEmpty()) return null
+    if (committed != null && candidates.any { it.id == committed }) return committed
+    if (roll >= preference) return null
+    return candidates.minWith(compareBy<SnuffCandidate>({ it.distance }, { it.id })).id
+}
+
+/** 人偶沒人看著時的尋路速度倍率:最近成員在 [RushSpec.distance] 內就乘上 [RushSpec.speedMultiplier](上限 [RUSH_SPEED_CAP])。 */
+fun rushSpeed(base: Double, rush: RushSpec?, nearestDistance: Double?): Double =
+    if (rush != null && nearestDistance != null && nearestDistance <= rush.distance) minOf(base * rush.speedMultiplier, RUSH_SPEED_CAP) else base
+
+const val RUSH_SPEED_CAP = 4.0
