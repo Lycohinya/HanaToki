@@ -88,6 +88,8 @@ class SessionRun(
     private val collectPrior = HashMap<UUID, Set<String>>()
     private val collectPriorPending = HashSet<UUID>()
     private val collectPriorFailed = HashSet<UUID>()
+    /** rc.36:收下提示的逐人保留——這位玩家的目標列在這個 tick 之前不重畫(不用全局的 [objectiveHoldUntil]，免得一個人收下就凍住隊友的目標列)。 */
+    private val collectHoldUntil = HashMap<UUID, Long>()
     private var collectProbing = false
     private var collectProbeAt = 0L
 
@@ -1946,8 +1948,25 @@ class SessionRun(
         log("collect-found", "${spec.id} player=${nameOf(id)} first=$first")
         markProgress()
         spec.cue?.let { cueId -> Bukkit.getPlayer(id)?.let { p -> cue(cueId, rt.loc, only = listOf(p)) } }
-        CollectRules.textKey(spec, first)?.let { key -> ctx.actionBar(id, key, CollectRules.textParams(spec, found, collects.size)) }
+        val key = CollectRules.textKey(spec, first, known = prior != null, complete = prior != null && found >= collects.size)
+        key?.let { ctx.actionBar(id, it, CollectRules.textParams(spec, found, collects.size)) }
+        // rc.36:每秒重畫的目標列會在一秒內把收下的提示蓋掉(實玩「完全沒有提示」)，這位玩家的目標列暫停 holdSeconds 秒
+        if (key != null && spec.holdSeconds > 0.0) collectHoldUntil[id] = now + (spec.holdSeconds * 20).toLong()
+        objectiveDirty = true
         reconcileCollectViewers()
+    }
+
+    /**
+     * rc.36:目標文字 `{collect:left}`:這位玩家在**目前這個 stage**終身還沒收過的藏點數，套 texts `<dungeonId>.collect.left-format`(`{n}` = 數字)。
+     * 沒有收集物、已全收、查不到終身紀錄(沒有 port／失敗／還沒回來)或沒寫格式 = 空字串。藏點只在所屬 stage 進行中才收得到，所以這是玩家這一段唯一的提醒。
+     */
+    private fun collectLeftText(playerId: UUID): String {
+        if (collects.isEmpty()) return ""
+        val stageId = currentStage?.id ?: return ""
+        val inStage = collects.values.filter { it.spec.stage == stageId }.map { it.spec.id }
+        if (inStage.isEmpty()) return ""
+        val left = CollectRules.leftInStage(inStage, collectPrior[playerId], collectLedger.spotsOf(playerId))
+        return CollectRules.leftText(core.texts.rawOrNull(spec.dungeonId + ".collect.left-format"), left)
     }
 
     /** 成員斷線／重連:他的 Player 物件作廢，所有藏點的開啟記帳清掉(下一輪 reconcile 重開，已收過的不會再開)。 */
@@ -2333,7 +2352,7 @@ class SessionRun(
                 if (player != null && rt.book.isShown(playerId)) setCollectViewer(rt, playerId, player, false)
                 rt.book.forget(playerId)
             }
-            collectPrior.remove(playerId); collectPriorPending.remove(playerId); collectPriorFailed.remove(playerId)
+            collectPrior.remove(playerId); collectPriorPending.remove(playerId); collectPriorFailed.remove(playerId); collectHoldUntil.remove(playerId)
         }
         if (objectiveHud.forget(playerId)) clearObjectiveHud(listOf(playerId))
         // 離場的人已不在成員名單，身體狀態還原走 PlayerOp(不依賴名單)，見 BossHostImpl.restoreDowned
@@ -2634,11 +2653,12 @@ class SessionRun(
         val tool = effectiveTools.values.firstOrNull()
         val burn = burnPips()
         for (playerId in members()) {
+            if ((collectHoldUntil[playerId] ?: 0L) > now) continue
             val base = if (tool == null) mapOf("burn" to burn) else {
                 val c = chargesOf(playerId, tool)
                 mapOf("charges" to c.toString(), "max" to tool.maxCharges.toString(), "pips" to chargePips(c, tool.maxCharges), "burn" to burn)
             }
-            val params = base + mapOf("nearest:power-up" to nearestPowerUpText(playerId))
+            val params = base + mapOf("nearest:power-up" to nearestPowerUpText(playerId), "collect:left" to collectLeftText(playerId))
             ctx.actionBar(playerId, key, params)
             objectiveHud.shown(playerId)
         }
@@ -3199,7 +3219,7 @@ class SessionRun(
             for (id in rt.book.shownIds()) Bukkit.getPlayer(id)?.let { p -> core.propController.setViewer(sessionId, collectPropId(rt), p, false) }
             rt.book.clear(); rt.pending.clear()
         }
-        collectLedger.clear(); collectPrior.clear(); collectPriorPending.clear(); collectPriorFailed.clear()
+        collectLedger.clear(); collectPrior.clear(); collectPriorPending.clear(); collectPriorFailed.clear(); collectHoldUntil.clear()
         closed = true
         timers.clear()
         touch.clear()

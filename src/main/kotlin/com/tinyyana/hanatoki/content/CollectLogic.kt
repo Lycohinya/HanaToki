@@ -90,9 +90,31 @@ object CollectRules {
     /** `{found}`:終身進度(已知 [prior] 時 = 聯集)，不知道就只算本局。 */
     fun found(prior: Set<String>?, thisRun: Set<String>): Int = if (prior == null) thisRun.size else (prior + thisRun).size
 
-    /** 收下時 ActionBar 的 texts key:第一次用 [CollectibleSpec.foundFirstKey]，重訪用 foundRepeatKey(沒寫退回 first)。 */
-    fun textKey(spec: CollectibleSpec, first: Boolean): String? =
-        if (first) spec.foundFirstKey else (spec.foundRepeatKey ?: spec.foundFirstKey)
+    /**
+     * 收下時 ActionBar 的 texts key。
+     * - [known] false(查不到終身紀錄)→ [CollectibleSpec.foundUnknownKey]，沒寫退回第一次那句；
+     * - 終身第一次且這次剛好集滿([complete])→ [CollectibleSpec.foundCompleteKey]，沒寫退回第一次那句；
+     * - 第一次 → [CollectibleSpec.foundFirstKey]；重訪 → foundRepeatKey(沒寫退回 first)。
+     */
+    fun textKey(spec: CollectibleSpec, first: Boolean, known: Boolean = true, complete: Boolean = false): String? = when {
+        !known -> spec.foundUnknownKey ?: (if (first) spec.foundFirstKey else (spec.foundRepeatKey ?: spec.foundFirstKey))
+        first && complete -> spec.foundCompleteKey ?: spec.foundFirstKey
+        first -> spec.foundFirstKey
+        else -> spec.foundRepeatKey ?: spec.foundFirstKey
+    }
+
+    /**
+     * rc.36:這位玩家在 [stageSpots](目前這個 stage 的藏點 id)裡終身還沒收過的有幾處(已收過 = [prior] 聯集本局 [thisRun])。
+     * 查不到終身紀錄([prior] == null)回 null——寧可不顯示，也不顯示一個把已收過的算成還沒收的數字。
+     */
+    fun leftInStage(stageSpots: Collection<String>, prior: Set<String>?, thisRun: Set<String>): Int? {
+        if (prior == null) return null
+        return stageSpots.count { it !in prior && it !in thisRun }
+    }
+
+    /** 目標文字 `{collect:left}`:[left] 為 null 或 0 = 空字串；否則把 [format] 的 `{n}` 換成數字。沒有 format 也是空字串。 */
+    fun leftText(format: String?, left: Int?): String =
+        if (format == null || left == null || left <= 0) "" else format.replace("{n}", left.toString())
 
     fun textParams(spec: CollectibleSpec, found: Int, total: Int): Map<String, String> =
         mapOf("n" to spec.label, "found" to found.toString(), "total" to total.toString())

@@ -658,16 +658,20 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
     }
 
     /**
-     * rc.32 探索收集物:`type: collectible, marker, stage?, radius?(預設 1.5), n(ActionBar 的 {n}，文字)?, found-first?, found-repeat?, cue?, prop?`。
+     * rc.32 探索收集物:`type: collectible, marker, stage?, radius?(預設 1.5), n(ActionBar 的 {n}，文字)?, found-first?, found-repeat?, found-unknown?, found-complete?, hold-seconds?(預設 3), cue?, prop?`。
      * 沒有 states(不換方塊外觀)；浮空實體逐人可見，見 [CollectibleSpec]。
      */
     private fun parseCollectible(id: String, node: Node): CollectibleSpec? {
-        node.only(setOf("type", "marker", "stage", "radius", "n", "found-first", "found-repeat", "cue", "prop"))
+        node.only(setOf("type", "marker", "stage", "radius", "n", "found-first", "found-repeat", "found-unknown", "found-complete", "hold-seconds", "cue", "prop"))
         val marker = node.id("marker", required = true)
         val radius = node.num("radius", min = 0.5, max = 8.0) ?: 1.5
         val label = node.str("n") ?: ""
+        val hold = node.num("hold-seconds", min = 0.0, max = 20.0) ?: 3.0
         if (marker == null) return null
-        return CollectibleSpec(id, marker, node.id("stage"), radius, label, node.str("found-first"), node.str("found-repeat"), node.id("cue"), parsePowerUpProp(node))
+        return CollectibleSpec(
+            id, marker, node.id("stage"), radius, label, node.str("found-first"), node.str("found-repeat"), node.id("cue"), parsePowerUpProp(node),
+            foundUnknownKey = node.str("found-unknown"), foundCompleteKey = node.str("found-complete"), holdSeconds = hold,
+        )
     }
 
     /** `prop: { item: JACK_O_LANTERN, scale: 0.9, height: 1.1, bob: 0.3, bob-seconds: 3, spin-degrees: 90, glow: true, model: "lycohinya:mist_paper_fortune" }`(rc.27，glow rc.32，model rc.33，選填)。 */

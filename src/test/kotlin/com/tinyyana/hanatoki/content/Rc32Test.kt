@@ -230,6 +230,64 @@ class Rc32Test {
     }
 
     @Test
+    fun `rc36 ActionBar 文字 key，查不到終身紀錄與剛好集滿各有自己的句子，沒寫就退回第一次`() {
+        val full = CollectibleSpec("c", "m", null, 1.5, "三", "t.first", "t.repeat", null, null, foundUnknownKey = "t.unknown", foundCompleteKey = "t.complete")
+        assertEquals("t.unknown", CollectRules.textKey(full, true, known = false))
+        assertEquals("t.unknown", CollectRules.textKey(full, false, known = false))
+        assertEquals("t.complete", CollectRules.textKey(full, true, known = true, complete = true))
+        assertEquals("t.first", CollectRules.textKey(full, true, known = true, complete = false))
+        // 重訪不會是集滿那一下(重訪代表早就收過)
+        assertEquals("t.repeat", CollectRules.textKey(full, false, known = true, complete = true))
+        // 沒寫 unknown／complete:退回原本的 first／repeat
+        assertEquals("t.first", CollectRules.textKey(spot(), true, known = false))
+        assertEquals("t.repeat", CollectRules.textKey(spot(), false, known = false))
+        assertEquals("t.first", CollectRules.textKey(spot(), true, known = true, complete = true))
+    }
+
+    @Test
+    fun `rc36 這一段還沒收過的藏點數，已收過的終身紀錄與本局都扣掉，查不到終身紀錄就不數`() {
+        val stage = listOf("a", "b", "c")
+        assertEquals(3, CollectRules.leftInStage(stage, emptySet(), emptySet()))
+        assertEquals(1, CollectRules.leftInStage(stage, setOf("a"), setOf("b")))
+        assertEquals(0, CollectRules.leftInStage(stage, setOf("a", "b", "c", "z"), emptySet()))
+        assertNull(CollectRules.leftInStage(stage, null, setOf("a")))
+        assertEquals(0, CollectRules.leftInStage(emptyList(), emptySet(), emptySet()))
+    }
+
+    @Test
+    fun `rc36 目標文字 collect left，0 或未知或沒格式都是空字串`() {
+        val format = "這一區還藏著 {n} 張"
+        assertEquals("這一區還藏著 2 張", CollectRules.leftText(format, 2))
+        assertEquals("", CollectRules.leftText(format, 0))
+        assertEquals("", CollectRules.leftText(format, null))
+        assertEquals("", CollectRules.leftText(null, 2))
+    }
+
+    @Test
+    fun `rc36 collectible 的新欄位解析，預設 hold 3 秒，hold 範圍受限`() {
+        val spec = withCollectibles(
+            listOf(
+                "c1:", "  type: collectible", "  marker: c1", "  found-first: a", "  found-unknown: b", "  found-complete: c", "  hold-seconds: 4.5",
+                "c2:", "  type: collectible", "  marker: c2",
+            ).joinToString("\n") { "          $it" },
+        )
+        val a = spec.objects.getValue("c1") as CollectibleSpec
+        assertEquals("b", a.foundUnknownKey); assertEquals("c", a.foundCompleteKey); assertEquals(4.5, a.holdSeconds)
+        val b = spec.objects.getValue("c2") as CollectibleSpec
+        assertNull(b.foundUnknownKey); assertNull(b.foundCompleteKey); assertEquals(3.0, b.holdSeconds)
+        val bad = assertFailsWith<ContentDataException> { withCollectibles("          c1:\n            type: collectible\n            marker: m\n            hold-seconds: 99") }.errors
+        assertTrue(bad.any { "hold-seconds" in it })
+    }
+
+    @Test
+    fun `rc36 新的文案 key 也要存在`() {
+        val spec = withCollectibles("          c1:\n            type: collectible\n            marker: c1\n            found-unknown: collect.nope\n            found-complete: collect.nope2")
+        val texts = ContentValidator.validateTexts(spec) { it in BossFixtures.TEXT_KEYS }
+        assertTrue(texts.any { "objects.c1.found-unknown" in it && "collect.nope" in it }, texts.toString())
+        assertTrue(texts.any { "objects.c1.found-complete" in it }, texts.toString())
+    }
+
+    @Test
     fun `距離，量身體中心到浮空實體中心`() {
         // marker 方塊底面中心 (10.5, 64, 20.5)，實體高 1.0 → 中心 y=65；玩家腳底 y=64 → 身體中心 64.9
         assertTrue(CollectRules.within(10.5, 64.0, 21.9, 10.5, 64.0, 20.5, 1.0, 1.5))

@@ -355,6 +355,12 @@ data class CollectibleSpec(
     /** 收下時只給該玩家的 cue；null = 無聲。 */
     val cue: String?,
     val prop: PowerUpProp?,
+    /** rc.36:查不到這位玩家的終身收集紀錄(沒有 port、失敗、還沒回來)時用的 texts key；null = 退回 [foundFirstKey]。內容通常只寫籤名，不寫進度。 */
+    val foundUnknownKey: String? = null,
+    /** rc.36:這次收下讓終身進度剛好集滿(`{found}` == `{total}`)時用的 texts key；null = 退回 [foundFirstKey]。 */
+    val foundCompleteKey: String? = null,
+    /** rc.36:收下後這位玩家的 ActionBar 目標列暫停重畫幾秒，讓收下的提示看得到(只有他自己，隊友的目標列不受影響)。 */
+    val holdSeconds: Double = 3.0,
 ) : ObjectSpec {
     override val states: Map<String, StateEffect> get() = emptyMap()
 }

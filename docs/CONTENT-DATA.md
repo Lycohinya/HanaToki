@@ -1,4 +1,4 @@
-# 資料驅動副本內容（1.0.0-rc.35）
+# 資料驅動副本內容（1.0.0-rc.36）
 
 內容插件只給 **一個資料夾 + texts**，行為由框架內建的 `DataDrivenBehavior` 依資料執行，內容端不寫 Kotlin。另做一座副本只換設定檔與資產。判準：加第 N+1 盞燈籠、第 N+1 種幽靈、第 N+1 段提示，只改一筆 YAML。
 
@@ -283,11 +283,16 @@ objects:
     n: "一"                      # ActionBar 的 {n}（文字，引擎不換算，例如國字）
     found-first: mist-patrol.collect.found-first    # 選填 texts key；終身第一次（或沒有收集紀錄 port）時送
     found-repeat: mist-patrol.collect.found-repeat  # 選填；終身重訪時送，沒寫退回 found-first
+    found-unknown: mist-patrol.collect.found-unknown    # 選填（rc.36）；查不到這位玩家的終身紀錄時送（內容通常只寫籤名，不寫進度），沒寫退回 found-first
+    found-complete: mist-patrol.collect.found-complete  # 選填（rc.36）；終身第一次且這次剛好集滿（{found} == {total}）時送，沒寫退回 found-first
+    hold-seconds: 3              # 選填（rc.36，預設 3，0..20）；收下後只有這位玩家的目標列暫停重畫這麼久，提示才看得到
     cue: collect_found           # 選填；收下時只給該玩家播
     prop: { item: PAPER, scale: 0.5, height: 1.0, bob: 0.2, bob-seconds: 3, spin-degrees: 90, glow: true, model: "lycohinya:mist_paper_fortune" }  # 選填；glow 預設 false；model 見 power-up 的 prop 說明（rc.33）
 ```
 
 ActionBar 佔位符：`{n}`＝`n`、`{found}`＝這位玩家的終身進度（有 `CollectionPort` 時 = 終身已收的 ∪ 本局收的；沒有時只算本局）、`{total}`＝這個內容的 collectible 物件數。**逐人可見**：實體生成時 `isVisibleByDefault = false`，每 10 tick 與每次有人收下時對帳，只對「在線成員且本局沒收過」的人 `showEntity`；重連（新 Player 物件）、離線、離場、局結束時記帳清掉，重連後已收過的不會再開。偵測每 4 tick 一次 `memberPositions()`，在 anchor 執行緒對所有藏點量距離（倒下的成員不能收）。收下當下的寫入順序：本局收集帳 → stats `collect.<物件 id>`（整局合計）與 `collect.<物件 id>.<玩家 UUID>`（逐人，結算讀這個，**不要用 `CompletionResult.statFor`**——它在逐人鍵不存在時會退回整局合計，沒收到的人會被當成收過）→ log → cue → ActionBar → 關掉那位的實體。終身「是否收過」由 `CollectionPort`（選填，見 API.md rc.32）提供，沒有實作者或查詢失敗一律當第一次。
+
+**目標列的 `{collect:left}`**（rc.36）：這位玩家在目前這個 stage 終身還沒收過的藏點數，套 texts `<dungeonId>.collect.left-format`（`{n}` = 數字），例如「這一區還藏著 {n} 張紙燈籤」。沒有 collectible、這一段已全收、查不到終身紀錄（沒有 `CollectionPort`、失敗、還沒回來）或沒寫格式 = 空字串；放在目標文字尾端就會在沒東西時自己消失。每次重畫目標列更新，收下當下標記重畫。**收下提示的保留**：objective 每秒重畫的 ActionBar 會在一秒內把收下的提示蓋掉，所以收下後那一位玩家的目標列暫停 `hold-seconds` 秒（逐人，隊友的目標列照畫）。
 
 **中途離場與逾時的收集結算**（rc.34）：宣告了 collectible 的副本，玩家沒通關就離開時，已收到的東西不會憑空消失。引擎對**自己有逐人收集帳**（`collect.<物件 id>.<玩家 UUID>` > 0）的玩家補一筆 `CompletionResult`：自願離開、換世界、死亡後被請出、管理員踢出 → resultKey `left`（個別結算，其他成員與 session 不受影響）；整局逾時（session 時限）→ resultKey `timeout`，對結束當下名單上有收集帳的每位成員各一筆。帶整份 stats 快照，durationMs 算到這一刻。這不是通關：不結束 session、不改踢出與收尾流程，結算失敗只記 log。每位玩家每局最多一筆（先離場再逾時、或個別結算後再離場都不會重複）。沒有 collectible 的副本沒有收集帳，不觸發。這兩個 key 要不要發東西由獎勵端的規則決定（沒寫規則 = 沒有獎勵）。不涵蓋：離線寬限逾時被移出（人不在線發不出去）、全員離線結束、伺服器關閉、管理員重設與常駐副本。
 

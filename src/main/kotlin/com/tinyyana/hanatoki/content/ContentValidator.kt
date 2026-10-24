@@ -414,6 +414,8 @@ object ContentValidator {
         for (o in spec.objects.values) if (o is CollectibleSpec) {
             check(ContentFileNames.OBJECTS, "objects.${o.id}.found-first", o.foundFirstKey)
             check(ContentFileNames.OBJECTS, "objects.${o.id}.found-repeat", o.foundRepeatKey)
+            check(ContentFileNames.OBJECTS, "objects.${o.id}.found-unknown", o.foundUnknownKey)
+            check(ContentFileNames.OBJECTS, "objects.${o.id}.found-complete", o.foundCompleteKey)
         }
         for (b in spec.bosses.values) {
             val f = ContentFileNames.BOSSES
