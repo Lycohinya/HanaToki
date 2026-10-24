@@ -447,6 +447,10 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                 node.only(setOf("type"))
                 if (!objective) { node.err("type", "lantern-burning 會來去，只能寫在 objective 的 until／while，不能當 stage 的完成條件"); null } else Condition.LanternBurning
             }
+            "lantern-interfered" -> {
+                node.only(setOf("type"))
+                if (!objective) { node.err("type", "lantern-interfered 會來去，只能寫在 objective 的 until／while，不能當 stage 的完成條件"); null } else Condition.LanternInterfered
+            }
             "powered-used" -> {
                 node.only(setOf("type"))
                 if (!objective) { node.err("type", "powered-used 是 stage 內累積的旗標，只能寫在 objective 的 until／while，不能當 stage 的完成條件"); null } else Condition.PoweredUsed
@@ -464,7 +468,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                 else boss?.let(Condition::BossKneel)
             }
             else -> {
-                node.err("type", "未知的完成條件「$type」(可用:encounter-cleared、object-state、reach、boss-defeated;objective 另可用 powered、powered-used、enemy-dispersed、boss-kneel、arrived、lantern-burning)")
+                node.err("type", "未知的完成條件「$type」(可用:encounter-cleared、object-state、reach、boss-defeated;objective 另可用 powered、powered-used、enemy-dispersed、boss-kneel、arrived、lantern-burning、lantern-interfered)")
                 null
             }
         }
@@ -541,7 +545,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         node.only(
             setOf(
                 "type", "marker", "stage", "states", "burn-seconds", "stay-radius", "speed-by-players", "hold-cue", "repeat-cue",
-                "milestones", "pause-cues", "resume-cues", "on-lit", "progress-bar", "ignite-radius", "hint", "beam",
+                "milestones", "pause-cues", "resume-cues", "on-lit", "progress-bar", "ignite-radius", "hint", "beam", "interference",
             ),
         )
         val marker = node.id("marker", required = true)
@@ -609,11 +613,33 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
             val beamSpeed = b.num("speed", min = 0.0, max = 5.0, exclusiveMin = true) ?: 0.7
             if (range == null) null else LanternBeam(range, angle, sustain, beamSpeed, b.bool("requires-sight") ?: true, b.idList("hit-cues"), b.idList("blocked-cues"), b.num("boss-block-radius", min = 0.0, max = 8.0) ?: 1.8)
         }
+        val interference = parseInterference(node)
         if (marker == null || burn == null || radius == null || onLit == null) return null
         return LanternSpec(
             id, marker, node.id("stage"), states, burn, radius, speed, node.id("hold-cue"), repeat, milestones,
-            node.idList("pause-cues"), node.idList("resume-cues"), onLit, bar, igniteRadius, hint, beam,
+            node.idList("pause-cues"), node.idList("resume-cues"), onLit, bar, igniteRadius, hint, beam, interference,
         )
+    }
+
+    /**
+     * rc.35 範圍干擾:`interference: { enemies: [id…], radius, mode: pause|rewind, rate-per-second?, max-enemies?, cues?, cue-every-seconds? }`。
+     * rewind 需要 rate-per-second(每隻每秒倒退幾個 burn-second);pause 不用。
+     */
+    private fun parseInterference(lantern: Node): LanternInterference? {
+        val n = lantern.child("interference") ?: return null
+        n.only(setOf("enemies", "radius", "mode", "rate-per-second", "max-enemies", "cues", "cue-every-seconds"))
+        val enemies = LinkedHashSet<String>()
+        n.idList("enemies").forEach { enemies += it }
+        val radius = n.num("radius", min = 0.5, max = 32.0, required = true)
+        val modeId = n.str("mode", required = true)
+        val mode = modeId?.let { InterferenceMode.of(it) ?: run { n.err("mode", "未知的模式「$it」(可用:pause、rewind)"); null } }
+        val rate = n.num("rate-per-second", min = 0.0, max = 60.0, exclusiveMin = true)
+        if (mode == InterferenceMode.REWIND && rate == null) n.err("rate-per-second", "mode rewind 需要 rate-per-second(每隻每秒倒退幾個 burn-second)")
+        if (mode == InterferenceMode.PAUSE && rate != null) n.err("rate-per-second", "mode pause 不倒退，不應寫 rate-per-second")
+        val max = n.int("max-enemies", min = 1, max = 32) ?: 4
+        val every = n.num("cue-every-seconds", min = 0.2, max = 30.0) ?: 1.5
+        if (radius == null || mode == null) return null
+        return LanternInterference(enemies, radius, mode, rate ?: 0.0, max, n.idList("cues"), every)
     }
 
     private fun parsePowerUp(id: String, node: Node): PowerUpSpec? {
@@ -804,7 +830,8 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
         val repath = n.int("repath-ticks", min = MIN_SCAN_TICKS, max = MAX_SCAN_TICKS) ?: 10
         val speed = n.num("speed", min = 0.1, max = 3.0) ?: 1.0
         val radius = n.num("contest-radius", min = 0.5, max = 16.0, required = true)
-        val drain = n.num("drain-per-second", min = 0.0, max = 60.0, exclusiveMin = true, required = true)
+        // 0 = 只移動不啃(燒燈的影響交給燈籠的 interference 計，避免同一隻敵人算兩次)
+        val drain = n.num("drain-per-second", min = 0.0, max = 60.0, required = true)
         val maxDrainers = n.int("max-drainers", min = 1, max = 32) ?: 3
         val ignores = n.bool("ignores-players") ?: false
         val every = n.num("contest-cue-every-seconds", min = 0.2, max = 30.0) ?: 1.0
@@ -1179,7 +1206,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                 setOf(
                     "stage", "base-entity", "model", "scale", "animations", "health", "by-players", "hit-weight", "powered-hit-weight",
                     "hit-cooldown-ticks", "min-attack-strength", "start-delay-seconds", "spawn-cues", "points", "glide", "gap-seconds", "phase-up-seconds",
-                    "phases", "moves", "shield", "gems", "kneel", "pumpkins", "downed", "wipe", "defeat", "bar", "hit-cues", "intro", "heal", "move-mode",
+                    "phases", "moves", "shield", "gems", "kneel", "pumpkins", "downed", "wipe", "defeat", "bar", "hit-cues", "intro", "heal", "move-mode", "home",
                 ),
             )
             val stage = node.id("stage", required = true)
@@ -1225,8 +1252,9 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
             movesBlock?.entries()?.forEach { (moveId, m) -> parseMove(moveId, m, phases.size)?.let { moves[moveId] = it } }
             if (movesBlock == null) node.err("moves", "缺少必要區塊(至少一招)")
             else if (movesBlock.map.isEmpty()) movesBlock.err(null, "至少要有一招")
+            val home = parseHome(node)
             val points = node.idList("points")
-            if (points.isEmpty()) node.err("points", "至少要有一個滑行定點 marker")
+            if (points.isEmpty() && home == null) node.err("points", "至少要有一個滑行定點 marker(或寫 home 定點)")
             val gems = parseGems(node)
             val kneel = parseKneel(node)
             val pumpkins = parsePumpkins(node, phases.size)
@@ -1250,7 +1278,7 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
             val intro = parseIntro(node, startDelay)
             val moveModeId = node.str("move-mode") ?: BossMoveMode.TELEPORT.id
             val moveMode = BossMoveMode.of(moveModeId) ?: run { node.err("move-mode", "未知的移動方式「$moveModeId」(可用:${BossMoveMode.entries.joinToString { it.id }})"); BossMoveMode.TELEPORT }
-            if (stage != null && health != null && points.isNotEmpty() && movesBlock != null && gems != null && kneel != null && downed != null && wipe != null) {
+            if (stage != null && health != null && (points.isNotEmpty() || home != null) && movesBlock != null && gems != null && kneel != null && downed != null && wipe != null) {
                 out[id] = BossSpec(
                     id, stage, base, node.str("model"), node.num("scale", min = 0.0, max = 16.0, exclusiveMin = true), animations,
                     health, byPlayers, hitWeight,
@@ -1261,11 +1289,34 @@ class ContentParser(private val files: Map<String, Map<String, Any?>>) {
                     node.idList("spawn-cues"), points, glide, node.num("gap-seconds", min = 0.0, max = 60.0) ?: 2.5,
                     node.num("phase-up-seconds", min = 0.0, max = 30.0) ?: 2.0,
                     phases, moves, shield, gems, kneel, pumpkins, downed, wipe, defeat, bar,
-                    node.idList("hit-cues"), intro, parseHeal(node), moveMode,
+                    node.idList("hit-cues"), intro, parseHeal(node), moveMode, home,
                 )
             }
         }
         return out
+    }
+
+    /**
+     * `home: { marker, offset: [x, y, z], return-speed, tolerance, max-wait-seconds }`(rc.35,選填)：戰鬥定點，見 [BossHomeSpec]。
+     * return-speed 預設 7(格/秒)，每 2 tick 一步必須小於傳送門檻 6 格；tolerance 預設 1.5；max-wait-seconds 預設 4。
+     */
+    private fun parseHome(boss: Node): BossHomeSpec? {
+        val n = boss.child("home") ?: return null
+        n.only(setOf("marker", "offset", "return-speed", "tolerance", "max-wait-seconds"))
+        val marker = n.id("marker", required = true)
+        val offset = ArrayList<Double>()
+        var offsetBad = false
+        if (n.map["offset"] != null) {
+            val raw = n.list("offset")
+            if (raw.size != 3 || raw.any { it !is Number || it.toDouble().isNaN() || Math.abs(it.toDouble()) > 64.0 }) {
+                n.err("offset", "必須是三個數字 [x, y, z]，每個絕對值 <= 64"); offsetBad = true
+            } else raw.forEach { offset += (it as Number).toDouble() }
+        }
+        val speed = n.num("return-speed", min = 0.5, max = 24.0) ?: 7.0
+        val tolerance = n.num("tolerance", min = 0.1, max = 8.0) ?: 1.5
+        val wait = n.num("max-wait-seconds", min = 0.0, max = 30.0) ?: 4.0
+        if (marker == null || offsetBad) return null
+        return BossHomeSpec(marker, if (offset.isEmpty()) listOf(0.0, 0.0, 0.0) else offset, speed, tolerance, wait)
     }
 
     /** `heal: { on-start: true, on-kneel: true }`(rc.25,選填,預設都關)。 */

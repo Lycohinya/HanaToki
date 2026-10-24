@@ -228,8 +228,16 @@ class ActorController(private val plugin: Plugin, private val sessionActive: jav
             val entity = actors[key(sessionId, actorId)] ?: return CompletableFuture.completedFuture(null)
             // bind 必須在實體自己的 region thread 上呼叫(BossModels.bind 的前提),所以派工過去再綁。
             // owner 用 sessionId:session 收斂時 HanaTokiCore.finishSession 的 closeOwner 一次收掉。
-            WorldOp.dispatch(plugin, entity) { e -> out.complete(if (e.isValid) models.bind(sessionId.toString(), e, modelId, alwaysVisible) else null) }
-                .whenComplete { _, _ -> out.complete(null) }
+            WorldOp.dispatch(plugin, entity) { e ->
+                // rc.35:bind 丟例外或實體已失效時留下原因(以前一律靜默變 null，上層只看到「綁定失敗」)
+                try {
+                    if (!e.isValid) plugin.logger.warning("[HanaToki] bindModel $modelId:實體 $actorId 已失效，略過")
+                    out.complete(if (e.isValid) models.bind(sessionId.toString(), e, modelId, alwaysVisible) else null)
+                } catch (t: Throwable) {
+                    plugin.logger.warning("[HanaToki] bindModel $modelId 對實體 $actorId 丟例外 ${t.javaClass.simpleName}: ${t.message}")
+                    out.complete(null)
+                }
+            }.whenComplete { _, _ -> out.complete(null) }
             return out
         }
 

@@ -35,7 +35,7 @@ object ContentValidator {
                     is Condition.Reach -> {}
                     is Condition.BossDefeated ->
                         if (c.boss !in spec.bosses) errors += "$where.complete[$i].boss: 引用不存在的 boss「${c.boss}」(bosses.yml)"
-                    Condition.Powered, is Condition.BossKneel, Condition.PoweredUsed, is Condition.EnemyDispersed, Condition.Arrived, Condition.LanternBurning ->
+                    Condition.Powered, is Condition.BossKneel, Condition.PoweredUsed, is Condition.EnemyDispersed, Condition.Arrived, Condition.LanternBurning, Condition.LanternInterfered ->
                         errors += "$where.complete[$i]: ${c::class.simpleName} 會來去或是累積旗標,不能當 stage 的完成條件(只能用在 objective)"
                 }
             }
@@ -76,6 +76,8 @@ object ContentValidator {
                         if (c.enemy !in spec.enemies) errors += "$at.enemy: 引用不存在的敵人「${c.enemy}」(enemies.yml)"
                     Condition.Arrived ->
                         if (stage.arrive == null) errors += "$at: arrived 需要這個 stage 寫 arrive(沒有抵達區就一開始成立，不需要這個條件)"
+                    Condition.LanternInterfered ->
+                        if (spec.objects.values.none { it is LanternSpec && it.stage == stage.id && it.interference != null }) errors += "$at: lantern-interfered 需要這個 stage 至少有一盞 lantern 寫了 interference(objects.yml stage: ${stage.id})"
                     Condition.LanternBurning ->
                         if (spec.objects.values.none { it is LanternSpec && it.stage == stage.id }) errors += "$at: lantern-burning 需要這個 stage 至少有一盞 lantern 物件(objects.yml stage: ${stage.id})"
                     is Condition.BossKneel -> {
@@ -111,6 +113,17 @@ object ContentValidator {
                 if (opens != null && spec.objects[opens] !is GateSpec) errors += "$where.on-lit.opens: 「$opens」不是 gate 物件"
                 val needTool = obj.hint?.requiresTool
                 if (needTool != null && needTool !in spec.tools) errors += "$where.hint.requires-tool: 引用不存在的道具「$needTool」(tool.yml)"
+                obj.interference?.let { itf ->
+                    for (id in itf.enemies) {
+                        val enemy = spec.enemies[id]
+                        if (enemy == null) { errors += "$where.interference.enemies: 引用不存在的敵人「$id」(enemies.yml)"; continue }
+                        // 同一隻敵人不能對同一盞燈既啃(seeks-object drain > 0)又算干擾，否則一隻算兩次
+                        val seek = enemy.seeksObject
+                        if (seek != null && seek.objectId == obj.id && seek.drainPerSecond > 0.0) {
+                            errors += "$where.interference.enemies: 敵人「$id」的 seeks-object 已對這盞燈扣進度(drain-per-second > 0)，會重複計算，把它的 drain-per-second 設 0 改由 interference 計"
+                        }
+                    }
+                }
             }
         }
 
@@ -301,6 +314,7 @@ object ContentValidator {
             val where = "${ContentFileNames.BOSSES} bosses.${boss.id}"
             fun need(path: String, id: String) { if (marker(id) == null) errors += "$where.$path: 場景裡沒有 id=$id 的 marker" }
             boss.points.forEachIndexed { i, id -> need("points[$i]", id) }
+            boss.home?.let { need("home.marker", it.marker) }
             boss.downed.revivePoints.forEachIndexed { i, id -> need("downed.revive-points[$i]", id) }
             need("wipe.checkpoint", boss.wipe.checkpoint)
             boss.intro?.let { intro ->

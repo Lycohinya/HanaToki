@@ -240,7 +240,7 @@ class EnemyRulesTest {
     @Test
     fun `壞資料被擋並指名檔名和欄位`() {
         fun bad(from: String, to: String): List<String> = errorsOf(withEnemies(enemiesText = enemies.replace(from, to)))
-        assertTrue(bad("drain-per-second: 0.45", "drain-per-second: 0").any { "enemies.gnawer.seeks-object.drain-per-second" in it })
+        // rc.35:drain-per-second 0 合法(只移動不啃,影響交給燈籠的 interference),負數仍被擋
         assertTrue(bad("drain-per-second: 0.45", "drain-per-second: -1").any { "drain-per-second" in it })
         assertTrue(bad("contest-radius: 2.5", "contest-radius: 99").any { "contest-radius" in it })
         assertTrue(bad("max-drainers: 3", "max-drainers: 0").any { "max-drainers" in it })

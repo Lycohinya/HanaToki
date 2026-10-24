@@ -1,4 +1,4 @@
-# 資料驅動副本內容（1.0.0-rc.34）
+# 資料驅動副本內容（1.0.0-rc.35）
 
 內容插件只給 **一個資料夾 + texts**，行為由框架內建的 `DataDrivenBehavior` 依資料執行，內容端不寫 Kotlin。另做一座副本只換設定檔與資產。判準：加第 N+1 盞燈籠、第 N+1 種幽靈、第 N+1 段提示，只改一筆 YAML。
 
@@ -189,6 +189,18 @@ stage 一開始（上一段完成、門開）玩家常常還在上一區，這�
 - **方位佔位符 `{nearest:power-up}`（rc.27）**：這位成員面向看，最近一顆 ready 的 power-up（所屬 stage 進行中）在哪個方位、多遠，例如「左前方 12 格」，每次重畫目標列更新（成員位置取自每 10 tick 的成員快照，文字含 `{nearest:` 時自動啟用）。方位八向（前／右前／右／右後／後／左後／左／左前，依玩家 yaw），方位字與格式取自內容 texts：`<dungeonId>.direction.<front|front-right|right|back-right|back|back-left|left|front-left>` 與 `<dungeonId>.direction.format`（含 `{dir}` `{distance}`）；缺字時只顯示距離數字，沒有成員快照或沒有 ready 的 power-up 是空字串。
 - 文字是 texts key（同 `title`），參數 `{charges}` `{max}` `{pips}`（`●●○○○` 燈火條）取 tool.yml 第一個道具、每位玩家各自的值。燈火條要一直看得見，就用 `objective-every-seconds: 1`，不再另用 tool 的 `hud-text`（同一個 ActionBar 組，後送的蓋掉先送的）。
 - 沒寫 `objective` 的 stage（以及整個舊副本）完全不經過這段。
+
+### 燈籠範圍干擾 interference（rc.35，選填）
+
+守點類目標通用的「敵人在範圍內就干擾」。寫在 lantern 物件裡：`interference: { enemies: [敵人 id…], radius, mode, rate-per-second, max-enemies, cues, cue-every-seconds }`。
+
+- 燈在 `burning` 時，水平距離 `radius`（高度差 ≤ 3）內有**活著、沒僵直**的 `enemies`（空 = 不限種類）就算干擾。被閃光照住（僵直）、被打散、離開範圍的都不算，所以閃光是即時解法。
+- `mode: pause`：有干擾者時燒燈進度不前進（不倒退）。`mode: rewind`：不前進，而且每隻每秒倒退 `rate-per-second`（必填，單位 burn-second）個進度，夾在 0，不回 `unlit`、不觸發完成。`max-enemies`（預設 4）隻同時有效。
+- 有干擾者時 hold-cue 換成 `pause-cues` 一次，干擾結束接回 hold-cue 並播 `resume-cues`（不走「沒人在守燈範圍」的暫停路徑）；每 `cue-every-seconds`（預設 1.5）秒在燈上播 `cues`。
+- objective 條件 `lantern-interfered`（只能放在 until／while）：這個 stage 有燈正被干擾；該 stage 至少要有一盞寫了 `interference` 的燈。
+- 被看著而凍結、且 `harmless-while-frozen: true` 的敵人（人偶）凍結期間不算干擾，回頭看住她們就是解法。
+- 被列入的敵人自動進有界掃描。敵人若同時有 `seeks-object` 指向同一盞燈且 `drain-per-second > 0` 會重複計算，驗證器直接報錯；`drain-per-second: 0` = 只移動不啃，影響交給 interference。
+- log：`lantern-interfered <燈> enemies=<n> mode=<m> progress=<p>`、`lantern-interference-end <燈> progress=<p>`；`enemy-contest` 的 `ghosts=` 也算進干擾者。
 
 ## scene.yml
 
@@ -503,6 +515,15 @@ enemies:
 
 出場時先 log `boss-intro <bossId> marker=<id>`，再 `boss-start`(格式不變);停留結束後用 `ActorHandle.teleport` 每 2 tick 一小步直線滑到落點(`glide` 動畫)，落地記 `boss-intro-done <bossId> point=<id>`，之後仍等到 `start-delay-seconds` 才開打(開打時若還沒落地會先補落地，不會在半空出招)。出場等待期間照舊:近戰只濺火花、不扣血、沒有招式。全滅重來**不重播**出場演出，直接回 `points` 第一個點。marker 與 `then-glide-to` 載入時核對場景。
 
+### 戰鬥定點 home（rc.35，選填）
+
+`home: { marker, offset: [x, y, z], return-speed, tolerance, max-wait-seconds }`：戰鬥中 boss 站在 marker 加 offset 算出的定點，所有以她為中心（預設 origin）的招式都從這裡算；`points` 可以不寫。
+
+- 出場落地、全滅重來都回到定點；不再沿 `points` 滑行。
+- 被搶燈滑走、被擊退、跪下起身之後，IDLE 時用既有的速度驅動（`return-speed` 格/秒，預設 7，每 2 tick 一步，小於傳送門檻 6 格；不傳送，BetterModel 不重送）滑回離定點 `tolerance`（預設 1.5）格內。回到之前下一招先等，最多等 `max-wait-seconds`（預設 4，從該出招的時間起算），逾時照放。
+- 跪下、招式預警、階段切換期間邏輯位置不變，只把載體拉回邏輯位置。
+- log：`boss-home return distance=<格>`（每次回程一次）。
+
 ### 招式 moves
 
 共通欄位:`shape`(必填)、`weight`(預設 1)、`cooldown-seconds`(同一招的最短間隔,預設 0)、`phase`(第幾階段起開放,預設 1;至少要有一招 phase 1)、`warn-seconds`(預警,預設 2)、`recovery-seconds`(判定後到下一招,預設 1)、`animation`(施放時播的模型動畫,單次)、`warn-cues`(預警開始時在原點播)、`hit-cues`(判定時播)、`origin-marker`(判定區原點;預設 boss 腳下)、`damage-percent`(命中扣玩家**最大血量**的比例,必填,0..1)、`push: { strength, lift }`。`summon`／`snuff` 沒有傷害,不可寫 `damage-percent`／`push`。傷害是**固定比例**:直接改血量,不看護甲、附魔與抗性,再乘人數倍率 `by-players.damage`;致死不會死亡,進入倒下。框架只負責排程、判定區域與 log,地面預警的視覺走 `warn-cues`(LycoLib cue／VFX)。
@@ -616,6 +637,8 @@ encounters:
 
 全部生出且全數消失（打散或死亡）→ 波次清空，打 `wave-clear` log，並可成為其他波次的 `encounter-cleared` 觸發與 stage 完成條件。
 
+**波次綁 stage（rc.35）**：波次只屬於它的 `stage`。stage 完成時（`stage-complete`），該 stage 還沒開的波次（等觸發、等 `delay-ticks`、還在生）一律取消（`wave-cancel <id> reason=stage-complete`）；延遲計時或交錯生怪的計時在 stage 已換掉時到期也不會再開或再生（`reason=stage-left`）；波次 `start-cues` 播出的 cue 綁這個 stage，離開時連還沒播的延遲台詞與聊天室台詞（chat.yml 的 `delay-seconds`）一起取消。場上已經存在的敵人照舊交給 stage 的 `clears-enemies`。修掉的問題：迷宮的大幽靈重生（`encounter-cleared` 後 `delay-ticks: 800`）在玩家 40 秒內離開迷宮時，會在下一段（主屋前庭）才生出來並送她的聊天室台詞。
+
 ## chat.yml（rc.26，選填）
 
 cues.yml 的 `hud` 吐槽是會蓋掉其他 ActionBar 的通知，戰鬥中的角色台詞（修女換階段、光環碎、跪下，幽靈姐姐被碰散…）改送聊天室比較不干擾操作。`chat.yml` 讓「播某個 cue」時一併送一則聊天室訊息（走 `StageContext.message`，文字是 texts key，MiniMessage），cue 本身只留聲光：
@@ -728,6 +751,9 @@ rc.22 新增（紙燈別院全程契約的 tag，bot 認這些字串；`<enemyId
 | `doll-dispersed <enemyId> by=<player>` | frozen-when-watched 的敵人被玩家打散（光圈清場不記；仍有 `enemy-dissolve … by=lantern`） |
 | `power-up-taken <objectId> player=<player>` | 有人碰到 power-up；`power-up <id> taken->ready` 是重生 |
 | `collect-found <spotId> player=<player> first=<true｜false>` | rc.32 有人收下探索收集物；`first` = 終身第一次（沒有收集紀錄 port 時恆為 true） |
+| `lantern-interfered <objectId> enemies=<n> mode=<pause｜rewind> progress=<0..1>` | rc.35 燈籠進入範圍干擾（干擾者從 0 變成 > 0 時一行）；`lantern-interference-end <objectId> progress=<p>` 干擾結束 |
+| `wave-cancel <encounterId> reason=<stage-complete｜stage-left｜…>` | 波次被收掉；rc.35 起 stage 完成與跨 stage 到期的計時都會取消，光圈清場照舊不寫 reason |
+| `boss-home return distance=<格>` | rc.35 boss 離開定點後開始滑回 |
 | `powered-start players=<n> seconds=<s>` | 全隊 powered（每次吃都記；再吃是刷新） |
 | `powered-end reason=<expired｜stage｜members-left>` | powered 全部結束 |
 | `powered-reversal <enemyId> by=<player>` | powered 成員碰散一隻會逃的敵人（隨後還有 `enemy-dissolve`） |

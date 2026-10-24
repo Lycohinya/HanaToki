@@ -113,6 +113,8 @@ class SessionRun(
     private val nearProbePending = HashSet<String>()
 
     private val cueRuns = ConcurrentLinkedDeque<CueRun>()
+    /** rc.35:綁 stage 的 cue 執行(stage id 對應 runs)；離開或完成那個 stage 時整批取消(含還沒播的延遲台詞)。 */
+    private val scopedRuns = java.util.concurrent.ConcurrentHashMap<String, ConcurrentLinkedDeque<CueRun>>()
 
     /** 取樣用的短促 cue(boss 迴旋的光束標示)只留最近 [MAX_TRANSIENT_CUE_RUNS] 個,局結束一併取消;只在 anchor region 執行緒使用。 */
     private val transientRuns = java.util.ArrayDeque<CueRun>()
@@ -152,7 +154,7 @@ class SessionRun(
                 it.seeksObject?.repathTicks, it.contact?.scanTicks, it.frozenWhenWatched?.scanTicks,
                 it.chasesPlayers?.repathTicks, it.fleesWhenPowered?.repathTicks,
             )
-        }.minOrNull()?.toLong() ?: 0L
+        }.minOrNull()?.toLong() ?: (if (spec.objects.values.any { it is LanternSpec && it.interference != null }) INTERFERENCE_SCAN_TICKS else 0L)
     private val random = java.util.Random()
     private var raycastFailureLogged = false
 
@@ -200,6 +202,12 @@ class SessionRun(
         var nextContestLog = 0L
         /** 連續被啃的起點 tick;沒被啃 = -1。lantern-contested 提示用。 */
         var contestedSince = -1L
+        /** rc.35 範圍干擾:這一輪掃描在範圍內的干擾者隻數(已套 max-enemies)、發布的 tick、目前是否處於干擾中(log／提示的邊界用)、下一次播干擾 cue 的 tick、起始時 hold-cue 是否已收掉。 */
+        var interferers = 0
+        var interferedAt = -1000L
+        var interfering = false
+        var nextInterfereCue = 0L
+        var holdSuspended = false
     }
 
     /** 某位玩家看到的燈籠世界標示:[level] 1 = 遠處提示,2 = 已在可點燃範圍。 */
@@ -326,12 +334,14 @@ class SessionRun(
     }
 
     /** 播 cue。沒有 CuePort 實作者 = no-op(每局 INFO 一次);cue 失敗不得影響狀態機。 */
-    private fun cue(id: String?, origin: Location, follow: Entity? = null, only: Collection<Player>? = null, track: Boolean = true): CueRun? {
+    private fun cue(id: String?, origin: Location, follow: Entity? = null, only: Collection<Player>? = null, track: Boolean = true, scope: String? = null): CueRun? {
         if (id == null || closed) return null
         val port: CuePort = runtime.cuePort() ?: run { noteNoPort("CuePort"); return null }
-        chatFor(id, only)
+        chatFor(id, only, scope)
         return try {
             val run = port.play(spec.namespace, id, origin, only ?: audience(), follow, mutator)
+            // rc.35:綁 stage 的 cue(遭遇的 start-cues)，離開那個 stage 時連還沒播的延遲台詞一起取消
+            if (scope != null) scopedRuns.computeIfAbsent(scope) { ConcurrentLinkedDeque() }.add(run)
             if (track) {
                 cueRuns.add(run)
             } else {
@@ -346,16 +356,17 @@ class SessionRun(
     }
 
     /** rc.26 chat.yml:這個 cue 有對應的聊天室台詞就送給聽眾([only] 或全體成員);delay-seconds 之後才送。 */
-    private fun chatFor(cueId: String, only: Collection<Player>?) {
+    private fun chatFor(cueId: String, only: Collection<Player>?, scope: String? = null) {
         val line = spec.chat[cueId] ?: return
         val targets: List<UUID> = only?.map { it.uniqueId } ?: members().toList()
-        val send = Runnable { if (!closed) for (id in targets) ctx.message(id, line.textKey) }
+        // rc.35:綁 stage 的台詞到期時 stage 已經換掉就丟棄(不補播)
+        val send = Runnable { if (!closed && (scope == null || currentStage?.id == scope)) for (id in targets) ctx.message(id, line.textKey) }
         val delay = (line.delaySeconds * 20).toLong()
         if (delay <= 0L) send.run() else timers.schedule(now, delay) { send.run() }
     }
 
-    private fun cues(ids: List<String>, origin: Location, follow: Entity? = null, only: Collection<Player>? = null) {
-        ids.forEach { cue(it, origin, follow, only) }
+    private fun cues(ids: List<String>, origin: Location, follow: Entity? = null, only: Collection<Player>? = null, scope: String? = null) {
+        ids.forEach { cue(it, origin, follow, only, scope = scope) }
     }
 
     private fun applyBlocks(base: MapMarker, blocks: List<BlockEdit>) {
@@ -425,6 +436,7 @@ class SessionRun(
         if (closed) return
         val stage = spec.stage(stageId) ?: run { warn("stage $stageId 不在 stages.yml"); return }
         currentStage = stage
+        for (other in scopedRuns.keys.toList()) if (other != stageId) cancelScopedRuns(other)
         clearTransient("stage")
         poweredUsed = false
         dispersedEnemies.clear()
@@ -572,6 +584,7 @@ class SessionRun(
         is Condition.EnemyDispersed -> c.enemy in dispersedEnemies
         Condition.Arrived -> arrived
         Condition.LanternBurning -> lanterns.values.any { it.spec.stage == currentStage?.id && it.machine.state == LanternMachine.State.BURNING }
+        Condition.LanternInterfered -> lanterns.values.any { it.spec.stage == currentStage?.id && it.machine.state == LanternMachine.State.BURNING && isInterfered(it) }
     }
 
     private fun objectReached(objectId: String, state: String): Boolean {
@@ -610,6 +623,7 @@ class SessionRun(
         markProgress()
         log("stage-complete", stage.id)
         playEffects(stage.onComplete, stage, "on-complete")
+        closeStageScope(stage.id, "stage-complete")
         // rc.24:stage 完成直接開門(gates 與 timers 跨 stage 存在,滑門不會被轉場砍掉)
         for (gate in stage.onComplete.opens) gates[gate]?.let(::openGate)
         if (stage.clearsEnemies) dissolveAllEnemies()
@@ -656,12 +670,29 @@ class SessionRun(
             if (rt.drainRate > 0.0 && now - rt.drainAt <= DRAIN_STALE_TICKS) {
                 rt.machine.drain(drainTicks(rt.drainRate, TICK_PERIOD.toInt()))
             }
+            // rc.35 範圍干擾:範圍內有活著的干擾者時燒燈不前進(倒退的量已由上面的 drain 扣掉)；hold 音換成 pause-cues 一次，干擾結束再接回來。
+            // 不走 advance 的 PAUSED 路徑，所以「沒人在守燈範圍」的暫停語意與 log 不混
+            val interfered = isInterfered(rt)
+            if (interfered && !rt.holdSuspended) {
+                rt.holdSuspended = true
+                rt.hold?.cancel(); rt.hold = null
+                cues(spec.pauseCues, rt.loc)
+            } else if (!interfered && rt.holdSuspended) {
+                rt.holdSuspended = false
+                if (!rt.machine.paused) startHold(rt)
+                cues(spec.resumeCues, rt.loc)
+            }
             // rc.30:遠距光束續著的每位成員各加 beam.speed 倍；倒下的、過期的不算
             var beamBonus = 0.0
             val beam = spec.beam
             if (beam != null && rt.beamers.isNotEmpty()) {
                 rt.beamers.entries.removeIf { it.value <= now || isDowned(it.key) || it.key !in members() }
                 beamBonus = rt.beamers.size * beam.speed
+            }
+            if (interfered) {
+                updateBar(rt)
+                if (now % 4L == 0L && (!rt.probing || now - rt.probeAt > PROBE_STALE_TICKS)) probeLantern(rt)
+                continue
             }
             when (rt.machine.advance(TICK_PERIOD.toInt(), lanternMultiplier(spec.speedByPlayers, people) + beamBonus)) {
                 LanternMachine.Outcome.PAUSED -> {
@@ -695,6 +726,9 @@ class SessionRun(
             if (now % 4L == 0L && (!rt.probing || now - rt.probeAt > PROBE_STALE_TICKS)) probeLantern(rt)
         }
     }
+
+    /** rc.35:這盞燈目前被範圍干擾(掃描剛發布過、範圍內有干擾者)。 */
+    private fun isInterfered(rt: LanternRt): Boolean = rt.interferers > 0 && now - rt.interferedAt <= DRAIN_STALE_TICKS
 
     private fun probeLantern(rt: LanternRt) {
         rt.probing = true
@@ -750,6 +784,7 @@ class SessionRun(
         log("lantern-lit", spec.id)
         markProgress()
         rt.drainRate = 0.0; rt.drainers = 0
+        rt.interferers = 0; rt.interfering = false; rt.holdSuspended = false
         rt.hold?.cancel(); rt.hold = null
         if (spec.progressBar != null) { ctx.hideBossBar(); barPercent = -1 }
         spec.states[ObjectStates.LANTERN_LIT]?.let {
@@ -878,8 +913,32 @@ class SessionRun(
         }
     }
 
+    /** rc.35:把波次收掉(還沒生的不再生，場上已有的照 clears-enemies 或自然打散)。已完成或已取消的不動。 */
+    private fun cancelEncounter(enc: EncounterRt, reason: String) {
+        when (enc.phase) {
+            EncounterRt.Phase.PENDING, EncounterRt.Phase.WAITING, EncounterRt.Phase.SPAWNING -> {
+                enc.phase = EncounterRt.Phase.CANCELLED
+                log("wave-cancel", "${enc.spec.id} reason=$reason")
+            }
+            else -> {}
+        }
+    }
+
+    /** rc.35:stage 結束時，這個 stage 的波次(含還在等計時、等觸發的)全部收掉，綁這個 stage 的延遲 cue 與台詞一起取消。 */
+    private fun closeStageScope(stageId: String, reason: String) {
+        for (enc in encounters.values) if (enc.spec.stage == stageId) cancelEncounter(enc, reason)
+        cancelScopedRuns(stageId)
+    }
+
+    private fun cancelScopedRuns(stageId: String) {
+        val runs = scopedRuns.remove(stageId) ?: return
+        for (run in runs) try { run.cancel() } catch (t: Throwable) { warn("CueRun.cancel 失敗:${t.message}") }
+    }
+
     private fun startEncounter(enc: EncounterRt) {
         if (closed || enc.phase != EncounterRt.Phase.WAITING) return
+        // rc.35:延遲計時跨 stage 存活，stage 已經換掉的波次不能再開(迷宮的大幽靈重生會跑到主屋前庭)
+        if (!stageActive(enc.spec.stage)) { cancelEncounter(enc, "stage-left"); return }
         val group: List<Location> = enc.spec.spawnMarker?.let { id ->
             val o = enc.spec.spawnOffset
             listOf(marker(id).location(world).add(o.getOrElse(0) { 0.0 }, o.getOrElse(1) { 0.0 }, o.getOrElse(2) { 0.0 }))
@@ -889,7 +948,7 @@ class SessionRun(
         enc.target = pickByPlayers(enc.spec.counts, players, enc.spec.counts.getValue(1))
         log("wave-start", "${enc.spec.id} count=${enc.target} players=$players offset=${enc.spec.markerOffset}")
         markProgress()
-        group.firstOrNull()?.let { cues(enc.spec.startCues, it) }
+        group.firstOrNull()?.let { cues(enc.spec.startCues, it, scope = enc.spec.stage) }
         for (i in 0 until enc.target) {
             timers.schedule(now, i.toLong() * enc.spec.intervalTicks) { spawnEnemy(enc, group, i) }
         }
@@ -898,6 +957,7 @@ class SessionRun(
 
     private fun spawnEnemy(enc: EncounterRt, group: List<Location>, index: Int) {
         if (closed || enc.phase != EncounterRt.Phase.SPAWNING || enc.spawned >= enc.target || group.isEmpty()) return
+        if (!stageActive(enc.spec.stage)) { cancelEncounter(enc, "stage-left"); return }
         enc.spawned++
         val enemySpec = spec.enemies.getValue(enc.spec.enemy)
         val actorId = "${enc.spec.id}-${index + 1}"
@@ -960,9 +1020,22 @@ class SessionRun(
         }
         if (powered.active && rt.spec.fleesWhenPowered != null) setFleeing(rt, true)
         val modelId = rt.spec.model ?: return
+        bindEnemyModel(rt, modelId, 0)
+    }
+
+    /**
+     * 綁敵人的 BetterModel 模型。rc.35:綁不起來(handle 為 null:實體剛生成還沒生效、bind 丟例外…)時隔 [BIND_RETRY_TICKS] tick 再試，
+     * 最多重試 [BIND_RETRIES] 次，仍失敗才把載體顯示出來並記 WARN(含嘗試次數)。s01-263 的 log 124 次召喚有 11 次綁不上，而同名模型 mist_ghost 在入口庭與燈籠庭一直綁得上(模型存在，不是名稱錯)，
+     * 原因沒有留下例外訊息；重試能不能補上待實機驗證。
+     */
+    private fun bindEnemyModel(rt: EnemyRt, modelId: String, attempt: Int) {
         ctx.actors().bindModel(rt.actorId, modelId).whenComplete { handle, _ ->
             ctx.submit {
-                if (closed) return@submit
+                if (closed || rt.machine.state == EnemyMachine.State.GONE || enemies[rt.actorId] !== rt) return@submit
+                if (handle == null && attempt < BIND_RETRIES) {
+                    timers.schedule(now, BIND_RETRY_TICKS) { if (!closed && enemies[rt.actorId] === rt && rt.model == null) bindEnemyModel(rt, modelId, attempt + 1) }
+                    return@submit
+                }
                 rt.model = handle
                 ctx.actors().runOnEntity(rt.actorId) { e ->
                     if (handle != null) {
@@ -973,7 +1046,8 @@ class SessionRun(
                 }
                 // 模型綁好前已經凍結或在逃跑(powered 期間生成)就補上對應動畫
                 if (handle != null && (rt.freeze.frozen || rt.fleeing)) syncBody(rt)
-                if (handle == null) warn("敵人 ${rt.actorId} 的模型 $modelId 綁定失敗(BetterModel 缺席或模型不存在),載體保持可見")
+                if (handle != null && attempt > 0) log("enemy-model-retry", "${rt.actorId} model=$modelId attempts=${attempt + 1}")
+                if (handle == null) warn("敵人 ${rt.actorId} 的模型 $modelId 綁定失敗(試了 ${attempt + 1} 次；BetterModel 缺席、模型不存在或實體已失效),載體保持可見")
             }
         }
     }
@@ -1173,10 +1247,10 @@ class SessionRun(
         if (scanPending && now - scanAt <= PROBE_STALE_TICKS) return
         lastScanAt = now
         // 超過單輪上限時輪替(round-robin):從上一輪視窗最後一隻之後接著掃，每隻都會輪到
-        val eligible = enemies.values.filter { it.spec.scanned && it.machine.state == EnemyMachine.State.ALIVE }
+        val eligible = enemies.values.filter { (it.spec.scanned || interferes(it.spec.id)) && it.machine.state == EnemyMachine.State.ALIVE }
         val candidates = rotatingWindow(eligible, scanCursor, MAX_SCAN_ENEMIES) { it.actorId }
         val nextCursor: String? = if (eligible.size > MAX_SCAN_ENEMIES) candidates.lastOrNull()?.actorId else null
-        if (candidates.isEmpty()) { scanCursor = null; publishDrain(emptyMap()); return }
+        if (candidates.isEmpty()) { scanCursor = null; publishDrain(emptyMap(), emptyMap()); return }
         scanPending = true
         scanAt = now
         val startedAt = now
@@ -1196,13 +1270,28 @@ class SessionRun(
         }
     }
 
+    /** rc.35:有沒有哪盞燈的範圍干擾把這種敵人算進去(要進掃描)。 */
+    private fun interferes(enemyId: String): Boolean =
+        lanterns.values.any { val itf = it.spec.interference; itf != null && (itf.enemies.isEmpty() || enemyId in itf.enemies) }
+
     private fun applyEnemyScan(found: List<Pair<EnemyRt, Location?>>, snap: Map<UUID, DoubleArray>) {
         // (燈籠 id, 敵人定義 id) -> 這輪在啃的隻數
         val contest = LinkedHashMap<Pair<String, String>, Int>()
+        // rc.35:燈籠 id -> 這輪在干擾範圍內、活著且沒僵直的隻數(僵直的不進掃描，打散的已移除)
+        val interfere = LinkedHashMap<String, Int>()
         val poweredNow = powered.poweredIds(now)
         for ((rt, loc) in found) {
             if (loc == null || loc.world != world || rt.machine.state != EnemyMachine.State.ALIVE) continue
             rt.lastLoc = loc
+            // 被看著而凍結、凍結時無害(harmless-while-frozen)的敵人不算干擾(回頭看住她們就是解法)；用上一輪的凍結狀態
+            val harmlessFrozen = rt.freeze.frozen && rt.spec.frozenWhenWatched?.harmlessWhileFrozen == true
+            for (lantern in lanterns.values) {
+                if (harmlessFrozen) break
+                val itf = lantern.spec.interference ?: continue
+                if (!stageActive(lantern.spec.stage) || lantern.machine.state != LanternMachine.State.BURNING) continue
+                if (itf.enemies.isNotEmpty() && rt.spec.id !in itf.enemies) continue
+                if (withinContact(loc.x - lantern.loc.x, loc.y - lantern.loc.y, loc.z - lantern.loc.z, itf.radius, CONTEST_HEIGHT)) interfere.merge(lantern.spec.id, 1, Int::plus)
+            }
             rt.spec.seeksObject?.let { seekStep(rt, loc, it, contest) }
             // powered 期間:會逃的敵人改逃離 powered 成員(碰到就被打散),不追、不碰人
             val flee = rt.spec.fleesWhenPowered
@@ -1228,7 +1317,7 @@ class SessionRun(
                 }
             }
         }
-        publishDrain(contest)
+        publishDrain(contest, interfere)
     }
 
     private fun seekStep(rt: EnemyRt, loc: Location, seek: SeeksObjectSpec, contest: MutableMap<Pair<String, String>, Int>) {
@@ -1254,9 +1343,25 @@ class SessionRun(
     }
 
     /** 把這輪的啃燈結果發布到各燈籠(掃描沒看到的燈籠歸零),並節流播 cue 與 log。 */
-    private fun publishDrain(contest: Map<Pair<String, String>, Int>) {
+    private fun publishDrain(contest: Map<Pair<String, String>, Int>, interfere: Map<String, Int>) {
         for (rt in lanterns.values) {
             val groups = ArrayList<DrainGroup>()
+            // rc.35 範圍干擾:rewind 把干擾者算成一組倒退速率;pause 只標記不倒退
+            val itf = rt.spec.interference
+            val itfCount = if (itf != null) (interfere[rt.spec.id] ?: 0).coerceAtMost(itf.maxEnemies) else 0
+            rt.interferers = itfCount
+            rt.interferedAt = now
+            if (itf != null && itfCount > 0 && itf.mode == InterferenceMode.REWIND) groups += DrainGroup(itfCount, itf.maxEnemies, itf.ratePerSecond)
+            val wasInterfering = rt.interfering
+            rt.interfering = itfCount > 0
+            if (itf != null) {
+                if (rt.interfering && !wasInterfering) log("lantern-interfered", "${rt.spec.id} enemies=$itfCount mode=${itf.mode.id} progress=${fmt2(rt.machine.fraction)}")
+                else if (!rt.interfering && wasInterfering) log("lantern-interference-end", "${rt.spec.id} progress=${fmt2(rt.machine.fraction)}")
+                if (rt.interfering && now >= rt.nextInterfereCue) {
+                    rt.nextInterfereCue = now + (itf.cueEverySeconds * 20).toLong()
+                    cues(itf.cues, rt.loc)
+                }
+            }
             var contestCues: List<String> = emptyList()
             var cueEvery = 1.0
             for ((key, count) in contest) {
@@ -1267,7 +1372,9 @@ class SessionRun(
             }
             val before = rt.drainers
             rt.drainRate = drainRate(groups)
-            rt.drainers = groups.sumOf { it.inRange.coerceIn(0, it.max) }
+            // 計數給 enemy-contest log 與 lantern-contested 提示用:啃的隻數與干擾的隻數取大(同一隻不重複算)
+            val seekers = contest.entries.filter { it.key.first == rt.spec.id }.sumOf { (k, count) -> count.coerceIn(0, spec.enemies[k.second]?.seeksObject?.maxDrainers ?: 0) }
+            rt.drainers = maxOf(seekers, itfCount)
             rt.drainAt = now
             if (rt.drainers > 0) {
                 if (rt.contestedSince < 0) rt.contestedSince = now
@@ -1367,6 +1474,7 @@ class SessionRun(
         rt.milestonesFired = 0
         rt.beamers.clear()
         rt.drainRate = 0.0; rt.drainers = 0; rt.contestedSince = -1
+        rt.interferers = 0; rt.interfering = false; rt.holdSuspended = false
         clearLanternHints(lamp)
         rt.spec.states[ObjectStates.LANTERN_UNLIT]?.let { applyBlocks(marker(rt.spec.markerId), it.blocks) }
         log("object", "$lamp reset->unlit")
@@ -3142,6 +3250,11 @@ class SessionRun(
         const val BOSS_VELOCITY_MAX_STEP = 6.0
         const val CONTEST_HEIGHT = 3.0
         const val DRAIN_STALE_TICKS = 60L
+        /** rc.35:沒有任何敵人自帶掃描週期、只有燈籠範圍干擾時的掃描間隔(tick)。 */
+        const val INTERFERENCE_SCAN_TICKS = 10L
+        /** rc.35:敵人模型綁定失敗時的重試次數與間隔(tick)。 */
+        const val BIND_RETRIES = 2
+        const val BIND_RETRY_TICKS = 10L
         const val HINT_SLACK = 1.0
         /** 快照回來太晚時,一次最多補算這麼多秒的回補,不讓卡頓變成一次補滿。 */
         const val MAX_REGEN_DT_SECONDS = 5.0

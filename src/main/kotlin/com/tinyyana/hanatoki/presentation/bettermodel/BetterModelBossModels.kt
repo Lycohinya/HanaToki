@@ -148,7 +148,7 @@ class BetterModelBossModels(private val plugin: Plugin) : BossModels {
 
         override fun stop(animation: String) {
             if (closed) return
-            dispatch { it.stopAnimation(animation) }
+            dispatch { current -> onWorker(current) { current.stopAnimation(animation) } }
         }
 
         override fun setBase(animation: String) {
@@ -240,7 +240,18 @@ class BetterModelBossModels(private val plugin: Plugin) : BossModels {
             val modifier = AnimationModifier.builder()
                 .type(if (loop) AnimationIterator.Type.LOOP else AnimationIterator.Type.PLAY_ONCE)
                 .build()
-            t.animate(animation, modifier, Runnable { onEnd?.run() })
+            onWorker(t) { t.animate(animation, modifier, Runnable { onEnd?.run() }) }
+        }
+
+        /**
+         * rc.35：BetterModel 3.5.0 的 `Tracker.animate/stopAnimation/replace` 在 tracker 已排程時會在**呼叫端執行緒**同步跑 `animationTick()`，
+         * 把封包寫進與 BetterModel-Worker 共用的 viewBundler(`ArrayList`)，同時 worker 正在送出同一個 list(netty `BundlerInfo.unbundlePacket` 迭代)
+         * → `ConcurrentModificationException` → `EncoderException` → 玩家被踢(上游 3.5.1／HEAD 同樣程式碼，改設定無效)。
+         * 改排進 tracker 自己的佇列(`Tracker.task`，由 worker 在下一個偶數 frame、送封包之前執行)，所有動畫變動都跟 tick 同一條執行緒。
+         * 代價：最多晚約 50ms 才套用；永遠排佇列、不判斷 isScheduled，避免 check-then-act。`ensureVisibleTo`、scale、`setBoneVisible` 不動。
+         */
+        private fun onWorker(t: EntityTracker, action: () -> Unit) {
+            t.task(Runnable { action() })
         }
 
         private fun dispatch(action: (EntityTracker) -> Unit) {

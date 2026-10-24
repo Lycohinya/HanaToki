@@ -35,6 +35,19 @@ enum class GlideOrder(val id: String) {
 data class BossGlideSpec(val speed: Double, val dwellSeconds: Double, val order: GlideOrder)
 
 /**
+ * 定點(rc.35，選填)：戰鬥中 boss 站在 [marker] 加 [offset]([x, y, z] 方塊偏移)算出的定點，所有以她為中心的招式都從這裡算。
+ * 有定點就不再在 [BossSpec.points] 之間滑行：被搶燈滑行、被擊退或跪下之後，IDLE 時用既有的速度驅動(不傳送)以 [returnSpeed] 格/秒回到
+ * 離定點 [tolerance] 格內；還沒回到時，下一招最多再等 [maxWaitSeconds] 秒(逾時照放，不讓她卡住整場)。
+ */
+data class BossHomeSpec(
+    val marker: String,
+    val offset: List<Double>,
+    val returnSpeed: Double,
+    val tolerance: Double,
+    val maxWaitSeconds: Double,
+)
+
+/**
  * 一個階段:血量比例 <= [at] 就進入(第一階段 at = 1.0,進場即進入)。換階段的演出放 [onEnter]
  * (cues、音樂、title)。招式要幾階段才開放寫在招式自己的 `phase`。
  */
@@ -348,6 +361,8 @@ data class BossSpec(
     val heal: BossHealSpec = BossHealSpec(false, false),
     /** rc.30:載體的移動方式；預設 [BossMoveMode.TELEPORT] 同舊版。 */
     val moveMode: BossMoveMode = BossMoveMode.TELEPORT,
+    /** rc.35:定點；null = 沿 [points] 滑行(同舊版)。 */
+    val home: BossHomeSpec? = null,
 ) {
     val lampIds: List<String> get() = gems.map { it.lamp }
 }

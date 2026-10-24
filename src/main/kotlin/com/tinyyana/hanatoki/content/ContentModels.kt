@@ -153,8 +153,11 @@ sealed interface Condition {
     /** rc.26(只能用在 objective 的 until／while):這個 stage 有任何燈籠正在燃燒(含暫停中、尚未點亮)。 */
     data object LanternBurning : Condition
 
+    /** rc.35(只能用在 objective 的 until／while):這個 stage 有燈籠正被範圍干擾(interference，有活著的干擾者在範圍內)。 */
+    data object LanternInterfered : Condition
+
     /** 狀態型條件:隨時間來去或隨 stage 累積,只能用在 objective,不能當 stage 的完成條件。 */
-    val isTransient: Boolean get() = this is Powered || this is BossKneel || this is PoweredUsed || this is EnemyDispersed || this is Arrived || this is LanternBurning
+    val isTransient: Boolean get() = this is Powered || this is BossKneel || this is PoweredUsed || this is EnemyDispersed || this is Arrived || this is LanternBurning || this is LanternInterfered
 }
 
 // ---- scene.yml ----
@@ -226,7 +229,37 @@ data class LanternSpec(
     val hint: ObjectHint? = null,
     /** rc.30:遠距光束。提燈閃光從 [LanternBeam.range] 格內、視線正對、沒被擋住就能點燃，並持續照住(每次閃光續 [LanternBeam.sustainSeconds] 秒)燒燈。 */
     val beam: LanternBeam? = null,
+    /** rc.35:敵人在範圍內就干擾燒燈(暫停或倒退)；null = 這盞燈不受範圍干擾。 */
+    val interference: LanternInterference? = null,
 ) : ObjectSpec
+
+enum class InterferenceMode(val id: String) {
+    /** 範圍內有干擾者時燒燈進度不前進(不倒退)。 */
+    PAUSE("pause"),
+
+    /** 範圍內有干擾者時進度不前進，而且每隻每秒倒退 [LanternInterference.ratePerSecond] 個 burn-second(夾在 0，不回 UNLIT)。 */
+    REWIND("rewind");
+
+    companion object {
+        fun of(id: String): InterferenceMode? = entries.firstOrNull { it.id == id }
+    }
+}
+
+/**
+ * 燈籠的範圍干擾(rc.35，通用的守點干擾)：燈在 BURNING 時，水平距離 [radius] 內(高度差 <= 3)有活著、沒僵直的 [enemies]
+ * (enemies.yml id；空 = 不限種類)就干擾——[mode] pause 暫停前進、rewind 另外倒退。最多 [maxEnemies] 隻同時有效。
+ * 被閃光照住(僵直)、打散、離開範圍的不再干擾，所以閃光就是即時的解法。有干擾者時每 [cueEverySeconds] 秒在燈上播 [cues]，
+ * 並讓 objective 的 lantern-interfered 條件成立(目標列說明被干擾)。
+ */
+data class LanternInterference(
+    val enemies: Set<String>,
+    val radius: Double,
+    val mode: InterferenceMode,
+    val ratePerSecond: Double,
+    val maxEnemies: Int,
+    val cues: List<String>,
+    val cueEverySeconds: Double,
+)
 
 /**
  * 場邊燈的遠距光束(rc.30):閃光的視線與燈上方 2.5 格的夾角在 [angle] 度(全角)內、距離 <= [range] 就算照到；[requiresSight] = true 時

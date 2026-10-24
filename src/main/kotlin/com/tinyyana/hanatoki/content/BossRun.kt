@@ -274,7 +274,7 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
      * [held] = true(intro.await-arrive-dialogs 且 stage 有對話序列在播):出場後停在屋頂，停留與開打倒數都等 [releaseIntro] 才開始計。
      */
     fun start(held: Boolean = false) {
-        val first = host.markerPos(spec.points.first()) ?: Pt(0.0, 0.0, 0.0)
+        val first = restPoint() ?: Pt(0.0, 0.0, 0.0)
         val intro = spec.intro
         // 有出場演出:先在 intro marker(例如屋頂)現身,停一會兒再落到 then-glide-to;沒有就同舊版直接在第一個點
         val spawnAt = intro?.let { host.markerPos(it.marker) } ?: first
@@ -300,8 +300,18 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
 
     // ---- 出場演出 ----
 
+    /** rc.35:定點的世界座標(marker 加 offset)；沒寫 home = null。 */
+    private fun homePoint(): Pt? {
+        val h = spec.home ?: return null
+        val m = host.markerPos(h.marker) ?: return null
+        return Pt(m.x + h.offset[0], m.y + h.offset[1], m.z + h.offset[2])
+    }
+
+    /** 靜止時待的位置：定點，沒有定點就是 points 第一個。 */
+    private fun restPoint(): Pt? = homePoint() ?: spec.points.firstOrNull()?.let { host.markerPos(it) }
+
     private fun introLanding(intro: BossIntroSpec): Pt =
-        host.markerPos(intro.glideTo ?: spec.points.first()) ?: host.markerPos(spec.points.first()) ?: pos
+        intro.glideTo?.let { host.markerPos(it) } ?: restPoint() ?: pos
 
     private fun beginIntro(intro: BossIntroSpec, at: Pt) {
         introPhase = IntroPhase.HOLD
@@ -355,7 +365,7 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
         host.moveBoss(to)
         introPhase = IntroPhase.DONE
         resumeAnim()
-        host.log("boss-intro-done", "${spec.id} point=${intro.glideTo ?: spec.points.first()}")
+        host.log("boss-intro-done", "${spec.id} point=${intro.glideTo ?: (if (spec.home != null) "home" else spec.points.first())}")
     }
 
     private fun begin() {
@@ -388,22 +398,28 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
             }
             BossState.WIPED -> if (now >= restartAt) restartFight()
             BossState.IDLE -> {
-                glide()
-                if (now >= nextMoveAt) tryStartMove()
+                if (spec.home != null) goHome() else glide()
+                if (now >= nextMoveAt && homeReady()) tryStartMove()
             }
-            BossState.KNEELING -> if (now >= kneelEnd) rise()
-            BossState.RISING -> if (now >= riseEnd) {
-                state = BossState.IDLE
-                resumeAnim()
-                nextMoveAt = now + ticks(spec.gapSeconds)
-                checkShieldBreak()
+            BossState.KNEELING -> { pullToPos(); if (now >= kneelEnd) rise() }
+            BossState.RISING -> {
+                pullToPos()
+                if (now >= riseEnd) {
+                    state = BossState.IDLE
+                    resumeAnim()
+                    nextMoveAt = now + ticks(spec.gapSeconds)
+                    checkShieldBreak()
+                }
             }
-            BossState.PHASE_SHIFT -> if (now >= shiftEnd) {
-                state = BossState.IDLE
-                resumeAnim()
-                nextMoveAt = now + ticks(spec.gapSeconds)
+            BossState.PHASE_SHIFT -> {
+                pullToPos()
+                if (now >= shiftEnd) {
+                    state = BossState.IDLE
+                    resumeAnim()
+                    nextMoveAt = now + ticks(spec.gapSeconds)
+                }
             }
-            BossState.CASTING -> {}
+            BossState.CASTING -> pullToPos()
         }
         if (!fightActive) return
         if (downed.size > 0 && now >= nextHud) {
@@ -436,6 +452,49 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
             playAnim(spec.animations.idle, true)
             dwellUntil = now + ticks(spec.glide.dwellSeconds)
             targetIdx = nextPointIndex()
+        }
+    }
+
+    // ---- 定點(rc.35 home) ----
+
+    /** 有定點時，跪下、招式預警、階段切換期間不改邏輯位置，只把載體拉回邏輯位置(被擊退也一併拉回)，不傳送。 */
+    private fun pullToPos() {
+        if (spec.home != null) host.moveBoss(pos)
+    }
+
+    /** 離定點在 tolerance 內。沒有定點永遠 true。 */
+    private fun atHome(): Boolean {
+        val h = spec.home ?: return true
+        val p = homePoint() ?: return true
+        return pos.horizontalDistance(p) <= h.tolerance
+    }
+
+    /** 可以出招：在定點，或回定點等太久(max-wait-seconds，從該出招的時間起算)就照放。 */
+    private fun homeReady(): Boolean {
+        val h = spec.home ?: return true
+        return atHome() || host.now >= nextMoveAt + ticks(h.maxWaitSeconds)
+    }
+
+    /** IDLE 時往定點滑回去(returnSpeed 格/秒，每 TICK_PERIOD 一步，速度驅動不傳送)；在定點時也每 tick 把載體拉回邏輯位置。 */
+    private fun goHome() {
+        val h = spec.home ?: return
+        val target = homePoint() ?: return
+        if (pos.horizontalDistance(target) <= HOME_EPSILON && Math.abs(pos.y - target.y) <= HOME_EPSILON) {
+            if (gliding) { gliding = false; playAnim(spec.animations.idle, true) }
+            host.moveBoss(pos)
+            return
+        }
+        if (!gliding) {
+            gliding = true
+            host.log("boss-home", "return distance=${fmt(pos.horizontalDistance(target))}")
+            playAnim(spec.animations.glide, true)
+        }
+        val (next, arrived) = glideStep(pos, target, h.returnSpeed * TICK_PERIOD / 20.0)
+        pos = next
+        host.moveBoss(next)
+        if (arrived) {
+            gliding = false
+            playAnim(spec.animations.idle, true)
         }
     }
 
@@ -1131,7 +1190,7 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
             lastHitAt.clear()
         }
         if (w.phase == WipePhase.FIRST) phase = 1
-        val first = host.markerPos(spec.points.first()) ?: pos
+        val first = restPoint() ?: pos
         pos = first
         host.moveBoss(first)
         targetIdx = if (spec.points.size > 1) 1 else 0
@@ -1263,6 +1322,8 @@ class BossRun(private val host: BossHost, val spec: BossSpec, private val random
 
     companion object {
         const val TICK_PERIOD = 2L
+        /** rc.35:定點判定「已經到了」的距離(格)。 */
+        const val HOME_EPSILON = 0.05
         /** rc.26:出場等對話序列時，停留與開打倒數的占位時間（[BossRun.releaseIntro] 之前永遠不到）。 */
         const val HELD_FOREVER = Long.MAX_VALUE / 2
         const val SAMPLE_TICKS = 2L

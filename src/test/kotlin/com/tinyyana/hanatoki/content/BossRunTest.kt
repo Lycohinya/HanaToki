@@ -1379,4 +1379,45 @@ class BossRunTest {
         kneel(host, run)
         assertEquals(1, host.healed.size)
     }
+
+    // ---- rc.35 定點 home ----
+
+    private fun homeSpec(vararg ids: String, home: BossHomeSpec = BossHomeSpec("nun_point_a", listOf(0.0, 0.0, 6.0), 7.0, 1.5, 4.0)): BossSpec =
+        only(baseSpec, *ids).copy(gapSeconds = 0.5, points = emptyList(), home = home)
+
+    @Test
+    fun `rc35 定點：從定點出場，招式的原點就是定點，沒有 home 才在 points 之間滑行`() {
+        val (host, run) = setup(spec = homeSpec("sweep"))
+        host.positions[alice] = Pt(3.0, 0.0, 6.0)
+        run.start()
+        assertEquals(listOf(Pt(0.0, 0.0, 6.0)), host.spawnedAt, "沒有 intro 時直接在定點生成")
+        host.advance(62)
+        assertTrue(host.advanceUntil(600) { host.logged("boss-move-end").isNotEmpty() })
+        assertTrue(host.bossMoves.all { it == Pt(0.0, 0.0, 6.0) }, "整場都站在定點，不會往別的 points 滑")
+        assertTrue(host.logged("boss-home").isEmpty(), "一直在定點，沒有回程")
+        // 掃地以定點為中心:距定點 3 格的人被掃到(掃地預設 max-radius 9)
+        assertTrue(host.damage.any { it.first == alice })
+    }
+
+    @Test
+    fun `rc35 定點：搶燈滑走後用 return-speed 小步滑回，回到定點才出下一招，不傳送`() {
+        val base = snuffBurningSpec(0.5, stop = 5.0)
+        val spec = base.copy(points = emptyList(), home = BossHomeSpec("nun_point_a", listOf(0.0, 0.0, 0.0), 7.0, 1.5, 6.0))
+        val (host, run) = setup(spec = spec)
+        host.markers["boss_lamp_2"] = Pt(-24.0, 1.0, 0.0)
+        host.burningLamps += "boss_lamp_2"
+        host.fractions["boss_lamp_2"] = 0.8
+        begin(host, run)
+        assertTrue(host.advanceUntil(900) { host.logged("boss-snuff-warn").isNotEmpty() })
+        host.advance(40)
+        val away = host.bossMoves.last()
+        assertTrue(Math.hypot(away.x, away.z) > 10.0, "預警期間滑向遠處的燈:$away")
+        run.onSnuffFlash(alice)
+        assertTrue(host.advanceUntil(900) { host.logged("boss-home").isNotEmpty() }, "招式結束後開始回定點")
+        assertTrue(host.logged("boss-home").single().startsWith("boss-home return distance="))
+        val from = host.bossMoves.size
+        assertTrue(host.advanceUntil(600) { host.bossMoves.last() == Pt(0.0, 0.0, 0.0) })
+        val steps = host.bossMoves.drop(from - 1).zipWithNext { a, b -> Math.hypot(b.x - a.x, b.z - a.z) }
+        assertTrue(steps.all { it <= 7.0 * 2 / 20.0 + 1.0E-6 }, "每 2 tick 一步 <= 0.7 格(遠小於傳送門檻 6 格):${steps.maxOrNull()}")
+    }
 }
