@@ -1,5 +1,6 @@
 package com.tinyyana.hanatoki.testcontent
 
+import com.tinyyana.hanatoki.folia.BlockWrites
 import com.tinyyana.hanatoki.stage.DungeonBehavior
 import com.tinyyana.hanatoki.stage.StageContext
 import org.bukkit.Material
@@ -40,7 +41,7 @@ class PuzzleTestBehavior : DungeonBehavior {
             "goal-plate" to Material.LIGHT_WEIGHTED_PRESSURE_PLATE,
         ) + lampIds.associateWith { Material.COBBLESTONE }
         val futures = placements.mapNotNull { (id, mat) ->
-            ctx.interactionLocation(id)?.let { loc -> ctx.mutate(loc) { it.type = mat } }
+            ctx.interactionLocation(id)?.let { loc -> ctx.mutate(loc) { BlockWrites.set(it, mat) } }
         }
         CompletableFuture.allOf(*futures.toTypedArray()).whenComplete { _, _ ->
             ctx.submit { ctx.transition("puzzle") }
@@ -91,7 +92,7 @@ class PuzzleTestBehavior : DungeonBehavior {
         val lit = ctx.state.get("lit") as? MutableList<String>
             ?: mutableListOf<String>().also { ctx.state.set("lit", it) }
         lit += lampId
-        ctx.interactionLocation(lampId)?.let { loc -> ctx.mutate(loc) { it.type = Material.GLOWSTONE } }
+        ctx.interactionLocation(lampId)?.let { loc -> ctx.mutate(loc) { BlockWrites.set(it, Material.GLOWSTONE) } }
         ctx.messageAll("puzzle.lit", mapOf("count" to lit.size.toString()))
         when {
             lit.size < 3 -> return
@@ -103,14 +104,14 @@ class PuzzleTestBehavior : DungeonBehavior {
     private fun solvePuzzle(ctx: StageContext) {
         ctx.messageAll("puzzle.solved")
         val doorLoc = ctx.interactionLocation("door")
-        val future = doorLoc?.let { ctx.mutate(it) { block -> block.type = Material.AIR } }
+        val future = doorLoc?.let { ctx.mutate(it) { block -> BlockWrites.set(block, Material.AIR) } }
             ?: CompletableFuture.completedFuture(null)
         future.whenComplete { _, _ -> ctx.submit { ctx.transition("clear_path") } }
     }
 
     private fun wrongSolve(ctx: StageContext) {
         ctx.messageAll("puzzle.wrong")
-        val futures = lampIds.mapNotNull { id -> ctx.interactionLocation(id)?.let { loc -> ctx.mutate(loc) { it.type = Material.COBBLESTONE } } }
+        val futures = lampIds.mapNotNull { id -> ctx.interactionLocation(id)?.let { loc -> ctx.mutate(loc) { BlockWrites.set(it, Material.COBBLESTONE) } } }
         CompletableFuture.allOf(*futures.toTypedArray()).whenComplete { _, _ ->
             ctx.submit { ctx.transition("ambush") }
         }

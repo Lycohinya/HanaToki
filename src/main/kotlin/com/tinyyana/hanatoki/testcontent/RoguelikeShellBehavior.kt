@@ -1,5 +1,6 @@
 package com.tinyyana.hanatoki.testcontent
 
+import com.tinyyana.hanatoki.folia.BlockWrites
 import com.tinyyana.hanatoki.stage.DungeonBehavior
 import com.tinyyana.hanatoki.stage.StageContext
 import org.bukkit.Location
@@ -47,12 +48,12 @@ class RoguelikeShellBehavior : DungeonBehavior {
                     (ctx.anchor.blockY - 1).toDouble(),
                     (ctx.anchor.blockZ + dz).toDouble(),
                 )
-                floor += ctx.mutate(loc) { it.type = Material.DEEPSLATE_TILES }
+                floor += ctx.mutate(loc) { BlockWrites.set(it, Material.DEEPSLATE_TILES) }
             }
         }
         ctx.interactionLocation("extract")?.let { loc ->
-            floor += ctx.mutate(loc) { it.type = Material.LIGHT_WEIGHTED_PRESSURE_PLATE }
-            floor += ctx.mutate(loc.clone().add(0.0, -1.0, 0.0)) { it.type = Material.WAXED_OXIDIZED_CUT_COPPER }
+            floor += ctx.mutate(loc) { BlockWrites.set(it, Material.LIGHT_WEIGHTED_PRESSURE_PLATE) }
+            floor += ctx.mutate(loc.clone().add(0.0, -1.0, 0.0)) { BlockWrites.set(it, Material.WAXED_OXIDIZED_CUT_COPPER) }
         }
         return CompletableFuture.allOf(*floor.toTypedArray())
     }

@@ -14,6 +14,7 @@ import com.tinyyana.hanatoki.map.MapPos
 import com.tinyyana.hanatoki.map.MarkerKind
 import com.tinyyana.hanatoki.map.PlacedMap
 import com.tinyyana.hanatoki.map.PlacedPiece
+import com.tinyyana.hanatoki.folia.BlockWrites
 import com.tinyyana.hanatoki.folia.PlayerOp
 import com.tinyyana.hanatoki.hud.ActionBars
 import com.tinyyana.hanatoki.presentation.BossModelBones
@@ -186,7 +187,7 @@ class SessionRun(
     private var scanCursor: String? = null
 
     private val mutator = StageWorldMutator { location, data ->
-        if (!closed) ctx.mutate(location) { block -> block.blockData = data }
+        if (!closed) ctx.mutate(location) { block -> BlockWrites.set(block, data) }
     }
 
     // ---- 工具 ----
@@ -383,7 +384,7 @@ class SessionRun(
         for (edit in blocks) {
             val data = try { Bukkit.createBlockData(edit.block) } catch (t: Throwable) { warn("方塊「${edit.block}」無法解析,略過"); continue }
             val at = Location(world, (base.x + edit.dx).toDouble(), (base.y + edit.dy).toDouble(), (base.z + edit.dz).toDouble())
-            ctx.mutate(at) { block -> block.blockData = data }
+            ctx.mutate(at) { block -> BlockWrites.set(block, data) }
         }
     }
 
@@ -827,7 +828,7 @@ class SessionRun(
                 while (dz <= span) {
                     if (dx * dx + dy * dy + dz * dz <= r * r) {
                         val at = Location(world, center.blockX + dx.toDouble(), center.blockY + 1.0 + dy, center.blockZ + dz.toDouble())
-                        ctx.mutate(at) { block -> if (block.type.isAir) block.blockData = data }
+                        ctx.mutate(at) { block -> if (block.type.isAir) BlockWrites.set(block, data) }
                         placed++
                     }
                     dz += step
@@ -900,7 +901,7 @@ class SessionRun(
                         world,
                         (rt.marker.x + right.modX * column).toDouble(), (rt.marker.y + j).toDouble(), (rt.marker.z + right.modZ * column).toDouble(),
                     )
-                    ctx.mutate(at) { block -> block.setType(Material.AIR, false) }
+                    ctx.mutate(at) { block -> BlockWrites.set(block, Material.AIR) }
                 }
             }
         }
