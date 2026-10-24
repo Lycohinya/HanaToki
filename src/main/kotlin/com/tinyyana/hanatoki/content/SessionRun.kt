@@ -90,6 +90,11 @@ class SessionRun(
     private val collectPriorFailed = HashSet<UUID>()
     /** rc.36:收下提示的逐人保留——這位玩家的目標列在這個 tick 之前不重畫(不用全局的 [objectiveHoldUntil]，免得一個人收下就凍住隊友的目標列)。 */
     private val collectHoldUntil = HashMap<UUID, Long>()
+    /**
+     * rc.37:本局進過的 stage。收集物從它的 stage 開始起一直留到局結束(玩家撿到才對他隱藏)，不隨 stage 切換消失——
+     * 以前只在 stage 進行中才有，點亮燈籠使 stage 完成的那一刻，同段還沒撿的紙燈籤整批被收掉(2026-10-24 實玩「點燈時地上的紙籤消失」)。
+     */
+    private val reachedStages = HashSet<String>()
     private var collectProbing = false
     private var collectProbeAt = 0L
 
@@ -327,6 +332,9 @@ class SessionRun(
 
     private fun stageActive(stage: String?): Boolean = stage == null || stage == currentStage?.id
 
+    /** rc.37:收集物所屬 stage 這局進過了(沒寫 stage 的恆為 true)。見 [reachedStages]。 */
+    private fun collectStageReached(stage: String?): Boolean = stage == null || stage in reachedStages
+
     private fun markProgress() { lastProgress = now }
 
     private fun entryLocation(): Location = marker(spec.scene.entry).location(world)
@@ -438,6 +446,7 @@ class SessionRun(
         if (closed) return
         val stage = spec.stage(stageId) ?: run { warn("stage $stageId 不在 stages.yml"); return }
         currentStage = stage
+        reachedStages += stageId
         for (other in scopedRuns.keys.toList()) if (other != stageId) cancelScopedRuns(other)
         clearTransient("stage")
         poweredUsed = false
@@ -1813,12 +1822,20 @@ class SessionRun(
         if (now % 4L == 0L) probeCollect()
     }
 
-    /** 浮空實體:所屬 stage 進行中才有(隱藏著生成)；開給誰由 [reconcileCollectViewers] 決定。擺姿勢的做法同 power-up prop。 */
+    /** 浮空實體:所屬 stage 進過之後才有、一直留到局結束(隱藏著生成)；開給誰由 [reconcileCollectViewers] 決定。擺姿勢的做法同 power-up prop。 */
     private fun syncCollectProp(rt: CollectRt) {
         val prop = rt.spec.prop ?: return
-        val want = !closed && stageActive(rt.spec.stage)
+        val want = !closed && collectStageReached(rt.spec.stage)
         val propId = collectPropId(rt)
         if (want) {
+            // rc.37:實體不見了(區塊卸載等，PropController.setViewer 判定後從登記表拿掉)→ 清掉可見記帳，下面照常在原位重生並重新開給還沒撿的人
+            if (rt.propOn && rt.propReady && !core.propController.isRegistered(sessionId, propId)) {
+                rt.propOn = false
+                rt.propReady = false
+                rt.book.clear()
+                rt.pending.clear()
+                log("collect-prop-restore", rt.spec.id)
+            }
             if (!rt.propOn) {
                 val material = Material.matchMaterial(prop.item)
                 if (material == null) {
@@ -1914,7 +1931,7 @@ class SessionRun(
     private fun probeCollect() {
         if (collectProbing && now - collectProbeAt <= PROBE_STALE_TICKS) return
         val mem = members()
-        val open = collects.values.any { rt -> stageActive(rt.spec.stage) && mem.any { !collectLedger.has(it, rt.spec.id) } }
+        val open = collects.values.any { rt -> collectStageReached(rt.spec.stage) && mem.any { !collectLedger.has(it, rt.spec.id) } }
         if (!open) return
         collectProbing = true
         collectProbeAt = now
@@ -1928,7 +1945,7 @@ class SessionRun(
                 for ((id, pos) in positions) {
                     if (id !in current || id in quitMembers || isDowned(id)) continue
                     for (rt in collects.values) {
-                        if (!stageActive(rt.spec.stage) || collectLedger.has(id, rt.spec.id)) continue
+                        if (!collectStageReached(rt.spec.stage) || collectLedger.has(id, rt.spec.id)) continue
                         val l = rt.loc
                         if (CollectRules.within(pos[0], pos[1], pos[2], l.x, l.y, l.z, rt.spec.prop?.height ?: 1.0, rt.spec.radius)) pickUpCollectible(rt, id)
                     }
@@ -1958,7 +1975,7 @@ class SessionRun(
 
     /**
      * rc.36:目標文字 `{collect:left}`:這位玩家在**目前這個 stage**終身還沒收過的藏點數，套 texts `<dungeonId>.collect.left-format`(`{n}` = 數字)。
-     * 沒有收集物、已全收、查不到終身紀錄(沒有 port／失敗／還沒回來)或沒寫格式 = 空字串。藏點只在所屬 stage 進行中才收得到，所以這是玩家這一段唯一的提醒。
+     * 沒有收集物、已全收、查不到終身紀錄(沒有 port／失敗／還沒回來)或沒寫格式 = 空字串。數的是目前這一段；收集物進過那一段之後一直留到局結束(見 [reachedStages])，走回頭也還收得到。
      */
     private fun collectLeftText(playerId: UUID): String {
         if (collects.isEmpty()) return ""

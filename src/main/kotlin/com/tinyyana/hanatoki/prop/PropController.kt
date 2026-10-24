@@ -23,6 +23,9 @@ class PropController(private val plugin: Plugin, private val sessionActive: java
 
     private val props = ConcurrentHashMap<String, Entity>()
 
+    /** rc.37:[spawnViewerPart] 生成的位置(登記鍵 → 位置)。實體被區塊卸載收掉後，靠它判斷「這個區塊是我方 region 的、實體卻不在」= 部件不見了。 */
+    private val homes = ConcurrentHashMap<String, Location>()
+
     private fun key(sessionId: UUID, propId: String) = "$sessionId#$propId"
 
     private companion object {
@@ -31,6 +34,9 @@ class PropController(private val plugin: Plugin, private val sessionActive: java
     }
 
     fun handleFor(sessionId: UUID): PropHandle = SessionPropHandle(sessionId)
+
+    /** rc.37:這個部件還在登記表裡(被 [setViewer] 判定實體已不見而移除、或從沒生成成功 = false)。引擎用它決定要不要重生。 */
+    fun isRegistered(sessionId: UUID, propId: String): Boolean = props.containsKey(key(sessionId, propId))
 
     fun despawnAllForSession(sessionId: UUID): CompletableFuture<Void> = synchronized(props) {
         val prefix = "$sessionId#"
@@ -63,6 +69,7 @@ class PropController(private val plugin: Plugin, private val sessionActive: java
     fun spawnViewerPart(sessionId: UUID, propId: String, location: Location, item: ItemStack, glow: Boolean, viewRange: Float): CompletableFuture<Void> {
         val k = key(sessionId, propId)
         props.remove(k)?.let { old -> WorldOp.dispatch(plugin, old) { it.remove() } }
+        homes[k] = location.clone()
         return WorldOp.dispatchAt(plugin, location) { loc ->
             if (!sessionActive.test(sessionId)) return@dispatchAt
             val world = loc.world ?: return@dispatchAt
@@ -91,16 +98,23 @@ class PropController(private val plugin: Plugin, private val sessionActive: java
      * 因為 [spawnViewerPart] 設了 `isVisibleByDefault = false`，「可見」= 這個插件有 showEntity 過；hideEntity 就是撤銷它。
      */
     fun setViewer(sessionId: UUID, propId: String, viewer: org.bukkit.entity.Player, visible: Boolean): CompletableFuture<Boolean> {
-        val entity = props[key(sessionId, propId)] ?: return CompletableFuture.completedFuture(false)
+        val registered = key(sessionId, propId)
+        val entity = props[registered] ?: return CompletableFuture.completedFuture(false)
         val future = CompletableFuture<Boolean>()
         val scheduled = viewer.scheduler.run(
             plugin,
             { _ ->
                 var applied = false
                 try {
-                    if (org.bukkit.Bukkit.isOwnedByCurrentRegion(entity) && entity.isValid) {
+                    val owned = org.bukkit.Bukkit.isOwnedByCurrentRegion(entity)
+                    if (owned && entity.isValid) {
                         if (visible) viewer.showEntity(plugin, entity) else viewer.hideEntity(plugin, entity)
                         applied = true
+                    } else if (visible && isGone(registered, entity, owned)) {
+                        // rc.37:實體不見了(區塊卸載時非持久實體被收掉、被別的清理移除)。從登記表拿掉，引擎看到 isRegistered 變 false 就在原位重生
+                        if (props.remove(registered, entity)) {
+                            homes[registered]?.let { plugin.logger.info("[HanaToki] prop $propId 的實體不見了(${it.blockX},${it.blockY},${it.blockZ})，交給引擎重生") }
+                        }
                     }
                 } catch (t: Throwable) {
                     plugin.logger.warning("[HanaToki] prop $propId 對 ${viewer.name} ${if (visible) "顯示" else "隱藏"}失敗:${t.javaClass.simpleName}: ${t.message}")
@@ -112,6 +126,17 @@ class PropController(private val plugin: Plugin, private val sessionActive: java
         )
         if (scheduled == null) future.complete(false)
         return future
+    }
+
+    /**
+     * 部件實體不見了嗎(在觀看者的 region 執行緒呼叫)。[owned] = 實體屬於目前 region:此時 `!isValid` 就是不見了。
+     * 實體不屬於目前 region 有兩種可能:在別的 region(離太遠，不能判斷)，或所在區塊就是我方的但實體已經不在
+     * (區塊卸載又載入，非持久實體不會回來)。後者靠生成位置所在的區塊是不是歸目前 region 來認。
+     */
+    private fun isGone(k: String, entity: Entity, owned: Boolean): Boolean {
+        if (owned) return !entity.isValid
+        val home = homes[k] ?: return false
+        return runCatching { org.bukkit.Bukkit.isOwnedByCurrentRegion(home) }.getOrDefault(false)
     }
 
     /** 擺設是不是副本生出來的(死亡掉落清除/debug 反查用,同 actor/encounter)。 */

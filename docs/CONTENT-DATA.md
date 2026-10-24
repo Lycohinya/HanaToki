@@ -1,4 +1,4 @@
-# 資料驅動副本內容（1.0.0-rc.36）
+# 資料驅動副本內容（1.0.0-rc.37）
 
 內容插件只給 **一個資料夾 + texts**，行為由框架內建的 `DataDrivenBehavior` 依資料執行，內容端不寫 Kotlin。另做一座副本只換設定檔與資產。判準：加第 N+1 盞燈籠、第 N+1 種幽靈、第 N+1 段提示，只改一筆 YAML。
 
@@ -278,7 +278,7 @@ objects:
   collect_entry_1:
     type: collectible
     marker: collect_entry_1      # 必填，trigger marker
-    stage: front_court           # 選填；只在該 stage 進行中可收
+    stage: front_court           # 選填；進過該 stage 之後可收，並一直留到局結束（rc.37 起不隨 stage 切換消失）
     radius: 1.5                  # 預設 1.5（0.5..8）：身體中心到浮空實體中心的距離
     n: "一"                      # ActionBar 的 {n}（文字，引擎不換算，例如國字）
     found-first: mist-patrol.collect.found-first    # 選填 texts key；終身第一次（或沒有收集紀錄 port）時送
@@ -293,6 +293,8 @@ objects:
 ActionBar 佔位符：`{n}`＝`n`、`{found}`＝這位玩家的終身進度（有 `CollectionPort` 時 = 終身已收的 ∪ 本局收的；沒有時只算本局）、`{total}`＝這個內容的 collectible 物件數。**逐人可見**：實體生成時 `isVisibleByDefault = false`，每 10 tick 與每次有人收下時對帳，只對「在線成員且本局沒收過」的人 `showEntity`；重連（新 Player 物件）、離線、離場、局結束時記帳清掉，重連後已收過的不會再開。偵測每 4 tick 一次 `memberPositions()`，在 anchor 執行緒對所有藏點量距離（倒下的成員不能收）。收下當下的寫入順序：本局收集帳 → stats `collect.<物件 id>`（整局合計）與 `collect.<物件 id>.<玩家 UUID>`（逐人，結算讀這個，**不要用 `CompletionResult.statFor`**——它在逐人鍵不存在時會退回整局合計，沒收到的人會被當成收過）→ log → cue → ActionBar → 關掉那位的實體。終身「是否收過」由 `CollectionPort`（選填，見 API.md rc.32）提供，沒有實作者或查詢失敗一律當第一次。
 
 **目標列的 `{collect:left}`**（rc.36）：這位玩家在目前這個 stage 終身還沒收過的藏點數，套 texts `<dungeonId>.collect.left-format`（`{n}` = 數字），例如「這一區還藏著 {n} 張紙燈籤」。沒有 collectible、這一段已全收、查不到終身紀錄（沒有 `CollectionPort`、失敗、還沒回來）或沒寫格式 = 空字串；放在目標文字尾端就會在沒東西時自己消失。每次重畫目標列更新，收下當下標記重畫。**收下提示的保留**：objective 每秒重畫的 ActionBar 會在一秒內把收下的提示蓋掉，所以收下後那一位玩家的目標列暫停 `hold-seconds` 秒（逐人，隊友的目標列照畫）。
+
+**展示的生命週期**（rc.37）：浮空展示從它的 `stage` 開始時生成，一直留到局結束；只有「那位玩家撿到」才對他隱藏（隊友照樣看得到），stage 切換（點亮燈籠使 stage 完成）、清場、光效與 cue 都不動它。修掉的問題：以前展示只在所屬 stage 進行中才存在，點亮燈籠使 stage 完成的那一刻，同段還沒撿的紙燈籤整批消失（2026-10-24 實玩）。展示意外不見（區塊卸載後非持久實體不會回來等）時，下一次對玩家開／關發現生成位置的區塊是自己 region 的、實體卻不在，就從登記表拿掉並記 log `prop ... 的實體不見了`，引擎隨後在原位重生並重新開給還沒撿的人（log `collect-prop-restore <spotId>`）。
 
 **中途離場與逾時的收集結算**（rc.34）：宣告了 collectible 的副本，玩家沒通關就離開時，已收到的東西不會憑空消失。引擎對**自己有逐人收集帳**（`collect.<物件 id>.<玩家 UUID>` > 0）的玩家補一筆 `CompletionResult`：自願離開、換世界、死亡後被請出、管理員踢出 → resultKey `left`（個別結算，其他成員與 session 不受影響）；整局逾時（session 時限）→ resultKey `timeout`，對結束當下名單上有收集帳的每位成員各一筆。帶整份 stats 快照，durationMs 算到這一刻。這不是通關：不結束 session、不改踢出與收尾流程，結算失敗只記 log。每位玩家每局最多一筆（先離場再逾時、或個別結算後再離場都不會重複）。沒有 collectible 的副本沒有收集帳，不觸發。這兩個 key 要不要發東西由獎勵端的規則決定（沒寫規則 = 沒有獎勵）。不涵蓋：離線寬限逾時被移出（人不在線發不出去）、全員離線結束、伺服器關閉、管理員重設與常駐副本。
 
@@ -755,6 +757,7 @@ rc.22 新增（紙燈別院全程契約的 tag，bot 認這些字串；`<enemyId
 | `doll-frozen <enemyId> watcher=<player>` | 人偶從移動轉為凍結（每次轉換一行）；另有 `doll-pose <enemyId> pose=<id>` 記這次挑的姿勢 |
 | `doll-dispersed <enemyId> by=<player>` | frozen-when-watched 的敵人被玩家打散（光圈清場不記；仍有 `enemy-dissolve … by=lantern`） |
 | `power-up-taken <objectId> player=<player>` | 有人碰到 power-up；`power-up <id> taken->ready` 是重生 |
+| `collect-prop-restore <spotId>` | rc.37 浮空展示不見了（區塊卸載等），引擎在原位重生 |
 | `collect-found <spotId> player=<player> first=<true｜false>` | rc.32 有人收下探索收集物；`first` = 終身第一次（沒有收集紀錄 port 時恆為 true） |
 | `lantern-interfered <objectId> enemies=<n> mode=<pause｜rewind> progress=<0..1>` | rc.35 燈籠進入範圍干擾（干擾者從 0 變成 > 0 時一行）；`lantern-interference-end <objectId> progress=<p>` 干擾結束 |
 | `wave-cancel <encounterId> reason=<stage-complete｜stage-left｜…>` | 波次被收掉；rc.35 起 stage 完成與跨 stage 到期的計時都會取消，光圈清場照舊不寫 reason |
