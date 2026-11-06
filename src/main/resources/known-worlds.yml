@@ -6,4 +6,5 @@ worlds:
   hanatoki_roguelike: {auto-save: true}
   hanatoki_pale_cherry: {auto-save: true}
   hanatoki_pandora_echo: {auto-save: true}
+  hanatoki_pandora_taikei: {auto-save: true}
   hanatoki_rain_court: {auto-save: true}

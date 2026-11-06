@@ -15,7 +15,7 @@ class KnownDungeonWorldsTest {
         seed.writeText(File("src/main/resources/known-worlds.yml").readText())
         val worlds = KnownDungeonWorlds(seed).read()
         assertEquals(
-            setOf("hanatoki_tachizuka", "hanatoki_roguelike", "hanatoki_pale_cherry", "hanatoki_pandora_echo", "hanatoki_rain_court"),
+            setOf("hanatoki_tachizuka", "hanatoki_roguelike", "hanatoki_pale_cherry", "hanatoki_pandora_echo", "hanatoki_pandora_taikei", "hanatoki_rain_court"),
             worlds.keys,
         )
         assertEquals(listOf("hanatoki_tachizuka"), worlds.filterValues { !it }.keys.toList())

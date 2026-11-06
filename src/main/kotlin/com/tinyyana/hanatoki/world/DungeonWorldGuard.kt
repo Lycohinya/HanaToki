@@ -76,6 +76,19 @@ class DungeonWorldGuard(private val core: HanaTokiCore) : Listener {
         if (deny(event.player, event.block.world.name)) event.isCancelled = true
     }
 
+    /** 骨粉與點火也會改方塊:持久場地不會還原這些。 */
+    @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
+    fun onFertilize(event: org.bukkit.event.block.BlockFertilizeEvent) {
+        val player = event.player ?: return
+        if (deny(player, event.block.world.name)) event.isCancelled = true
+    }
+
+    @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
+    fun onIgnite(event: org.bukkit.event.block.BlockIgniteEvent) {
+        val player = event.player ?: return
+        if (deny(player, event.block.world.name)) event.isCancelled = true
+    }
+
     @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
     fun onMultiPlace(event: BlockMultiPlaceEvent) {
         if (deny(event.player, event.block.world.name)) event.isCancelled = true
