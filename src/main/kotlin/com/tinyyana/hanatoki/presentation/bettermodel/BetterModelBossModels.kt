@@ -87,8 +87,10 @@ class BetterModelBossModels(private val plugin: Plugin) : BossModels {
         // 回傳值本身不留著(見 class KDoc:reload 之後會換一顆新物件,Handle 一律用
         // resolveTracker() 重新查),這裡呼叫只是為了讓 BetterModel 真的建立並登記它。
         // alwaysVisible:關掉這顆 tracker 的 sight-trace(config.yml sight-trace: true 時，大模型中心點被牆或屋頂擋住就不送)
-        if (alwaysVisible) renderer.create(BaseEntity.of(BukkitAdapter.adapt(entity)), TrackerModifier.DEFAULT.toBuilder().sightTrace(false).build())
+        val created = if (alwaysVisible) renderer.create(BaseEntity.of(BukkitAdapter.adapt(entity)), TrackerModifier.DEFAULT.toBuilder().sightTrace(false).build())
         else renderer.create(BaseEntity.of(BukkitAdapter.adapt(entity)))
+        turnAsOne(created)
+        plugin.logger.info("HANATOKI-MODEL-ROTATOR model=$modelId owner=$owner head=0 delay=0 duration=$BODY_TURN_TICKS")
         val key = newKey(owner)
         val handle = Handle(modelId, key, entity)
         registry.put(owner, key, handle)
@@ -118,6 +120,27 @@ class BetterModelBossModels(private val plugin: Plugin) : BossModels {
         BetterModel.modelOrNull(modelId)?.animations()?.keys ?: emptySet()
 
     private fun newKey(owner: String) = "$owner#${UUID.randomUUID()}"
+
+    /**
+     * Boss 頭身一起轉。BetterModel 預設(`EntityBodyRotator.defaultData`)頭可以比身體多轉 ±75°,
+     * 身體延遲 10 tick 再花 10 tick 才跟上:頭骨(`h_`)立刻轉、身體骨頭慢慢跟,
+     * 掛在身體上靠近臉的部件(領口、帽兜、頭髮)轉身時會慢半拍穿進臉裡。
+     * 2026-11-07 TinyYana 實測「BOSS 轉身的時候，臉部裡面的素材會慢半拍，這在每一個有3D模型的boss都有發生」。
+     * reload 會換一顆新 tracker,[Handle.dispatch] 偵測到時再設一次。
+     */
+    private fun turnAsOne(tracker: EntityTracker) {
+        tracker.bodyRotator().setValue { d ->
+            d.setMinHead(0f)
+            d.setMaxHead(0f)
+            d.setRotationDelay(0)
+            d.setRotationDuration(BODY_TURN_TICKS)
+        }
+    }
+
+    private companion object {
+        /** 身體轉向的平滑 tick 數:和 config.yml lerp-frame-time 同一個量級,轉身不跳格也不拖。 */
+        const val BODY_TURN_TICKS = 4
+    }
 
     private inner class Handle(
         override val modelId: String,
@@ -262,6 +285,7 @@ class BetterModelBossModels(private val plugin: Plugin) : BossModels {
                     // reload 換了一顆新的 EntityTracker——縮放已經由 TrackerData.applyAs 帶過來
                     // (見 class KDoc),但動畫沒有,這裡補播基底動畫。
                     lastSeenTracker = current
+                    turnAsOne(current)
                     baseAnimation?.let { anim -> animateOn(current, anim, true, null) }
                 }
                 action(current)
