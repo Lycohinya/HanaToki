@@ -41,4 +41,7 @@ class BossModelOwnerRegistry<H : AutoCloseable> {
 
     /** 每個 owner 名下的 handle 數(空的 owner 不列)。 */
     fun ownerCounts(): Map<String, Int> = keysByOwner.mapValues { it.value.size }.filterValues { it > 0 }
+
+    /** 每個 owner 名下目前的 handle(owner 與 handle 成對;admin 檢查用,拿到的是當下的快照)。 */
+    fun handlesByOwner(): List<Pair<String, H>> = keysByOwner.flatMap { (owner, keys) -> keys.mapNotNull { k -> byKey[k]?.let { owner to it } } }
 }

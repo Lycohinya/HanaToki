@@ -86,9 +86,11 @@ class BetterModelBossModels(private val plugin: Plugin) : BossModels {
         }
         // 回傳值本身不留著(見 class KDoc:reload 之後會換一顆新物件,Handle 一律用
         // resolveTracker() 重新查),這裡呼叫只是為了讓 BetterModel 真的建立並登記它。
-        // alwaysVisible:關掉這顆 tracker 的 sight-trace(config.yml sight-trace: true 時，大模型中心點被牆或屋頂擋住就不送)
-        val created = if (alwaysVisible) renderer.create(BaseEntity.of(BukkitAdapter.adapt(entity)), TrackerModifier.DEFAULT.toBuilder().sightTrace(false).build())
-        else renderer.create(BaseEntity.of(BukkitAdapter.adapt(entity)))
+        // rc.41:Boss 模型一律關掉 sight-trace,不管 alwaysVisible。BetterModel 3.5.0 的 sight-trace 是視角檢查
+        // (EntityUtil.canSee:距離超過 min-sight 5 格、玩家視線偏離模型就略過這一刻的變換封包,轉回來也不補送)。
+        // 每 0.15 秒換一格的頭髮與臉部卡很快追上,整段只送一次的姿勢(對景跌坐的 hips/chest/head)就一直停在舊姿勢:
+        // 2026-11-07 TinyYana 實測「打到她坐下，臉跑到下面」= 臉已坐下、身體還站著。實戰封包量測與 inspect 見 taikei-fight.js --pose-trace。
+        val created = renderer.create(BaseEntity.of(BukkitAdapter.adapt(entity)), TrackerModifier.DEFAULT.toBuilder().sightTrace(false).build())
         turnAsOne(created)
         plugin.logger.info("HANATOKI-MODEL-ROTATOR model=$modelId owner=$owner head=0 delay=0 duration=$BODY_TURN_TICKS")
         val key = newKey(owner)
@@ -113,6 +115,10 @@ class BetterModelBossModels(private val plugin: Plugin) : BossModels {
     override fun trackerCount(owner: String): Int = registry.countOwner(owner)
 
     override fun trackerOwners(): Map<String, Int> = registry.ownerCounts()
+
+    override fun inspectLive(ownerFilter: String?): List<String> = registry.handlesByOwner()
+        .filter { (owner, _) -> ownerFilter.isNullOrBlank() || owner.contains(ownerFilter, ignoreCase = true) }
+        .flatMap { (owner, handle) -> handle.describeBones(owner) }
 
     override fun modelIds(): Collection<String> = BetterModel.modelKeys()
 
@@ -158,6 +164,14 @@ class BetterModelBossModels(private val plugin: Plugin) : BossModels {
             BetterModel.registryOrNull(boundEntity.uniqueId)?.tracker(modelId)
 
         override val isActive: Boolean get() = !closed && resolveTracker()?.isClosed == false
+
+        /** [inspectLive] 的一段:每根骨頭目前的動畫(沒有就是「-」),按動畫分組。只讀狀態,任何執行緒都可以呼叫。 */
+        fun describeBones(owner: String): List<String> {
+            val t = resolveTracker() ?: return listOf("$owner $modelId: 沒有 tracker")
+            val groups = t.bones().groupBy { bone -> bone.runningAnimation()?.let { "${it.name()}(${it.type().name.lowercase()})" } ?: "-" }
+            return listOf("$owner $modelId base=${baseAnimation ?: "-"} bones=${t.bones().size}") +
+                groups.entries.sortedByDescending { it.value.size }.map { (anim, bones) -> "  $anim ×${bones.size}: " + bones.joinToString(",") { it.name().rawName() } }
+        }
 
         override fun play(animation: String, loop: Boolean, onEnd: Runnable?): Boolean {
             if (closed) return false

@@ -34,8 +34,9 @@ interface BossModels {
     fun bind(owner: String, entity: Entity, modelId: String): BossModelHandle?
 
     /**
-     * rc.28:同 [bind]，[alwaysVisible] = true 時這顆 tracker 關掉 BetterModel 的 sight-trace 剔除(大型 boss 模型不會因為
-     * 中心點被屋頂、牆擋住就整隻不送給玩家)。預設實作忽略旗標、等同 [bind]。
+     * rc.28 加的旗標;rc.41 起 BetterModel 實作一律關掉 sight-trace,旗標只留著相容。
+     * sight-trace 其實是視角檢查(5 格外、玩家沒看著模型就不送這一刻的變換,轉回來也不補),
+     * 會讓長時間停在同一姿勢的骨頭卡在舊姿勢,見 BetterModelBossModels.bind。預設實作忽略旗標、等同 [bind]。
      */
     fun bind(owner: String, entity: Entity, modelId: String, alwaysVisible: Boolean): BossModelHandle? = bind(owner, entity, modelId)
 
@@ -59,6 +60,12 @@ interface BossModels {
 
     /** 目前每個 owner 名下的 handle 數(admin entities 找外洩用)。預設實作回空。 */
     fun trackerOwners(): Map<String, Int> = emptyMap()
+
+    /**
+     * 正在跑的 Boss 模型,每根骨頭目前由哪支動畫驅動(admin model inspect 用,查「部分骨頭不更新」這類問題)。
+     * 每個 handle 一段:第一行 owner 與模型,其後每行「動畫名(類型): 骨頭…」。[ownerFilter] 為空就全列。
+     */
+    fun inspectLive(ownerFilter: String?): List<String> = emptyList()
 }
 
 /** BetterModel 沒裝/沒啟用時的退回實作——全部方法安全地什麼都不做。 */

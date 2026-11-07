@@ -276,6 +276,12 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
      * hitbox/傷害)不在這裡——這裡只驗證 BetterModel 那一側的呈現(模型/動畫/locator)能不能動。
      */
     private fun handleModelDebug(sender: CommandSender, args: Array<out String>) {
+        // inspect 看的是正在打的 Boss(不是自己生的 debug 模型),主控台/RCON 也能用
+        if (args.getOrNull(2).equals("inspect", true)) {
+            val lines = core.bossModels.inspectLive(args.getOrNull(3))
+            if (lines.isEmpty()) sender.sendMessage("§7目前沒有正在跑的 Boss 模型") else lines.forEach { sender.sendMessage("§7$it") }
+            return
+        }
         val player = sender as? Player ?: run { sender.sendMessage("§c只有玩家能用這個 debug 指令"); return }
         if (!core.bossModels.available) { sender.sendMessage("§c沒有裝 BetterModel,這個 debug 指令用不了"); return }
         val owner = "debug:${player.uniqueId}"
@@ -359,7 +365,7 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
                 debugModels.remove(player.uniqueId)
                 sender.sendMessage("§a已清除 debug 模型")
             }
-            else -> sender.sendMessage("§7/hanatoki admin model <spawn <modelId> [scale]|play <anim>|base <anim>|stop <anim>|showcase [秒]|locators|list|clear>")
+            else -> sender.sendMessage("§7/hanatoki admin model <spawn <modelId> [scale]|play <anim>|base <anim>|stop <anim>|showcase [秒]|locators|list|clear|inspect [owner]>")
         }
     }
 
@@ -405,7 +411,7 @@ class HanaTokiCommand(private val core: HanaTokiCore) : CommandExecutor, TabComp
             args[0].equals("admin", true) && args[1].equals("restore", true) ->
                 core.instanceInventory.snapshotRecords().map { it.instanceId.toString() }
             args[0].equals("admin", true) && args[1].equals("model", true) ->
-                listOf("spawn", "play", "base", "stop", "showcase", "locators", "list", "clear")
+                listOf("spawn", "play", "base", "stop", "showcase", "locators", "list", "clear", "inspect")
             args[0].equals("admin", true) && args[1].equals("entities", true) ->
                 listOf("all") + core.sessionManager.snapshot().map { it.slotId }
             else -> emptyList()
